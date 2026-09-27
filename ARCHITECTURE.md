@@ -68,27 +68,35 @@ suite uses for isolation):
 
 - `~/.ctx/ctx.db` — SQLite database (metadata only).
 - `~/.ctx/config.json` — user config.
-- `~/.ctx/secrets/secret.key` — 32-byte AES key (`0600`).
-- `~/.ctx/secrets/secrets.json` — AES-256-GCM ciphertext (`0600`).
+- `~/.ctx/secrets/secrets.dpapi.json` — DPAPI-protected blobs (Windows default; **no key file**).
+- `~/.ctx/secrets/secret.key` + `secrets.json` — AES key + ciphertext (encrypted-file fallback only).
 
-### Schema (migration v1)
+### Schema
+
+Migration **v1** created:
 
 - **`repos`** — `id`, `identity` (unique), `name`, `remote_url`, `root_path`,
   `has_remote`, timestamps.
-- **`preferences`** — `id`, `rule`, `normalized` (similarity key), `category`,
-  `scope`, `repo_id?`, `status`, `confidence`, `created_at`, `updated_at`,
-  `last_used_at?`.
+- **`preferences`** — `id`, `rule`, `normalized`, `category`, `scope`, `repo_id?`,
+  `status`, `confidence`, `created_at`, `updated_at`, `last_used_at?`.
 - **`evidence`** — `id`, `preference_id`, `source`, `repo_id?`, `evidence_text`,
   `created_at`.
-- **`environments`** — `id`, `name`, `scope`, `repo_id?`, `risk_level`,
-  `description?`, timestamps.
-- **`environment_variables`** — `id`, `environment_id`, `var_name`,
-  **`secret_ref`** (opaque pointer into the secret store — *never a value*),
-  `created_at`.
+- **`environments`** / **`environment_variables`** — the latter holds only a
+  `var_name` and an opaque **`secret_ref`** (*never a value*).
+
+Migration **v2** added the correctness/concurrency columns:
+
+- `preferences.domain`, `preferences.polarity` — conflict detection & dedup.
+- `preferences.version` — optimistic-concurrency compare-and-swap.
+- `preferences.dedup_key` + a **partial unique index** (proposed/observed) —
+  race-free proposal dedup.
+- `evidence.agent_id`, `evidence.session_id` — provenance.
+- `evidence.text_hash` + a **partial unique index** — atomic evidence dedup.
 
 Migrations are an ordered list in `src/storage/sqlite/migrations.ts`, tracked in a
-`schema_migrations` table and applied transactionally. Shipped migrations are
-never edited — schema evolution means appending a new migration.
+`schema_migrations` table and applied inside `IMMEDIATE` transactions that re-check
+the applied version — safe under concurrent first-run. Shipped migrations are never
+edited — schema evolution means appending a new migration.
 
 **Designed for future scope.** `scope` is a free `TEXT` column validated in the
 app layer, so adding an `org`/`team` scope later only requires a new migration
@@ -104,19 +112,24 @@ adapter-agnostic entry point. Given `{ cwd, task, limit, includeProposed }` it:
 2. **Gathers candidates** — all global preferences plus this repo's preferences,
    filtered to in-effect statuses (`locked`, `approved`) by default; proposals
    are included only when explicitly requested.
-3. **Ranks by relevance** to the task, blending lexical task/rule coverage with a
-   small base weight from status and confidence (so authoritative rules aren't
-   buried and zero-overlap rules still surface when there is room).
-4. **Resolves conflicts** — among near-duplicate rules in the same category, the
-   highest-precedence one is kept and the rest are reported in `overridden`.
-5. **Trims to a concise set** — roughly 5–15 (default 12, hard-capped at 15). It
-   deliberately does **not** return everything stored.
-6. **Marks the returned preferences as used** (`last_used_at`).
-7. **Attaches environments** applicable to the repo, with an `available` flag but
+3. **Infers the task's domains** (package-manager, database, ui-framework, …) and
+   its distinctive terms, after removing stopwords AND generic engineering verbs
+   (`add`, `change`, `create`, `fix`, …) so filler words no longer drive matches.
+4. **Scores each candidate** by strong signals — matching domain (0.5), matching
+   category (0.2), IDF-weighted distinctive-term overlap (0.35), plus small
+   repo/locked/approved bonuses — and **drops anything below a relevance
+   threshold**. Weak incidental lexical overlap is not enough to be returned.
+5. **Resolves conflicts by domain** (see below) and reports superseded rules in
+   `overridden`.
+6. **Trims to a concise set** — capped at 15 (default 12), sorted by relevance.
+   There is **no forced minimum**: an unrelated task legitimately returns zero.
+7. **Marks the returned preferences as used** (`last_used_at`, best-effort).
+8. **Attaches environments** applicable to the repo, with an `available` flag but
    never any secret values.
 
-The result is plain JSON, so any adapter — CLI, MCP, or another agent — consumes
-the exact same output.
+Steps 2–6 run inside a **read transaction** (`BEGIN DEFERRED`) so retrieval sees a
+single consistent snapshot, never a half-applied concurrent write. The result is
+plain JSON, so any adapter — CLI, MCP, or another agent — consumes the same output.
 
 ## Precedence
 
@@ -136,19 +149,36 @@ Because repo ranks sit above global ranks, **repo-specific instructions override
 global developer defaults** — a core product requirement. Keeping this logic pure
 and separate means it can be reused by any adapter and reasoned about in isolation.
 
-## Similarity
+**Conflict is decided by domain, not lexical similarity** (`resolveConflicts` in
+`retrieval.ts`, also pure and unit-tested):
 
-`src/core/preferences/similarity.ts` defines a `Similarity` interface with a
-deterministic, dependency-free `JaccardSimilarity` implementation (light
-stemming + stopword removal + token-set Jaccard, plus a query-biased
-`coverageScore` for ranking). It powers two things:
+- **Exclusive domains** (`package-manager`, `database`, `ui-framework`,
+  `state-management`) admit a single winner — the highest-precedence preference.
+  This is why repo "must use npm" beats global "prefer pnpm" even though the two
+  strings share no words.
+- **Non-exclusive domains** (testing, architecture, error-handling, …) keep every
+  preference except those addressing the same subject (same subject key, including
+  direct contradictions), where precedence again decides.
 
-- **Proposal de-duplication** — `ctx propose` merges evidence into a
-  sufficiently-similar existing proposal instead of spawning near-duplicates.
-- **Retrieval relevance and conflict detection.**
+## Analysis, similarity and polarity
 
-No external embedding service is used in the MVP. The interface is the seam where
-semantic embeddings can be added later without changing callers.
+`src/core/preferences/analysis.ts` extracts three deterministic signals from any
+rule or task (no LLM, no embeddings):
+
+- **Subject tokens** — the "what", with polarity markers and generic verbs
+  removed, so "Use Redis" and "Never use Redis" share the same subject.
+- **Polarity** — `positive | negative | neutral`, detected from directive words
+  (`use/prefer/always` vs `avoid/never/do not/…`). Negation is **never** stripped.
+- **Domain** — a coarse decision area from a small, extensible keyword catalogue.
+
+`similarity.ts` wraps these in the `Similarity` interface (`JaccardSimilarity` over
+subject tokens). This is the seam where semantic embeddings can later replace the
+lexical implementation without changing callers.
+
+**Proposal de-duplication** uses a canonical key of
+`scope | repo | subjectKey | polarity`. Same key ⇒ merge evidence + recompute
+confidence; different key ⇒ separate rule. Because polarity is part of the key,
+contradictory proposals can never merge — the critical bug from the first dogfood.
 
 ## Secret isolation
 
@@ -158,17 +188,87 @@ convention:
 - **Two separate stores.** SQLite holds metadata; secret values live behind the
   `SecretStore` interface (`src/storage/secrets/`). `environment_variables` rows
   hold only a `var_name` and an opaque `secret_ref`.
-- **Encrypted at rest.** The default `FileSecretStore` encrypts each value with
-  AES-256-GCM using a key kept in a separate `0600` file.
-- **Injected, never printed.** `ctx env run` decrypts values and passes them only
-  into the spawned child process's environment. `ctx` itself never echoes them,
-  and `ctx get` returns variable *names* and availability only.
-- **Swappable backend.** The interface is intentionally tiny and domain-free so a
-  hardware-backed OS-keychain backend can replace the file backend with zero
-  changes to callers.
+- **OS-native by default on Windows.** `createSecretStore` selects a backend and
+  the choice is inspectable via `ctx status`:
+  - **`windows-dpapi`** (default on Windows when available) protects values with
+    the Windows Data Protection API (CurrentUser). **No encryption key is stored
+    on disk** — the key is derived from the user's logon secret and managed by the
+    OS. This removes the colocated-key weakness; blobs are useless on another
+    account or machine. Implemented by shelling out to `ProtectedData` (no
+    homemade crypto).
+  - **`encrypted-file`** (fallback, and `CTX_SECRET_BACKEND=file`) uses AES-256-GCM
+    with a key in a sibling file. It keeps plaintext out of SQLite but is **not**
+    keychain-equivalent — `describe().secure` is `false` and `ctx status` prints a
+    warning. macOS Keychain / libsecret backends can be added behind the same
+    interface.
+- **Atomic + locked writes.** Both backends write via temp-file + rename and
+  serialize read-modify-write with an O_EXCL lock, so concurrent `env set` never
+  truncates or loses data.
+- **Injected, never printed.** `ctx env run` decrypts values into a *child-specific*
+  environment object passed straight to the spawned process — it never mutates the
+  parent `process.env`. `ctx` never echoes values; `ctx get` returns names only.
+- **Swappable backend.** The interface is tiny and domain-free by design.
 
-The current limitation (key co-located with data on the same machine) is
-documented in the README's security section.
+## Concurrency model
+
+`ctx` is safe for many independent processes at once — several agents in one repo,
+agents across different repos, or a mix of reads and writes. The design uses the
+smallest locking that is correct; there is **no global ctx lock**.
+
+**SQLite configuration** (`db.ts`). WAL journal mode (many concurrent readers + one
+writer), `busy_timeout = 10s` (writers wait rather than fail), `synchronous =
+NORMAL` (durable under WAL). The busy timeout is set *before* the WAL switch, and
+the WAL switch itself is retried, because changing journal mode needs a brief
+exclusive lock that predates the timeout being in effect.
+
+**Transaction boundaries** (`sqlite/tx.ts`). All writes run in `withWriteTx`
+(`BEGIN IMMEDIATE` + bounded retry): the write lock is taken up front, so a
+`SELECT`-then-`INSERT` is atomic against every other writer. Reads that must be
+consistent run in `withReadTx` (`BEGIN DEFERRED`). Transactions are short and never
+wrap child processes or user prompts.
+
+**Atomic multi-step operations.** `remember`, `propose`, `approve`, `reject`,
+`forget`, and evidence writes are each a single transaction — a crash mid-write
+leaves no half-written evidence or inconsistent preference.
+
+**Proposal dedup race prevention.** `propose` runs find-or-create in one
+`IMMEDIATE` transaction, so two agents proposing the same thing yield ONE
+preference with TWO evidence rows, not a duplicate. A **partial unique index** on
+`dedup_key` (for `proposed`/`observed`) is a hard backstop even if a second writer
+slips through. Opposite-polarity proposals have different keys and stay separate.
+
+**Evidence.** Identical evidence text (per preference) is collapsed atomically via a
+partial unique index + `INSERT OR IGNORE`; distinct evidence always accumulates.
+Confidence is **recomputed from the evidence count**, not incremented, so the value
+is deterministic regardless of interleaving.
+
+**Optimistic concurrency.** Every preference has a `version`. State transitions are
+compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`); if the row changed since
+the caller read it, the write is refused with a `ConflictError` (exit 5) instead of
+clobbering newer state. `--force` overrides intentionally. So a stale `reject` that
+races a concurrent `approve` fails cleanly rather than silently losing the approve.
+
+**Consistent reads.** `ctx get` reads inside `BEGIN DEFERRED`, so it observes state
+either fully-before or fully-after any concurrent commit.
+
+**Filesystem writes.** Config, secret stores, Claude `SKILL.md`, and `CLAUDE.md` all
+use temp-file + atomic rename. Mutable-file read-modify-write cycles (secrets,
+installer) run under short O_EXCL lock files (`utils/fs.ts`) with stale-lock
+stealing — never held across child processes.
+
+**Installer.** `ctx install claude` runs the whole install under a lock in the
+Claude home and writes atomically, so simultaneous installs cannot duplicate the
+instruction block, truncate `CLAUDE.md`, or leave a partial skill file.
+
+**Crash recovery.** Because every DB mutation is a transaction and every file write
+is atomic-rename, an interruption leaves the previous consistent state; the next
+invocation either sees the prior state or the committed new one — never corruption.
+Migrations re-check applied versions inside an `IMMEDIATE` transaction, so
+simultaneous first-run `ctx init` processes never double-apply or partially migrate.
+
+**Same repo vs different repos.** The repo record is an identity, not a session, so
+any number of agents may use one repo concurrently. Different repos contend only on
+the very short shared-store write transactions; ordinary reads never block.
 
 ## Why Claude is an adapter, not the core
 

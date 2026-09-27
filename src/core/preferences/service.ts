@@ -1,27 +1,37 @@
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { newId, idMatches } from "../../utils/id.ts";
 import { nowIso } from "../../utils/time.ts";
-import { NotFoundError, CtxError } from "../../utils/errors.ts";
+import { NotFoundError, CtxError, ConflictError } from "../../utils/errors.ts";
+import { withWriteTx } from "../../storage/sqlite/tx.ts";
 import {
   type Evidence,
   type Preference,
   type Scope,
   type Status,
+  type Polarity,
+  RememberInputSchema,
+  ProposeInputSchema,
 } from "./types.ts";
 import { JaccardSimilarity, type Similarity } from "./similarity.ts";
+import { inferPrimaryDomain, polarity as detectPolarity, subjectKey } from "./analysis.ts";
 
 interface PreferenceRow {
   id: string;
   rule: string;
   normalized: string;
   category: string;
+  domain: string | null;
+  polarity: string;
   scope: string;
   repo_id: string | null;
   status: string;
   confidence: number;
+  version: number;
   created_at: string;
   updated_at: string;
   last_used_at: string | null;
+  dedup_key: string | null;
 }
 
 interface EvidenceRow {
@@ -30,6 +40,8 @@ interface EvidenceRow {
   source: string;
   repo_id: string | null;
   evidence_text: string;
+  agent_id: string | null;
+  session_id: string | null;
   created_at: string;
 }
 
@@ -38,10 +50,13 @@ function rowToPref(r: PreferenceRow): Preference {
     id: r.id,
     rule: r.rule,
     category: r.category,
+    domain: r.domain,
+    polarity: r.polarity as Polarity,
     scope: r.scope as Scope,
     repoId: r.repo_id,
     status: r.status as Status,
     confidence: r.confidence,
+    version: r.version,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     lastUsedAt: r.last_used_at,
@@ -55,28 +70,35 @@ function rowToEvidence(r: EvidenceRow): Evidence {
     source: r.source,
     repoId: r.repo_id,
     evidenceText: r.evidence_text,
+    agentId: r.agent_id,
+    sessionId: r.session_id,
     createdAt: r.created_at,
   };
 }
 
 export interface RememberInput {
   rule: string;
-  category: string;
+  category?: string;
+  domain?: string | null;
   scope: Scope;
   repoId?: string | null;
-  /** Override the default `approved` status (e.g. `locked`). */
   status?: Status;
   source?: string;
   evidence?: string;
+  agentId?: string;
+  sessionId?: string;
 }
 
 export interface ProposeInput {
   rule: string;
-  category: string;
+  category?: string;
+  domain?: string | null;
   scope: Scope;
   repoId?: string | null;
   evidence: string;
   source?: string;
+  agentId?: string;
+  sessionId?: string;
 }
 
 export interface ProposeResult {
@@ -85,11 +107,34 @@ export interface ProposeResult {
   merged: boolean;
 }
 
-/** Similarity threshold above which a proposal is merged into an existing one. */
-const MERGE_THRESHOLD = 0.6;
+export interface TransitionOptions {
+  /** The version the caller last observed; a mismatch means concurrent change. */
+  expectedVersion?: number;
+  /** Override the optimistic-concurrency check (act on current state). */
+  force?: boolean;
+}
+
+/** Subject-similarity threshold above which same-polarity proposals merge. */
+const MERGE_SUBJECT_THRESHOLD = 0.6;
 const PROPOSE_START_CONFIDENCE = 0.5;
 const PROPOSE_CONFIDENCE_STEP = 0.1;
 const PROPOSE_CONFIDENCE_CAP = 0.95;
+
+function hashText(text: string): string {
+  const canonical = text.trim().toLowerCase().replace(/\s+/g, " ");
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+function dedupKey(scope: Scope, repoId: string | null, rule: string, pol: Polarity): string {
+  return `${scope}|${repoId ?? ""}|${subjectKey(rule)}|${pol}`;
+}
+
+function confidenceFor(evidenceCount: number): number {
+  return Math.min(
+    PROPOSE_CONFIDENCE_CAP,
+    PROPOSE_START_CONFIDENCE + PROPOSE_CONFIDENCE_STEP * Math.max(0, evidenceCount - 1),
+  );
+}
 
 export class PreferenceService {
   private readonly sim: Similarity;
@@ -105,103 +150,147 @@ export class PreferenceService {
 
   /** Explicit developer instruction. Creates an in-effect (approved) preference. */
   remember(input: RememberInput): Preference {
-    this.validateScope(input.scope, input.repoId ?? null);
-    const ts = nowIso();
+    const parsed = RememberInputSchema.parse(input);
+    const scope = parsed.scope;
+    const repoId = parsed.repoId ?? null;
+    this.validateScope(scope, repoId);
+
+    const pol = detectPolarity(parsed.rule);
+    const domain = parsed.domain ?? inferPrimaryDomain(parsed.rule, parsed.category);
+    const status: Status = parsed.status ?? "approved";
     const id = newId();
-    const status: Status = input.status ?? "approved";
-    this.db
-      .query(
-        `INSERT INTO preferences
-           (id, rule, normalized, category, scope, repo_id, status, confidence, created_at, updated_at, last_used_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-      )
-      .run(
-        id,
-        input.rule,
-        this.sim.normalize(input.rule),
-        input.category,
-        input.scope,
-        input.repoId ?? null,
-        status,
-        1.0,
-        ts,
-        ts,
-      );
-    this.addEvidence(id, {
-      source: input.source ?? "explicit",
-      repoId: input.repoId ?? null,
-      text: input.evidence ?? `Explicitly remembered: ${input.rule}`,
+    const ts = nowIso();
+
+    return withWriteTx(this.db, () => {
+      this.db
+        .query(
+          `INSERT INTO preferences
+             (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
+              confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
+        )
+        .run(
+          id,
+          parsed.rule,
+          this.sim.normalize(parsed.rule),
+          parsed.category,
+          domain,
+          pol,
+          scope,
+          repoId,
+          status,
+          1.0,
+          ts,
+          ts,
+          dedupKey(scope, repoId, parsed.rule, pol),
+        );
+      this.insertEvidence(id, {
+        source: parsed.source ?? "explicit",
+        repoId,
+        text: parsed.evidence ?? `Explicitly remembered: ${parsed.rule}`,
+        agentId: parsed.agentId ?? null,
+        sessionId: parsed.sessionId ?? null,
+      });
+      return this.getById(id)!;
     });
-    return this.getById(id)!;
   }
 
   /**
-   * Agent inference. Creates a `proposed` preference, or, when a sufficiently
-   * similar proposal already exists in the same scope/repo, appends evidence and
-   * nudges its confidence up instead of creating a duplicate.
+   * Agent inference. Creates a `proposed` preference, or, when a proposal with
+   * the same subject AND the same polarity already exists in the same scope/repo,
+   * appends evidence and recomputes confidence instead of duplicating.
+   *
+   * The whole find-or-create runs in one IMMEDIATE transaction, so two agents
+   * proposing the same thing at once produce ONE preference with TWO evidence
+   * records rather than a duplicate. Opposite-polarity proposals ("Use Redis" vs
+   * "Never use Redis") have different dedup keys and are always kept separate.
    */
   propose(input: ProposeInput): ProposeResult {
-    this.validateScope(input.scope, input.repoId ?? null);
-    const existing = this.findSimilarProposal(
-      input.rule,
-      input.scope,
-      input.repoId ?? null,
-    );
+    const parsed = ProposeInputSchema.parse(input);
+    const scope = parsed.scope;
+    const repoId = parsed.repoId ?? null;
+    this.validateScope(scope, repoId);
 
-    if (existing) {
-      this.addEvidence(existing.id, {
-        source: input.source ?? "agent",
-        repoId: input.repoId ?? null,
-        text: input.evidence,
-      });
-      const newConfidence = Math.min(
-        PROPOSE_CONFIDENCE_CAP,
-        existing.confidence + PROPOSE_CONFIDENCE_STEP,
-      );
+    const pol = detectPolarity(parsed.rule);
+    const domain = parsed.domain ?? inferPrimaryDomain(parsed.rule, parsed.category);
+    const key = dedupKey(scope, repoId, parsed.rule, pol);
+
+    return withWriteTx(this.db, () => {
+      const existing = this.findSimilarProposal(parsed.rule, scope, repoId, pol, key);
+      if (existing) {
+        this.insertEvidence(existing.id, {
+          source: parsed.source ?? "agent",
+          repoId,
+          text: parsed.evidence,
+          agentId: parsed.agentId ?? null,
+          sessionId: parsed.sessionId ?? null,
+        });
+        const count = this.evidenceCount(existing.id);
+        this.db
+          .query("UPDATE preferences SET confidence = ?, updated_at = ? WHERE id = ?")
+          .run(confidenceFor(count), nowIso(), existing.id);
+        return { preference: this.getById(existing.id)!, merged: true };
+      }
+
+      const id = newId();
+      const ts = nowIso();
       this.db
-        .query("UPDATE preferences SET confidence = ?, updated_at = ? WHERE id = ?")
-        .run(newConfidence, nowIso(), existing.id);
-      return { preference: this.getById(existing.id)!, merged: true };
-    }
-
-    const ts = nowIso();
-    const id = newId();
-    this.db
-      .query(
-        `INSERT INTO preferences
-           (id, rule, normalized, category, scope, repo_id, status, confidence, created_at, updated_at, last_used_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, NULL)`,
-      )
-      .run(
-        id,
-        input.rule,
-        this.sim.normalize(input.rule),
-        input.category,
-        input.scope,
-        input.repoId ?? null,
-        PROPOSE_START_CONFIDENCE,
-        ts,
-        ts,
-      );
-    this.addEvidence(id, {
-      source: input.source ?? "agent",
-      repoId: input.repoId ?? null,
-      text: input.evidence,
+        .query(
+          `INSERT INTO preferences
+             (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
+              confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 1, ?, ?, NULL, ?)`,
+        )
+        .run(
+          id,
+          parsed.rule,
+          this.sim.normalize(parsed.rule),
+          parsed.category,
+          domain,
+          pol,
+          scope,
+          repoId,
+          PROPOSE_START_CONFIDENCE,
+          ts,
+          ts,
+          key,
+        );
+      this.insertEvidence(id, {
+        source: parsed.source ?? "agent",
+        repoId,
+        text: parsed.evidence,
+        agentId: parsed.agentId ?? null,
+        sessionId: parsed.sessionId ?? null,
+      });
+      return { preference: this.getById(id)!, merged: false };
     });
-    return { preference: this.getById(id)!, merged: false };
   }
 
   private findSimilarProposal(
     rule: string,
     scope: Scope,
     repoId: string | null,
+    pol: Polarity,
+    key: string,
   ): Preference | null {
-    const candidates = this.db
+    // Fast path: exact canonical key (also what the unique index enforces).
+    const exact = this.db
       .query<PreferenceRow, [string]>(
         `SELECT * FROM preferences
-         WHERE status IN ('proposed','observed') AND scope = ?`,
+         WHERE dedup_key = ? AND status IN ('proposed','observed') LIMIT 1`,
       )
-      .all(scope)
+      .get(key);
+    if (exact) return rowToPref(exact);
+
+    // Fallback: near-duplicate subject with the SAME polarity (covers legacy
+    // rows without a dedup_key and slight phrasing differences). Opposite
+    // polarity is never merged.
+    const candidates = this.db
+      .query<PreferenceRow, [string, string]>(
+        `SELECT * FROM preferences
+         WHERE status IN ('proposed','observed') AND scope = ? AND polarity = ?`,
+      )
+      .all(scope, pol)
       .filter((r) => (r.repo_id ?? null) === repoId)
       .map(rowToPref);
 
@@ -209,7 +298,7 @@ export class PreferenceService {
     let bestScore = 0;
     for (const c of candidates) {
       const score = this.sim.score(rule, c.rule);
-      if (score >= MERGE_THRESHOLD && score > bestScore) {
+      if (score >= MERGE_SUBJECT_THRESHOLD && score > bestScore) {
         best = c;
         bestScore = score;
       }
@@ -219,32 +308,57 @@ export class PreferenceService {
 
   // ---- evidence -----------------------------------------------------------
 
-  addEvidence(
+  /**
+   * Insert evidence, collapsing exact-duplicate text for the same preference.
+   * Duplicate collapse is atomic (unique index + INSERT OR IGNORE) so concurrent
+   * identical submissions don't create duplicate rows or lose distinct ones.
+   * MUST be called inside a write transaction.
+   */
+  private insertEvidence(
     preferenceId: string,
-    e: { source: string; repoId: string | null; text: string },
-  ): Evidence {
-    const id = newId();
-    const ts = nowIso();
+    e: { source: string; repoId: string | null; text: string; agentId: string | null; sessionId: string | null },
+  ): void {
     this.db
       .query(
-        `INSERT INTO evidence (id, preference_id, source, repo_id, evidence_text, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO evidence
+           (id, preference_id, source, repo_id, evidence_text, agent_id, session_id, text_hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, preferenceId, e.source, e.repoId, e.text, ts);
-    return {
-      id,
-      preferenceId,
-      source: e.source,
-      repoId: e.repoId,
-      evidenceText: e.text,
-      createdAt: ts,
-    };
+      .run(
+        newId(),
+        preferenceId,
+        e.source,
+        e.repoId,
+        e.text,
+        e.agentId,
+        e.sessionId,
+        hashText(e.text),
+        nowIso(),
+      );
+  }
+
+  /** Public evidence add (used by tools/tests); atomic, dedup-aware. */
+  addEvidence(
+    preferenceId: string,
+    e: { source: string; repoId: string | null; text: string; agentId?: string | null; sessionId?: string | null },
+  ): void {
+    withWriteTx(this.db, () => {
+      const pref = this.getById(preferenceId);
+      if (!pref) throw new NotFoundError(`No preference with id "${preferenceId}".`);
+      this.insertEvidence(preferenceId, {
+        source: e.source,
+        repoId: e.repoId,
+        text: e.text,
+        agentId: e.agentId ?? null,
+        sessionId: e.sessionId ?? null,
+      });
+    });
   }
 
   evidenceFor(preferenceId: string): Evidence[] {
     return this.db
       .query<EvidenceRow, [string]>(
-        "SELECT * FROM evidence WHERE preference_id = ? ORDER BY created_at ASC",
+        "SELECT * FROM evidence WHERE preference_id = ? ORDER BY created_at ASC, id ASC",
       )
       .all(preferenceId)
       .map(rowToEvidence);
@@ -286,7 +400,7 @@ export class PreferenceService {
 
   list(filter?: { status?: Status; scope?: Scope; repoId?: string | null }): Preference[] {
     const rows = this.db
-      .query<PreferenceRow, []>("SELECT * FROM preferences ORDER BY updated_at DESC")
+      .query<PreferenceRow, []>("SELECT * FROM preferences ORDER BY updated_at DESC, id ASC")
       .all();
     let prefs = rows.map(rowToPref);
     if (filter?.status) prefs = prefs.filter((p) => p.status === filter.status);
@@ -303,46 +417,83 @@ export class PreferenceService {
     );
   }
 
-  // ---- lifecycle ----------------------------------------------------------
+  // ---- lifecycle (optimistic concurrency) ---------------------------------
 
-  approve(id: string): Preference {
-    return this.setStatus(id, "approved");
+  approve(id: string, opts: TransitionOptions = {}): Preference {
+    return this.transition(id, "approved", opts);
   }
 
-  reject(id: string): Preference {
-    return this.setStatus(id, "rejected");
+  reject(id: string, opts: TransitionOptions = {}): Preference {
+    return this.transition(id, "rejected", opts);
   }
 
-  lock(id: string): Preference {
-    return this.setStatus(id, "locked");
+  lock(id: string, opts: TransitionOptions = {}): Preference {
+    return this.transition(id, "locked", opts);
   }
 
-  private setStatus(id: string, status: Status): Preference {
-    const pref = this.getById(id);
-    if (!pref) throw new NotFoundError(`No preference with id "${id}".`);
-    this.db
-      .query("UPDATE preferences SET status = ?, updated_at = ? WHERE id = ?")
-      .run(status, nowIso(), id);
-    return this.getById(id)!;
+  /**
+   * Compare-and-swap state transition. If the caller passed the version it last
+   * observed and the row has since changed, the transition is refused with a
+   * ConflictError rather than silently clobbering the newer state. `force`
+   * bypasses the check and acts on whatever the current state is.
+   */
+  private transition(id: string, target: Status, opts: TransitionOptions): Preference {
+    return withWriteTx(this.db, () => {
+      const current = this.getById(id);
+      if (!current) throw new NotFoundError(`No preference with id "${id}".`);
+      const expected = opts.force ? current.version : opts.expectedVersion ?? current.version;
+      const res = this.db
+        .query(
+          "UPDATE preferences SET status = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
+        )
+        .run(target, nowIso(), id, expected);
+      if ((res.changes ?? 0) === 0) {
+        const now = this.getById(id)!;
+        throw new ConflictError(
+          `Preference ${id.slice(0, 8)} changed concurrently (now "${now.status}", v${now.version}); ` +
+            `not applying "${target}". Re-run to act on the current state (or use --force).`,
+        );
+      }
+      return this.getById(id)!;
+    });
   }
 
-  /** Permanently delete a preference and its evidence (cascade). */
-  forget(id: string): void {
-    const pref = this.getById(id);
-    if (!pref) throw new NotFoundError(`No preference with id "${id}".`);
-    this.db.query("DELETE FROM preferences WHERE id = ?").run(id);
+  /** Permanently delete a preference and its evidence (cascade), with CAS. */
+  forget(id: string, opts: TransitionOptions = {}): void {
+    withWriteTx(this.db, () => {
+      const current = this.getById(id);
+      if (!current) throw new NotFoundError(`No preference with id "${id}".`);
+      const expected = opts.force ? current.version : opts.expectedVersion ?? current.version;
+      const res = this.db
+        .query("DELETE FROM preferences WHERE id = ? AND version = ?")
+        .run(id, expected);
+      if ((res.changes ?? 0) === 0) {
+        const now = this.getById(id);
+        throw new ConflictError(
+          `Preference ${id.slice(0, 8)} changed concurrently${now ? ` (now "${now.status}", v${now.version}")` : ""}; ` +
+            `not deleting. Re-run (or use --force).`,
+        );
+      }
+    });
   }
 
+  /**
+   * Best-effort "last used" stamp on retrieval. Never throws: a read must not
+   * fail just because a writer holds the lock, so a BUSY here is swallowed.
+   */
   markUsed(ids: string[]): void {
     if (ids.length === 0) return;
     const ts = nowIso();
-    const stmt = this.db.query(
-      "UPDATE preferences SET last_used_at = ? WHERE id = ?",
-    );
-    const tx = this.db.transaction(() => {
-      for (const id of ids) stmt.run(ts, id);
-    });
-    tx();
+    try {
+      withWriteTx(this.db, () => {
+        const stmt = this.db.query(
+          "UPDATE preferences SET last_used_at = ? WHERE id = ?",
+        );
+        for (const id of ids) stmt.run(ts, id);
+      });
+    } catch {
+      /* last-used tracking is best-effort; ignore contention */
+    }
   }
 
   private validateScope(scope: Scope, repoId: string | null): void {

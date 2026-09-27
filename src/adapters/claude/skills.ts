@@ -41,13 +41,17 @@ the current repository and task:
 ctx get --cwd "$PWD" --task "<brief description of the current task>"
 \`\`\`
 
-The command returns concise JSON: the detected repository, a ranked list of
-applicable preferences (repo-specific rules override global ones), and the
-environments available here.
+The command returns concise JSON: the detected repository, a relevance-filtered
+and conflict-resolved list of applicable preferences (repo-specific rules override
+global ones), and the environments available here.
+
+\`ctx get\` is read-only and safe to call as often as you like — including while
+other agents are working in the same or other repositories. Call it before each
+consequential decision rather than caching it.
 
 Apply the returned preferences to your decision. If a repo preference and a
-global preference conflict, the repo preference wins. If \`ctx\` is not installed
-or returns nothing, proceed normally.
+global preference conflict, the repo preference wins. If \`ctx\` returns an empty
+preference list, there is no stored guidance for this task — proceed normally.
 
 Never ask \`ctx\` for secrets — it does not return them, by design.
 `;
@@ -130,10 +134,22 @@ ctx env run supabase-test -- npm test
 \`\`\`
 
 The child process receives the environment's variables; \`ctx\` never prints the
-values. Multiple environments can be composed:
+values. Multiple environments can be composed (later wins on conflicts):
 
 \`\`\`bash
 ctx env run supabase-test openai-dev -- npm test
+\`\`\`
+
+Multiple \`ctx env run\` invocations are safe to run concurrently; each child gets
+its own environment and secrets never leak between them.
+
+### Shell note
+
+In bash/zsh, put the command after \`--\`. In PowerShell, \`--\` is consumed by the
+shell, so use \`--exec\` instead:
+
+\`\`\`powershell
+ctx env run supabase-test --exec npm test
 \`\`\`
 
 ## Hard rules
@@ -159,9 +175,11 @@ export const CTX_INSTRUCTION_BLOCK = `${CTX_INSTRUCTION_BEGIN}
 Persistent developer preferences are available through the \`context\` skill.
 
 - Before meaningful engineering decisions, retrieve relevant context with the
-  \`context\` skill (\`ctx get --cwd "$PWD" --task "..."\`).
+  \`context\` skill (\`ctx get --cwd "$PWD" --task "..."\`). It is read-only and safe
+  to call anytime, including while other agents are working.
 - When the user expresses a reusable engineering preference or correction, use
-  the \`context-learn\` skill to propose it for persistence.
+  the \`context-learn\` skill to propose it. Proposals are NOT permanent until the
+  developer approves them.
 - Repository instructions override global developer preferences.
 - Never store secrets, credentials, tokens, private keys, or environment variable
   values as developer preferences. Secrets belong only in \`ctx\` environments

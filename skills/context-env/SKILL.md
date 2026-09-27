@@ -33,10 +33,22 @@ ctx env run supabase-test -- npm test
 ```
 
 The child process receives the environment's variables; `ctx` never prints the
-values. Multiple environments can be composed:
+values. Multiple environments can be composed (later wins on conflicts):
 
 ```bash
 ctx env run supabase-test openai-dev -- npm test
+```
+
+Multiple `ctx env run` invocations are safe to run concurrently; each child gets
+its own environment and secrets never leak between them.
+
+### Shell note
+
+In bash/zsh, put the command after `--`. In PowerShell, `--` is consumed by the
+shell, so use `--exec` instead:
+
+```powershell
+ctx env run supabase-test --exec npm test
 ```
 
 ## Hard rules

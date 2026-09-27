@@ -1,17 +1,11 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import {
   createCipheriv,
   createDecipheriv,
   randomBytes,
 } from "node:crypto";
-import type { SecretStore } from "./types.ts";
+import type { SecretStore, SecretBackendInfo } from "./types.ts";
+import { writeFileAtomic, withFileLock } from "../../utils/fs.ts";
 
 interface EncryptedEntry {
   iv: string; // base64
@@ -20,36 +14,46 @@ interface EncryptedEntry {
 }
 
 /**
- * Encrypted local-file secret backend.
+ * Encrypted local-file secret backend (the portable fallback).
  *
  * Secrets are encrypted with AES-256-GCM. The 32-byte key lives in a separate
- * file (`secret.key`) created on first use with `0600` permissions; the
- * encrypted blob lives in `secrets.json`, also `0600`.
+ * file (`secret.key`); the encrypted blob lives in `secrets.json`. Both are
+ * written atomically (temp file + rename) and read-modify-write cycles are
+ * serialized with an O_EXCL lock file, so concurrent `env set` operations never
+ * truncate or lose data.
  *
- * LIMITATION: this protects secrets at rest against casual disk inspection and
- * keeps plaintext out of SQLite, but the key sits next to the data on the same
- * machine. It is NOT equivalent to a hardware-backed OS keychain. The
- * `SecretStore` interface exists precisely so a keychain backend can replace
- * this one later without changing any callers.
+ * LIMITATION (surfaced by `ctx status`): the key sits next to the data on the
+ * same machine, so anyone who can read `~/.ctx/secrets/` can decrypt everything.
+ * This keeps plaintext out of SQLite and off casual inspection, but it is NOT an
+ * OS keychain. On Windows the intended 0600 mode is not enforced by the OS.
  */
 export class FileSecretStore implements SecretStore {
   readonly backend = "encrypted-file";
   private readonly secretsFile: string;
   private readonly keyFile: string;
+  private readonly lockFile: string;
 
   constructor(secretsFile: string, keyFile: string) {
     this.secretsFile = secretsFile;
     this.keyFile = keyFile;
+    this.lockFile = secretsFile + ".lock";
+  }
+
+  describe(): SecretBackendInfo {
+    return {
+      backend: this.backend,
+      secure: false,
+      note:
+        "AES-256-GCM at rest, but the encryption key is stored on the same machine " +
+        "next to the data. Anyone who can read the secrets directory can decrypt it. " +
+        "Not equivalent to an OS keychain.",
+    };
   }
 
   private key(): Buffer {
-    if (existsSync(this.keyFile)) {
-      return readFileSync(this.keyFile);
-    }
-    mkdirSync(dirname(this.keyFile), { recursive: true });
+    if (existsSync(this.keyFile)) return readFileSync(this.keyFile);
     const key = randomBytes(32);
-    writeFileSync(this.keyFile, key, { mode: 0o600 });
-    tryChmod(this.keyFile, 0o600);
+    writeFileAtomic(this.keyFile, key, 0o600);
     return key;
   }
 
@@ -63,42 +67,32 @@ export class FileSecretStore implements SecretStore {
   }
 
   private writeAll(entries: Record<string, EncryptedEntry>): void {
-    mkdirSync(dirname(this.secretsFile), { recursive: true });
-    writeFileSync(this.secretsFile, JSON.stringify(entries, null, 2) + "\n", {
-      mode: 0o600,
-    });
-    tryChmod(this.secretsFile, 0o600);
+    writeFileAtomic(this.secretsFile, JSON.stringify(entries, null, 2) + "\n", 0o600);
   }
 
   set(ref: string, value: string): void {
     const key = this.key();
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", key, iv);
-    const encrypted = Buffer.concat([
-      cipher.update(value, "utf8"),
-      cipher.final(),
-    ]);
-    const tag = cipher.getAuthTag();
-    const entries = this.readAll();
-    entries[ref] = {
-      iv: iv.toString("base64"),
-      tag: tag.toString("base64"),
-      data: encrypted.toString("base64"),
-    };
-    this.writeAll(entries);
+    withFileLock(this.lockFile, () => {
+      const iv = randomBytes(12);
+      const cipher = createCipheriv("aes-256-gcm", key, iv);
+      const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      const entries = this.readAll();
+      entries[ref] = {
+        iv: iv.toString("base64"),
+        tag: tag.toString("base64"),
+        data: encrypted.toString("base64"),
+      };
+      this.writeAll(entries);
+    });
   }
 
   get(ref: string): string | null {
-    const entries = this.readAll();
-    const entry = entries[ref];
+    const entry = this.readAll()[ref];
     if (!entry) return null;
     const key = this.key();
     try {
-      const decipher = createDecipheriv(
-        "aes-256-gcm",
-        key,
-        Buffer.from(entry.iv, "base64"),
-      );
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(entry.iv, "base64"));
       decipher.setAuthTag(Buffer.from(entry.tag, "base64"));
       const decrypted = Buffer.concat([
         decipher.update(Buffer.from(entry.data, "base64")),
@@ -115,19 +109,12 @@ export class FileSecretStore implements SecretStore {
   }
 
   delete(ref: string): void {
-    const entries = this.readAll();
-    if (ref in entries) {
-      delete entries[ref];
-      this.writeAll(entries);
-    }
-  }
-}
-
-function tryChmod(path: string, mode: number): void {
-  // chmod is a no-op / may throw on some Windows filesystems; ignore failures.
-  try {
-    chmodSync(path, mode);
-  } catch {
-    /* ignore */
+    withFileLock(this.lockFile, () => {
+      const entries = this.readAll();
+      if (ref in entries) {
+        delete entries[ref];
+        this.writeAll(entries);
+      }
+    });
   }
 }

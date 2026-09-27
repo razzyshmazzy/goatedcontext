@@ -87,4 +87,36 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    name: "domains_polarity_versioning_provenance",
+    sql: `
+      -- Conflict/dedup metadata for preferences.
+      ALTER TABLE preferences ADD COLUMN domain TEXT;
+      ALTER TABLE preferences ADD COLUMN polarity TEXT NOT NULL DEFAULT 'neutral';
+      -- Optimistic-concurrency version; bumped on every state change.
+      ALTER TABLE preferences ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+      -- Canonical (scope|repo|subject|polarity) key for race-free proposal dedup.
+      ALTER TABLE preferences ADD COLUMN dedup_key TEXT;
+
+      CREATE INDEX idx_prefs_domain ON preferences(domain);
+
+      -- At most one proposed/observed preference per dedup_key: a hard, atomic
+      -- backstop against concurrent duplicate proposals. NULL keys (legacy rows)
+      -- are distinct in SQLite, so old data is unaffected.
+      CREATE UNIQUE INDEX idx_prefs_dedup_unique
+        ON preferences(dedup_key)
+        WHERE dedup_key IS NOT NULL AND status IN ('proposed','observed');
+
+      -- Lightweight provenance + evidence dedup.
+      ALTER TABLE evidence ADD COLUMN agent_id TEXT;
+      ALTER TABLE evidence ADD COLUMN session_id TEXT;
+      ALTER TABLE evidence ADD COLUMN text_hash TEXT;
+
+      -- Exact-duplicate evidence per preference is collapsed atomically.
+      CREATE UNIQUE INDEX idx_evidence_dedup
+        ON evidence(preference_id, text_hash)
+        WHERE text_hash IS NOT NULL;
+    `,
+  },
 ];

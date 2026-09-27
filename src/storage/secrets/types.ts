@@ -2,8 +2,7 @@
  * Storage abstraction for secret VALUES (tokens, API keys, passwords).
  *
  * This interface is deliberately tiny and free of any ctx domain concepts so an
- * OS-keychain backend (macOS Keychain, Windows Credential Manager, libsecret)
- * can be dropped in later without touching callers.
+ * OS-keychain backend can be dropped in without touching callers.
  *
  * Hard rules enforced by every implementation and its callers:
  *  - secret values are NEVER written to SQLite
@@ -19,8 +18,19 @@ export interface SecretStore {
   has(ref: string): boolean;
   /** Remove a secret value. No-op if the reference is unknown. */
   delete(ref: string): void;
-  /** A human-readable name for the active backend, for diagnostics. */
+  /** A stable machine-readable name for the active backend. */
   readonly backend: string;
+  /** Inspectable posture, surfaced by `ctx status`. */
+  describe(): SecretBackendInfo;
+}
+
+export interface SecretBackendInfo {
+  /** Machine-readable backend id, e.g. "windows-dpapi" or "encrypted-file". */
+  backend: string;
+  /** True when the encryption key is NOT stored on disk next to the data. */
+  secure: boolean;
+  /** Human-readable description of the protection and its limits. */
+  note: string;
 }
 
 /** Build the reference key used for an environment variable's secret. */

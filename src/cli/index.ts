@@ -1,15 +1,20 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Command } from "commander";
+import { ZodError } from "zod";
 import { CtxContext } from "../core/context.ts";
-import { CtxError } from "../utils/errors.ts";
+import { CtxError, ValidationError } from "../utils/errors.ts";
 import { shortId } from "../utils/id.ts";
 import { installClaude } from "../adapters/claude/installer.ts";
+import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
 import { line, printJson, warn } from "./output.ts";
 import type { Scope } from "../core/preferences/types.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
-/** Args after a standalone `--`, captured by the entry point for `env run`. */
+/** Args after a `--`/`--exec` separator, captured by the entry point for `env run`. */
 export interface CliDeps {
   passthrough: string[] | null;
   env?: NodeJS.ProcessEnv;
@@ -32,6 +37,10 @@ function resolveRepoOrThrow(ctx: CtxContext, cwd: string) {
     );
   }
   return repo;
+}
+
+function provenance(opts: { agentId?: string; sessionId?: string }) {
+  return { agentId: opts.agentId, sessionId: opts.sessionId };
 }
 
 export function buildProgram(deps: CliDeps): Command {
@@ -63,6 +72,78 @@ export function buildProgram(deps: CliDeps): Command {
       });
     });
 
+  // ---- status -------------------------------------------------------------
+  program
+    .command("status")
+    .description("Concise health summary of the ctx installation.")
+    .option("--cwd <dir>", "Working directory", process.cwd())
+    .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        const repo = ctx.repos.resolve(opts.cwd);
+        const all = ctx.preferences.list();
+        const globals = all.filter((p) => p.scope === "global");
+        const repoPrefs = repo ? all.filter((p) => p.scope === "repo" && p.repoId === repo.id) : [];
+        const count = (s: string) => globals.filter((p) => p.status === s).length;
+        const pending = globals.filter((p) => p.status === "proposed" || p.status === "observed").length;
+        const envs = ctx.environments.listApplicable(repo?.id ?? null);
+        const claude = detectClaude(opts.claudeHome);
+        const secret = ctx.secrets.describe();
+
+        const summary = {
+          version: VERSION,
+          repository: repo
+            ? { name: repo.name, identity: repo.identity, repoPreferences: repoPrefs.length }
+            : null,
+          globalProfile: {
+            approved: count("approved"),
+            locked: count("locked"),
+            pending,
+            rejected: count("rejected"),
+          },
+          environments: envs.map((e) => ({ name: e.environment.name, available: e.available })),
+          claude,
+          storage: {
+            walEnabled: true,
+            secretBackend: secret.backend,
+            secretBackendSecure: secret.secure,
+            secretBackendNote: secret.note,
+          },
+        };
+
+        if (opts.json) return printJson(summary);
+
+        line(`ctx ${VERSION}`);
+        line("");
+        line("Repository:");
+        if (repo) {
+          line(`  ${repo.name}`);
+          line(`  ${repoPrefs.length} repo preferences`);
+        } else {
+          line("  (not in a git repository)");
+        }
+        line("");
+        line("Global profile:");
+        line(`  ${summary.globalProfile.approved} approved`);
+        line(`  ${summary.globalProfile.locked} locked`);
+        line(`  ${summary.globalProfile.pending} pending`);
+        line("");
+        line("Environments:");
+        if (envs.length === 0) line("  (none)");
+        for (const e of envs) line(`  ${e.environment.name}${e.available ? "" : " (secrets missing)"}`);
+        line("");
+        line("Claude:");
+        line(`  ${claude.skillsInstalled ? "✓" : "✗"} skills installed`);
+        line(`  ${claude.instructionsInstalled ? "✓" : "✗"} global instructions installed`);
+        line("");
+        line("Storage:");
+        line("  SQLite WAL enabled");
+        line(`  secret backend: ${secret.backend}`);
+        if (!secret.secure) line(`  WARNING: ${secret.note}`);
+      });
+    });
+
   // ---- remember -----------------------------------------------------------
   program
     .command("remember")
@@ -70,9 +151,12 @@ export function buildProgram(deps: CliDeps): Command {
     .argument("<rule>", "The preference rule text")
     .option("--scope <scope>", "global | repo", "global")
     .option("--category <category>", "Preference category", "general")
+    .option("--domain <domain>", "Explicit decision domain (optional)")
     .option("--repo", "Shortcut for --scope repo")
     .option("--lock", "Create it as a locked preference (cannot be auto-changed)")
     .option("--evidence <text>", "Optional supporting evidence")
+    .option("--agent-id <id>", "Provenance: which agent recorded this")
+    .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
@@ -83,15 +167,17 @@ export function buildProgram(deps: CliDeps): Command {
         const pref = ctx.preferences.remember({
           rule,
           category: opts.category,
+          domain: opts.domain ?? null,
           scope,
           repoId,
           status: opts.lock ? "locked" : "approved",
           evidence: opts.evidence,
           source: "explicit",
+          ...provenance(opts),
         });
         if (opts.json) return printJson(pref);
         line(`Remembered [${pref.status}] (${shortId(pref.id)}): ${pref.rule}`);
-        line(`  scope=${pref.scope} category=${pref.category}`);
+        line(`  scope=${pref.scope} category=${pref.category} domain=${pref.domain ?? "-"} polarity=${pref.polarity}`);
       });
     });
 
@@ -103,8 +189,11 @@ export function buildProgram(deps: CliDeps): Command {
     .requiredOption("--evidence <text>", "What was observed that implies this rule")
     .option("--scope <scope>", "global | repo", "global")
     .option("--category <category>", "Preference category", "general")
+    .option("--domain <domain>", "Explicit decision domain (optional)")
     .option("--repo", "Shortcut for --scope repo")
     .option("--source <source>", "Origin of the observation", "agent")
+    .option("--agent-id <id>", "Provenance: which agent proposed this")
+    .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
@@ -115,21 +204,23 @@ export function buildProgram(deps: CliDeps): Command {
         const result = ctx.preferences.propose({
           rule,
           category: opts.category,
+          domain: opts.domain ?? null,
           scope,
           repoId,
           evidence: opts.evidence,
           source: opts.source,
+          ...provenance(opts),
         });
         if (opts.json) return printJson(result);
         const p = result.preference;
-        const count = ctx.preferences.evidenceCount(p.id);
+        const c = ctx.preferences.evidenceCount(p.id);
         if (result.merged) {
-          line(`Merged into existing proposal (${shortId(p.id)}); confidence=${p.confidence.toFixed(2)}, evidence=${count}.`);
+          line(`Merged into existing proposal (${shortId(p.id)}); confidence=${p.confidence.toFixed(2)}, evidence=${c}.`);
         } else {
           line(`Proposed (${shortId(p.id)}): ${p.rule}`);
-          line(`  scope=${p.scope} category=${p.category} confidence=${p.confidence.toFixed(2)}`);
+          line(`  scope=${p.scope} category=${p.category} domain=${p.domain ?? "-"} polarity=${p.polarity} confidence=${p.confidence.toFixed(2)}`);
         }
-        line(`Review with: ctx prefs pending`);
+        line("Review with: ctx prefs pending");
       });
     });
 
@@ -142,10 +233,10 @@ export function buildProgram(deps: CliDeps): Command {
       withContext(deps, (ctx) => {
         const all = ctx.preferences.list();
         if (opts.json) return printJson(all);
-        if (all.length === 0) return line("No preferences yet. Try: ctx remember \"...\"");
+        if (all.length === 0) return line('No preferences yet. Try: ctx remember "..."');
         for (const p of all) {
           line(
-            `${shortId(p.id)}  [${p.status}] (${p.scope}/${p.category}) c=${p.confidence.toFixed(2)}  ${p.rule}`,
+            `${shortId(p.id)}  [${p.status}] (${p.scope}/${p.category}/${p.domain ?? "-"}) ${p.polarity} c=${p.confidence.toFixed(2)}  ${p.rule}`,
           );
         }
       });
@@ -162,12 +253,15 @@ export function buildProgram(deps: CliDeps): Command {
           id: p.id,
           rule: p.rule,
           category: p.category,
+          domain: p.domain,
+          polarity: p.polarity,
           scope: p.scope,
           confidence: p.confidence,
           evidenceCount: ctx.preferences.evidenceCount(p.id),
           evidence: ctx.preferences.evidenceFor(p.id).map((e) => ({
             source: e.source,
             text: e.evidenceText,
+            agentId: e.agentId,
             at: e.createdAt,
           })),
         }));
@@ -175,9 +269,9 @@ export function buildProgram(deps: CliDeps): Command {
         if (enriched.length === 0) return line("Nothing pending review.");
         for (const p of enriched) {
           line("");
-          line(`${shortId(p.id)}  [proposed]  (${p.scope}/${p.category})  confidence=${p.confidence.toFixed(2)}  evidence=${p.evidenceCount}`);
+          line(`${shortId(p.id)}  [proposed]  (${p.scope}/${p.category}/${p.domain ?? "-"})  ${p.polarity}  confidence=${p.confidence.toFixed(2)}  evidence=${p.evidenceCount}`);
           line(`  rule: ${p.rule}`);
-          for (const e of p.evidence) line(`  - (${e.source}) ${e.text}`);
+          for (const e of p.evidence) line(`  - (${e.source}${e.agentId ? `/${e.agentId}` : ""}) ${e.text}`);
           line(`  approve: ctx prefs approve ${shortId(p.id)}   reject: ctx prefs reject ${shortId(p.id)}`);
         }
       });
@@ -187,11 +281,12 @@ export function buildProgram(deps: CliDeps): Command {
     .command("approve")
     .description("Approve a proposed preference so it takes effect.")
     .argument("<id>", "Preference id (or unique prefix)")
+    .option("--force", "Apply even if the preference changed since you read it")
     .option("--json", "Output JSON")
     .action((id, opts) => {
       withContext(deps, (ctx) => {
         const pref = ctx.preferences.resolveRef(id);
-        const updated = ctx.preferences.approve(pref.id);
+        const updated = ctx.preferences.approve(pref.id, { expectedVersion: pref.version, force: opts.force });
         if (opts.json) return printJson(updated);
         line(`Approved (${shortId(updated.id)}): ${updated.rule}`);
       });
@@ -201,11 +296,12 @@ export function buildProgram(deps: CliDeps): Command {
     .command("reject")
     .description("Reject a preference (kept for audit, never retrieved).")
     .argument("<id>", "Preference id (or unique prefix)")
+    .option("--force", "Apply even if the preference changed since you read it")
     .option("--json", "Output JSON")
     .action((id, opts) => {
       withContext(deps, (ctx) => {
         const pref = ctx.preferences.resolveRef(id);
-        const updated = ctx.preferences.reject(pref.id);
+        const updated = ctx.preferences.reject(pref.id, { expectedVersion: pref.version, force: opts.force });
         if (opts.json) return printJson(updated);
         line(`Rejected (${shortId(updated.id)}): ${updated.rule}`);
       });
@@ -216,11 +312,12 @@ export function buildProgram(deps: CliDeps): Command {
     .command("forget")
     .description("Permanently delete a preference and its evidence.")
     .argument("<id>", "Preference id (or unique prefix)")
+    .option("--force", "Delete even if the preference changed since you read it")
     .option("--json", "Output JSON")
     .action((id, opts) => {
       withContext(deps, (ctx) => {
         const pref = ctx.preferences.resolveRef(id);
-        ctx.preferences.forget(pref.id);
+        ctx.preferences.forget(pref.id, { expectedVersion: pref.version, force: opts.force });
         if (opts.json) return printJson({ forgotten: pref.id });
         line(`Forgot (${shortId(pref.id)}): ${pref.rule}`);
       });
@@ -237,19 +334,20 @@ export function buildProgram(deps: CliDeps): Command {
         const pref = ctx.preferences.resolveRef(id);
         const evidence = ctx.preferences.evidenceFor(pref.id);
         const repo = pref.repoId ? ctx.repos.getById(pref.repoId) : null;
-        if (opts.json) {
-          return printJson({ preference: pref, repo, evidence });
-        }
+        if (opts.json) return printJson({ preference: pref, repo, evidence });
         line(`Preference ${pref.id}`);
         line(`  rule:       ${pref.rule}`);
         line(`  category:   ${pref.category}`);
+        line(`  domain:     ${pref.domain ?? "-"}`);
+        line(`  polarity:   ${pref.polarity}`);
         line(`  scope:      ${pref.scope}${repo ? ` (${repo.name})` : ""}`);
         line(`  status:     ${pref.status}`);
         line(`  confidence: ${pref.confidence.toFixed(2)}`);
+        line(`  version:    ${pref.version}`);
         line(`  created:    ${pref.createdAt}`);
         line(`  last used:  ${pref.lastUsedAt ?? "never"}`);
         line(`  evidence (${evidence.length}):`);
-        for (const e of evidence) line(`    - (${e.source}) ${e.evidenceText}`);
+        for (const e of evidence) line(`    - (${e.source}${e.agentId ? `/${e.agentId}` : ""}) ${e.evidenceText}`);
         line("");
         line("This preference exists because it was recorded from the evidence above and");
         line("has not been rejected. Repo preferences override global ones during retrieval.");
@@ -259,20 +357,21 @@ export function buildProgram(deps: CliDeps): Command {
   // ---- get ----------------------------------------------------------------
   program
     .command("get")
-    .description("Retrieve ranked, conflict-resolved context for the current repo & task (JSON).")
+    .description("Retrieve relevance-filtered, conflict-resolved context (JSON).")
     .option("--cwd <dir>", "Working directory", process.cwd())
     .option("--task <text>", "Description of the current task")
     .option("--limit <n>", "Max preferences to return (1-15)", (v) => parseInt(v, 10))
     .option("--include-proposed", "Also include proposed/observed preferences")
     .action((opts) => {
       withContext(deps, (ctx) => {
-        const result = ctx.retrieval.retrieve({
-          cwd: opts.cwd,
-          task: opts.task,
-          limit: opts.limit,
-          includeProposed: Boolean(opts.includeProposed),
-        });
-        printJson(result);
+        printJson(
+          ctx.retrieval.retrieve({
+            cwd: opts.cwd,
+            task: opts.task,
+            limit: opts.limit,
+            includeProposed: Boolean(opts.includeProposed),
+          }),
+        );
       });
     });
 
@@ -302,8 +401,11 @@ export function buildProgram(deps: CliDeps): Command {
     .description("Record a repo-scoped preference for the current repository.")
     .argument("<rule>", "The preference rule text")
     .option("--category <category>", "Preference category", "general")
+    .option("--domain <domain>", "Explicit decision domain (optional)")
     .option("--lock", "Create it as a locked preference")
     .option("--evidence <text>", "Optional supporting evidence")
+    .option("--agent-id <id>", "Provenance: which agent recorded this")
+    .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
@@ -312,11 +414,13 @@ export function buildProgram(deps: CliDeps): Command {
         const pref = ctx.preferences.remember({
           rule,
           category: opts.category,
+          domain: opts.domain ?? null,
           scope: "repo",
           repoId: r.id,
           status: opts.lock ? "locked" : "approved",
           evidence: opts.evidence,
           source: "explicit",
+          ...provenance(opts),
         });
         if (opts.json) return printJson(pref);
         line(`Remembered repo preference [${pref.status}] (${shortId(pref.id)}) for ${r.name}: ${pref.rule}`);
@@ -408,7 +512,6 @@ export function buildProgram(deps: CliDeps): Command {
           );
         }
         ctx.environments.setVariable(environment.id, varName, value);
-        // Deliberately do NOT echo the value.
         line(`Set ${varName} for environment "${name}" (value stored securely).`);
       });
     });
@@ -438,18 +541,23 @@ export function buildProgram(deps: CliDeps): Command {
     .action(async (names: string[], opts) => {
       const passthrough = deps.passthrough;
       if (!passthrough || passthrough.length === 0) {
-        throw new CtxError('Provide a command after "--", e.g. ctx env run test-api -- npm test');
+        throw new CtxError(
+          'Provide a command after the separator, e.g.\n' +
+            "  bash:       ctx env run test-api -- npm test\n" +
+            "  PowerShell: ctx env run test-api --exec npm test",
+        );
       }
       await withContext(deps, async (ctx) => {
         const repo = ctx.repos.resolve(opts.cwd);
         const resolved = names.map((n) => ctx.environments.requireByName(n, repo?.id ?? null));
+        // Build a child-specific env object; never mutate this process's env.
         const injected = ctx.environments.resolveVariables(resolved);
+        const childEnv = { ...(deps.env ?? process.env), ...injected };
 
         const [cmd, ...cmdArgs] = passthrough;
         const child = Bun.spawn([cmd!, ...cmdArgs], {
           cwd: opts.cwd,
-          // Merge (never print) secrets into the child environment only.
-          env: { ...(deps.env ?? process.env), ...injected },
+          env: childEnv,
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
@@ -497,27 +605,47 @@ export function buildProgram(deps: CliDeps): Command {
   return program;
 }
 
+function detectClaude(claudeHome?: string): {
+  skillsInstalled: boolean;
+  instructionsInstalled: boolean;
+} {
+  const home = claudeHome ?? join(homedir(), ".claude");
+  const skill = join(home, "skills", "context", "SKILL.md");
+  const instructions = join(home, "CLAUDE.md");
+  let instructionsInstalled = false;
+  try {
+    instructionsInstalled =
+      existsSync(instructions) && readFileSync(instructions, "utf8").includes(CTX_INSTRUCTION_BEGIN);
+  } catch {
+    instructionsInstalled = false;
+  }
+  return { skillsInstalled: existsSync(skill), instructionsInstalled };
+}
+
 /** Entry used by src/index.ts. Handles clean error reporting and exit codes. */
 export async function runCli(argv: string[], deps: CliDeps): Promise<void> {
   const program = buildProgram(deps);
   program.exitOverride();
-  program.configureOutput({
-    writeErr: (str) => process.stderr.write(str),
-  });
+  program.configureOutput({ writeErr: (str) => process.stderr.write(str) });
   try {
     await program.parseAsync(argv, { from: "user" });
   } catch (err) {
+    if (err instanceof ZodError) {
+      const msg = err.issues
+        .map((i) => `${i.path.join(".") || "input"}: ${i.message}`)
+        .join("; ");
+      warn(`error: invalid input — ${msg}`);
+      process.exitCode = new ValidationError(msg).exitCode;
+      return;
+    }
     if (err instanceof CtxError) {
       warn(`error: ${err.message}`);
       process.exitCode = err.exitCode;
       return;
     }
-    // commander throws for help/version/parse errors; it already printed output.
     const e = err as { code?: string; exitCode?: number };
     if (e && typeof e.code === "string" && e.code.startsWith("commander.")) {
-      if (e.code === "commander.helpDisplayed" || e.code === "commander.version") {
-        return;
-      }
+      if (e.code === "commander.helpDisplayed" || e.code === "commander.version") return;
       process.exitCode = e.exitCode ?? 1;
       return;
     }

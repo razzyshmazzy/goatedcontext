@@ -1,26 +1,42 @@
+import type { Database } from "bun:sqlite";
 import type { Preference } from "../preferences/types.ts";
 import { ACTIVE_STATUSES } from "../preferences/types.ts";
 import type { PreferenceService } from "../preferences/service.ts";
 import type { RepoService, Repo } from "../repos/repo.ts";
 import type { EnvironmentService } from "../environments/service.ts";
 import {
-  coverageScore,
-  JaccardSimilarity,
-  type Similarity,
-} from "../preferences/similarity.ts";
-import { precedenceRank, outranks } from "./precedence.ts";
+  contentTokens,
+  inferDomains,
+  isExclusiveDomain,
+  stem,
+  subjectKey,
+  subjectTokens,
+} from "../preferences/analysis.ts";
+import { precedenceRank } from "./precedence.ts";
+import { withReadTx } from "../../storage/sqlite/tx.ts";
 
-/** A conflict resolution threshold: two rules above this are "the same topic". */
-const CONFLICT_THRESHOLD = 0.55;
+/** Minimum relevance to be returned. Below this, a preference is dropped. */
+const RELEVANCE_THRESHOLD = 0.25;
+const MAX_RESULTS = 15;
+const DEFAULT_LIMIT = 12;
+
+// Scoring weights.
+const W_DOMAIN = 0.5;
+const W_CATEGORY = 0.2;
+const W_OVERLAP = 0.35;
+const W_REPO = 0.1;
+const W_LOCKED = 0.08;
+const W_APPROVED = 0.04;
 
 export interface RetrievedPreference {
   id: string;
   rule: string;
   category: string;
+  domain: string | null;
+  polarity: string;
   scope: string;
   status: string;
   confidence: number;
-  /** Relevance to the supplied task, in [0, 1]. */
   relevance: number;
 }
 
@@ -49,42 +65,101 @@ export interface RetrievalOptions {
   includeProposed?: boolean;
 }
 
+interface Scored {
+  pref: Preference;
+  relevance: number;
+}
+
+/**
+ * Pure, deterministic conflict resolver. Operates on preferences (which carry
+ * `domain` and `polarity`), independent of any task or scoring, so it is easy to
+ * test exhaustively.
+ *
+ * Rules:
+ *  - Exclusive domains (package-manager, database, ui-framework, state-management)
+ *    admit ONE winner: the highest-precedence preference wins; the rest are
+ *    overridden. This is what makes repo "use npm" beat global "prefer pnpm".
+ *  - Non-exclusive domains keep every preference EXCEPT those addressing the same
+ *    subject (same subjectKey) — including direct contradictions (same subject,
+ *    opposite polarity) — where the highest-precedence one wins.
+ *
+ * Precedence is the documented hierarchy (see precedence.ts). Input order breaks
+ * precedence ties (callers pass most-relevant first).
+ */
+export function resolveConflicts(prefs: Preference[]): {
+  winners: Preference[];
+  overridden: { id: string; rule: string; supersededBy: string }[];
+} {
+  // Stable sort by precedence so the strongest candidate in each group is seen
+  // first; equal precedence preserves caller order (relevance).
+  const ordered = prefs
+    .map((p, i) => ({ p, i }))
+    .sort((a, b) => precedenceRank(a.p) - precedenceRank(b.p) || a.i - b.i)
+    .map((x) => x.p);
+
+  const winners: Preference[] = [];
+  const overridden: { id: string; rule: string; supersededBy: string }[] = [];
+  const exclusiveWinner = new Map<string, Preference>();
+  const subjectWinner = new Map<string, Preference>();
+
+  for (const p of ordered) {
+    if (isExclusiveDomain(p.domain)) {
+      const key = p.domain!;
+      const held = exclusiveWinner.get(key);
+      if (held) {
+        overridden.push({ id: p.id, rule: p.rule, supersededBy: held.id });
+        continue;
+      }
+      exclusiveWinner.set(key, p);
+      winners.push(p);
+    } else {
+      const key = `${p.domain ?? ""}|${subjectKey(p.rule)}`;
+      const held = subjectWinner.get(key);
+      if (held) {
+        overridden.push({ id: p.id, rule: p.rule, supersededBy: held.id });
+        continue;
+      }
+      subjectWinner.set(key, p);
+      winners.push(p);
+    }
+  }
+  return { winners, overridden };
+}
+
 /**
  * The central retrieval pipeline. Adapter-agnostic: any agent integration calls
- * this and gets back a concise, ranked, conflict-resolved view of the developer's
- * context for the current repository and task.
+ * this and gets back a concise, relevance-filtered, conflict-resolved view.
  */
 export class RetrievalEngine {
-  private readonly sim: Similarity;
-
   constructor(
+    private readonly db: Database,
     private readonly prefs: PreferenceService,
     private readonly repos: RepoService,
     private readonly envs: EnvironmentService,
-    sim: Similarity = new JaccardSimilarity(),
-  ) {
-    this.sim = sim;
-  }
+  ) {}
 
   retrieve(opts: RetrievalOptions): RetrievalResult {
-    const limit = clampLimit(opts.limit ?? 12);
+    const limit = clampLimit(opts.limit ?? DEFAULT_LIMIT);
     const repo = this.repos.resolve(opts.cwd);
     const task = opts.task?.trim() || null;
 
-    // 1-2. Candidate set: global preferences + this repo's preferences.
-    const candidates = this.candidates(repo, opts.includeProposed ?? false);
+    // Gather + rank + resolve inside a read snapshot so a concurrent commit is
+    // observed either fully-before or fully-after — never half-applied.
+    const { top, overridden } = withReadTx(this.db, () => {
+      const candidates = this.candidates(repo, opts.includeProposed ?? false);
+      const scored = this.rank(candidates, task);
+      const { winners, overridden } = resolveConflicts(scored.map((s) => s.pref));
+      const winnerIds = new Set(winners.map((w) => w.id));
+      const kept = scored
+        .filter((s) => winnerIds.has(s.pref.id))
+        .sort(
+          (a, b) => b.relevance - a.relevance || precedenceRank(a.pref) - precedenceRank(b.pref),
+        )
+        .slice(0, limit);
+      return { top: kept, overridden };
+    });
 
-    // 3. Rank by relevance to the task.
-    const scored = candidates
-      .map((p) => ({ pref: p, relevance: this.relevance(p, task) }))
-      .sort((a, b) => b.relevance - a.relevance || precedenceRank(a.pref) - precedenceRank(b.pref));
-
-    // 4. Resolve conflicts: among near-duplicate rules, keep the highest-precedence.
-    const { winners, overridden } = this.resolveConflicts(scored);
-
-    // 5. Concise output: keep the most relevant, roughly 5–15.
-    const top = winners.slice(0, limit);
-
+    // Best-effort write, outside the read snapshot.
     this.prefs.markUsed(top.map((w) => w.pref.id));
 
     return {
@@ -94,6 +169,8 @@ export class RetrievalEngine {
         id: w.pref.id,
         rule: w.pref.rule,
         category: w.pref.category,
+        domain: w.pref.domain,
+        polarity: w.pref.polarity,
         scope: w.pref.scope,
         status: w.pref.status,
         confidence: round(w.pref.confidence),
@@ -105,12 +182,10 @@ export class RetrievalEngine {
   }
 
   private candidates(repo: Repo | null, includeProposed: boolean): Preference[] {
-    const statuses = includeProposed
+    const statuses: string[] = includeProposed
       ? [...ACTIVE_STATUSES, "proposed", "observed"]
-      : ACTIVE_STATUSES;
-
-    const all = this.prefs.list();
-    return all.filter((p) => {
+      : [...ACTIVE_STATUSES];
+    return this.prefs.list().filter((p) => {
       if (!statuses.includes(p.status)) return false;
       if (p.scope === "global") return true;
       if (p.scope === "repo") return repo != null && p.repoId === repo.id;
@@ -119,59 +194,67 @@ export class RetrievalEngine {
   }
 
   /**
-   * Relevance blends task/rule text overlap with a small base weight from status
-   * and confidence, so that even a preference with no lexical overlap still
-   * surfaces when there is room (and authoritative rules aren't buried).
+   * Score candidates against the task and drop anything below the relevance
+   * threshold. With no task, everything active is kept (ordered later by
+   * precedence) so `ctx get` still shows the repo's standing rules.
    */
-  private relevance(p: Preference, task: string | null): number {
-    const base = 0.15 * p.confidence + statusWeight(p.status);
-    if (!task) return clamp01(base);
-    const haystack = `${p.rule} ${p.category}`;
-    const textScore = coverageScore(task, haystack, this.sim);
-    return clamp01(0.75 * textScore + base);
+  private rank(candidates: Preference[], task: string | null): Scored[] {
+    if (!task) {
+      return candidates.map((pref) => ({ pref, relevance: baseWeight(pref) }));
+    }
+
+    const taskTerms = new Set(contentTokens(task));
+    const taskDomains = inferDomains(task);
+    const idf = this.buildIdf(candidates);
+
+    const denom =
+      [...taskTerms].reduce((sum, t) => sum + (idf.get(t) ?? DEFAULT_IDF), 0) || 1;
+
+    const scored: Scored[] = [];
+    for (const pref of candidates) {
+      const prefTerms = new Set([
+        ...subjectTokens(pref.rule),
+        ...subjectTokens(pref.category),
+      ]);
+
+      let shared = 0;
+      for (const t of taskTerms) if (prefTerms.has(t)) shared += idf.get(t) ?? DEFAULT_IDF;
+      const overlap = shared / denom;
+
+      const domainMatch = pref.domain != null && taskDomains.has(pref.domain);
+      const categoryMatch =
+        taskTerms.has(stem(pref.category)) || taskDomains.has(pref.category);
+
+      let score = 0;
+      if (domainMatch) score += W_DOMAIN;
+      if (categoryMatch) score += W_CATEGORY;
+      score += W_OVERLAP * overlap;
+      score += baseWeight(pref);
+
+      score = clamp01(score);
+      if (score >= RELEVANCE_THRESHOLD) scored.push({ pref, relevance: score });
+    }
+    return scored;
   }
 
-  private resolveConflicts(
-    scored: { pref: Preference; relevance: number }[],
-  ): {
-    winners: { pref: Preference; relevance: number }[];
-    overridden: { id: string; rule: string; supersededBy: string }[];
-  } {
-    const winners: { pref: Preference; relevance: number }[] = [];
-    const overridden: { id: string; rule: string; supersededBy: string }[] = [];
-
-    for (const item of scored) {
-      const clashIndex = winners.findIndex(
-        (w) =>
-          w.pref.category === item.pref.category &&
-          this.sim.score(w.pref.rule, item.pref.rule) >= CONFLICT_THRESHOLD,
-      );
-      if (clashIndex === -1) {
-        winners.push(item);
-        continue;
-      }
-      const kept = winners[clashIndex]!;
-      if (outranks(item.pref, kept.pref)) {
-        winners[clashIndex] = item;
-        overridden.push({
-          id: kept.pref.id,
-          rule: kept.pref.rule,
-          supersededBy: item.pref.id,
-        });
-      } else {
-        overridden.push({
-          id: item.pref.id,
-          rule: item.pref.rule,
-          supersededBy: kept.pref.id,
-        });
-      }
+  /** Document frequency → idf over the candidate set's subject tokens. */
+  private buildIdf(candidates: Preference[]): Map<string, number> {
+    const df = new Map<string, number>();
+    for (const pref of candidates) {
+      const terms = new Set([
+        ...subjectTokens(pref.rule),
+        ...subjectTokens(pref.category),
+      ]);
+      for (const t of terms) df.set(t, (df.get(t) ?? 0) + 1);
     }
-    return { winners, overridden };
+    const n = candidates.length || 1;
+    const idf = new Map<string, number>();
+    for (const [t, d] of df) idf.set(t, Math.log(1 + n / d));
+    return idf;
   }
 
   private environments(repo: Repo | null): RetrievedEnvironment[] {
-    const list = this.envs.listApplicable(repo?.id ?? null);
-    return list.map((e) => ({
+    return this.envs.listApplicable(repo?.id ?? null).map((e) => ({
       name: e.environment.name,
       scope: e.environment.scope,
       riskLevel: e.environment.riskLevel,
@@ -181,19 +264,18 @@ export class RetrievalEngine {
   }
 }
 
-function statusWeight(status: string): number {
-  switch (status) {
-    case "locked":
-      return 0.15;
-    case "approved":
-      return 0.1;
-    default:
-      return 0;
-  }
+const DEFAULT_IDF = Math.log(2);
+
+function baseWeight(pref: Preference): number {
+  let w = 0;
+  if (pref.scope === "repo") w += W_REPO;
+  if (pref.status === "locked") w += W_LOCKED;
+  else if (pref.status === "approved") w += W_APPROVED;
+  return w;
 }
 
 function clampLimit(n: number): number {
-  return Math.max(1, Math.min(15, Math.floor(n)));
+  return Math.max(1, Math.min(MAX_RESULTS, Math.floor(n)));
 }
 
 function clamp01(n: number): number {

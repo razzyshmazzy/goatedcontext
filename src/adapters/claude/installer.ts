@@ -1,11 +1,7 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { writeFileAtomic, withFileLock } from "../../utils/fs.ts";
 import {
   CLAUDE_SKILLS,
   CTX_INSTRUCTION_BLOCK,
@@ -27,46 +23,51 @@ export interface ClaudeInstallResult {
 
 /**
  * Installs the ctx Claude Code adapter:
- *  1. writes the context / context-learn / context-env skills into the user's
- *     global Claude skills directory, and
+ *  1. writes the context / context-learn / context-env skills, and
  *  2. inserts (or refreshes) a single, marker-delimited block into the user's
  *     global Claude instructions.
  *
- * Idempotent: running it twice never duplicates skills or the instruction block,
- * and it never touches unrelated instruction content.
+ * Concurrency-safe and idempotent: the whole install runs under an O_EXCL lock in
+ * the Claude home, every file is written atomically (temp + rename), and the
+ * instruction block is upserted between markers. Two simultaneous installs cannot
+ * duplicate the block, produce a partial skill file, or truncate CLAUDE.md.
  */
 export function installClaude(opts: ClaudeInstallOptions = {}): ClaudeInstallResult {
   const claudeHome = opts.claudeHome ?? join(homedir(), ".claude");
-  const skillsRoot = join(claudeHome, "skills");
-  mkdirSync(skillsRoot, { recursive: true });
+  mkdirSync(claudeHome, { recursive: true });
+  const lockFile = join(claudeHome, ".ctx-install.lock");
 
-  const installedSkills: string[] = [];
-  for (const skill of CLAUDE_SKILLS) {
-    const dir = join(skillsRoot, skill.dir);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "SKILL.md"), skill.content, "utf8");
-    installedSkills.push(skill.dir);
-  }
+  return withFileLock(lockFile, () => {
+    const skillsRoot = join(claudeHome, "skills");
+    mkdirSync(skillsRoot, { recursive: true });
 
-  const instructionsFile = join(claudeHome, "CLAUDE.md");
-  const action = upsertInstructionBlock(instructionsFile);
+    const installedSkills: string[] = [];
+    for (const skill of CLAUDE_SKILLS) {
+      const dir = join(skillsRoot, skill.dir);
+      mkdirSync(dir, { recursive: true });
+      writeFileAtomic(join(dir, "SKILL.md"), skill.content, 0o644);
+      installedSkills.push(skill.dir);
+    }
 
-  return {
-    skillsDir: skillsRoot,
-    installedSkills,
-    instructionsFile,
-    instructionsAction: action,
-  };
+    const instructionsFile = join(claudeHome, "CLAUDE.md");
+    const action = upsertInstructionBlock(instructionsFile);
+
+    return {
+      skillsDir: skillsRoot,
+      installedSkills,
+      instructionsFile,
+      instructionsAction: action,
+    };
+  });
 }
 
 /**
- * Adds the ctx block to a global instructions file without disturbing anything
- * else. If the marker block already exists it is replaced in place; otherwise
- * the block is appended.
+ * Adds/refreshes the ctx block in a global instructions file without disturbing
+ * anything else. Atomic write; callers that may race should hold the install lock.
  */
 export function upsertInstructionBlock(file: string): "created" | "updated" | "unchanged" {
   if (!existsSync(file)) {
-    writeFileSync(file, CTX_INSTRUCTION_BLOCK + "\n", "utf8");
+    writeFileAtomic(file, CTX_INSTRUCTION_BLOCK + "\n", 0o644);
     return "created";
   }
 
@@ -79,11 +80,11 @@ export function upsertInstructionBlock(file: string): "created" | "updated" | "u
     const after = current.slice(end + CTX_INSTRUCTION_END.length);
     const next = before + CTX_INSTRUCTION_BLOCK + after;
     if (next === current) return "unchanged";
-    writeFileSync(file, next, "utf8");
+    writeFileAtomic(file, next, 0o644);
     return "updated";
   }
 
   const separator = current.endsWith("\n") ? "\n" : "\n\n";
-  writeFileSync(file, current + separator + CTX_INSTRUCTION_BLOCK + "\n", "utf8");
+  writeFileAtomic(file, current + separator + CTX_INSTRUCTION_BLOCK + "\n", 0o644);
   return "updated";
 }

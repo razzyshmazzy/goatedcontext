@@ -96,24 +96,28 @@ ctx remember \
   "Prefer existing dependencies before installing another package."
 
 # 3. From inside any git repo, ask for relevant context for a task.
-ctx get --cwd "$PWD" --task "Add a date formatting helper"
+ctx get --cwd "$PWD" --task "Install a date formatting package"
 ```
 
-`ctx get` returns JSON like:
+`ctx get` is relevance-filtered: it returns only preferences that actually relate
+to the task (matching domain, category, or distinctive terms), so an unrelated task
+can legitimately return an empty list. It returns JSON like:
 
 ```json
 {
   "repo": { "id": "…", "name": "drivesafe", "identity": "remote:github.com/you/drivesafe" },
-  "task": "Add a date formatting helper",
+  "task": "Install a date formatting package",
   "preferences": [
     {
       "id": "…",
       "rule": "Prefer existing dependencies before installing another package.",
       "category": "dependencies",
+      "domain": "dependency-policy",
+      "polarity": "positive",
       "scope": "global",
       "status": "approved",
       "confidence": 1,
-      "relevance": 0.25
+      "relevance": 0.62
     }
   ],
   "environments": [
@@ -131,7 +135,16 @@ ctx env add test-api
 ctx env set test-api OPENAI_API_KEY --value "sk-…"
 
 # Run a command with the secret injected into the CHILD process only.
+# bash/zsh:    use --
 ctx env run test-api -- sh -c 'test -n "$OPENAI_API_KEY" && echo "key present"'
+# PowerShell:  use --exec (PowerShell strips a bare --)
+ctx env run test-api --exec npm test
+```
+
+Check health any time:
+
+```bash
+ctx status
 ```
 
 Wire it into Claude Code:
@@ -200,8 +213,15 @@ When rules conflict, `ctx` resolves them predictably. Higher wins:
 4. **approved** global preference
 5. **proposed / observed** (only surfaced with `--include-proposed`)
 
-Repo-specific instructions therefore override your global defaults, and
-`rejected` preferences are never returned.
+Conflicts are detected by **decision domain**, not by wording. Preferences carry a
+domain (e.g. `package-manager`, `database`, `ui-framework`) inferred deterministically
+(or set with `--domain`). In a single-choice domain, the highest-precedence rule
+wins — so a repo rule "must use npm" overrides a global "prefer pnpm" even though the
+two share no words. Repo-specific instructions therefore override your global
+defaults, and `rejected` preferences are never returned.
+
+Directive **polarity** is preserved: "Use Redis" and "Never use Redis" are treated as
+opposite rules and never merged.
 
 ## Environments
 
@@ -216,7 +236,8 @@ ctx env set supabase-test SUPABASE_ANON_KEY --from-env SUPABASE_ANON_KEY
 
 ctx env list                       # names + availability, never values
 ctx env vars supabase-test         # variable NAMES only
-ctx env run supabase-test -- npm test
+ctx env run supabase-test -- npm test        # bash/zsh
+ctx env run supabase-test --exec npm test    # PowerShell (see note below)
 ctx env remove supabase-test
 ```
 
@@ -225,6 +246,12 @@ Environments **compose** left-to-right (later wins on conflicts):
 ```bash
 ctx env run supabase-test openai-dev -- npm test
 ```
+
+> **Shell note:** put the command after `--` in bash/zsh. In **PowerShell**, a bare
+> `--` is swallowed by the shell, so use `--exec` instead:
+> `ctx env run supabase-test --exec npm test`. Multiple `ctx env run` invocations are
+> safe to run concurrently — each child gets its own environment and secrets never
+> leak between them.
 
 Risk levels (`test` / `dev` / `prod`) are modelled today as advisory metadata so
 that production environments can require explicit confirmation in a future
@@ -261,30 +288,50 @@ Secrets are treated as radioactive. `ctx` **never**:
 - places secret values in SKILL.md files,
 - exposes secret values through `ctx get`.
 
-Secret **values** live only behind a `SecretStore` abstraction. The default
-backend encrypts each value with **AES-256-GCM**; the 32-byte key lives in a
-separate `~/.ctx/secrets/secret.key` file (`0600`) and the ciphertext in
-`~/.ctx/secrets/secrets.json` (`0600`). `ctx env run` decrypts values and injects
-them **only** into the child process environment.
+Secret **values** live only behind a `SecretStore` abstraction, selected
+automatically and shown by `ctx status`:
 
-> **Limitation:** the encryption key currently sits next to the data on the same
-> machine, so this protects against casual disk inspection and keeps plaintext
-> out of SQLite, but it is not equivalent to a hardware-backed OS keychain. The
-> `SecretStore` interface exists precisely so an OS-keychain backend (macOS
-> Keychain, Windows Credential Manager, libsecret) can replace it later without
-> changing any callers.
+- **Windows (default): `windows-dpapi`.** Values are protected with the Windows
+  Data Protection API (CurrentUser). **No encryption key is stored on disk** — the
+  key is managed by the OS and bound to your user account and machine, so copying
+  the files to another account/machine yields nothing. This is the recommended,
+  secure backend.
+- **Fallback: `encrypted-file`.** AES-256-GCM with the key in a sibling
+  `~/.ctx/secrets/secret.key`. It keeps plaintext out of SQLite but the key sits
+  next to the data, so **anyone who can read the secrets directory can decrypt it**.
+  `ctx status` flags this backend as insecure with a warning. Force it with
+  `CTX_SECRET_BACKEND=file`.
+
+`ctx env run` decrypts values into the **child process environment only** — it never
+mutates the parent process env and never prints values. Secret writes are atomic
+(temp-file + rename) and locked, so concurrent `env set` cannot corrupt the store.
+
+> **Not yet keychain-equivalent on macOS/Linux.** There, `ctx` currently uses the
+> `encrypted-file` fallback. Native macOS Keychain / libsecret backends can be added
+> behind the same `SecretStore` interface without changing callers.
 
 ## Current limitations
 
-- **Similarity is lexical, not semantic.** De-duplication and relevance use a
-  deterministic token-overlap (Jaccard) strategy — good enough for the MVP,
-  behind a `Similarity` interface so embeddings can slot in later.
+- **Retrieval & conflict detection are deterministic/lexical, not semantic.**
+  Domains, polarity, dedup and relevance use keyword/token strategies behind a
+  `Similarity` interface, so embeddings can slot in later. Paraphrases that share no
+  keywords and no domain may not be recognized as equivalent.
 - **No-remote repos are identified by path.** Repos with an `origin` remote get
   a stable, move-proof identity; repos without a remote fall back to a hash of
   their root path and are treated as new if the directory moves.
-- **Secret backend is an encrypted local file**, not an OS keychain yet (above).
+- **OS keychain only on Windows (DPAPI).** macOS/Linux use the encrypted-file
+  fallback for now.
 - **Single machine, no sync.** There is no cloud or multi-device sync.
 - **Claude Code is the only adapter** shipped so far.
+
+## Concurrency
+
+`ctx` is safe to run from many processes at once — several agents in one repo,
+agents across different repos, or reads racing writes. It uses WAL-mode SQLite with
+a busy timeout, short `IMMEDIATE`/`DEFERRED` transactions, atomic file writes, and
+optimistic-concurrency version checks on preference state changes. There is no global
+lock, so independent agents don't block each other. See
+[ARCHITECTURE.md](./ARCHITECTURE.md#concurrency-model) for the full model.
 
 ## Roadmap
 
@@ -292,6 +339,7 @@ Not built yet, but the architecture deliberately leaves room for:
 
 - an **MCP server** exposing the same context engine,
 - **Codex** and **Cursor** adapters,
+- native **macOS Keychain / libsecret** secret backends (Windows DPAPI ships today),
 - **organization / team** preference scope,
 - **cloud sync** and **encrypted multi-device sync**,
 - **semantic retrieval / embeddings**,

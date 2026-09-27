@@ -33,6 +33,7 @@ export class CtxContext {
     this.repos = new RepoService(db);
     this.environments = new EnvironmentService(db, secrets);
     this.retrieval = new RetrievalEngine(
+      db,
       this.preferences,
       this.repos,
       this.environments,
@@ -44,7 +45,7 @@ export class CtxContext {
     ensureHome(paths);
     const db = openDatabase(paths);
     const config = loadConfig(paths);
-    const secrets = createSecretStore(paths);
+    const secrets = createSecretStore(paths, env);
     return new CtxContext(paths, config, db, secrets);
   }
 

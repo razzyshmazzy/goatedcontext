@@ -28,12 +28,16 @@ the current repository and task:
 ctx get --cwd "$PWD" --task "<brief description of the current task>"
 ```
 
-The command returns concise JSON: the detected repository, a ranked list of
-applicable preferences (repo-specific rules override global ones), and the
-environments available here.
+The command returns concise JSON: the detected repository, a relevance-filtered
+and conflict-resolved list of applicable preferences (repo-specific rules override
+global ones), and the environments available here.
+
+`ctx get` is read-only and safe to call as often as you like — including while
+other agents are working in the same or other repositories. Call it before each
+consequential decision rather than caching it.
 
 Apply the returned preferences to your decision. If a repo preference and a
-global preference conflict, the repo preference wins. If `ctx` is not installed
-or returns nothing, proceed normally.
+global preference conflict, the repo preference wins. If `ctx` returns an empty
+preference list, there is no stored guidance for this task — proceed normally.
 
 Never ask `ctx` for secrets — it does not return them, by design.

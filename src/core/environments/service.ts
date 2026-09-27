@@ -81,7 +81,14 @@ export class EnvironmentService {
   ) {}
 
   add(input: AddEnvironmentInput): Environment {
-    const scope: EnvScope = input.scope ?? "global";
+    const name = (input.name ?? "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+      throw new CtxError(
+        `Invalid environment name "${input.name}". Use letters, digits, and . _ - (must start alphanumeric).`,
+      );
+    }
+    const scope = EnvScope.parse(input.scope ?? "global");
+    RiskLevel.parse(input.riskLevel ?? "test");
     const repoId = input.repoId ?? null;
     if (scope === "repo" && !repoId) {
       throw new CtxError(
@@ -91,8 +98,8 @@ export class EnvironmentService {
     if (scope === "global" && repoId) {
       throw new CtxError("Global environments must not be bound to a repo.");
     }
-    if (this.findByName(input.name, repoId)) {
-      throw new CtxError(`An environment named "${input.name}" already exists in this scope.`);
+    if (this.findByName(name, repoId)) {
+      throw new CtxError(`An environment named "${name}" already exists in this scope.`);
     }
     const id = newId();
     const ts = nowIso();
@@ -103,7 +110,7 @@ export class EnvironmentService {
       )
       .run(
         id,
-        input.name,
+        name,
         scope,
         repoId,
         input.riskLevel ?? "test",

@@ -18,3 +18,23 @@ export class NotFoundError extends CtxError {
     this.name = "NotFoundError";
   }
 }
+
+/**
+ * Thrown when an optimistic-concurrency check fails: the record changed since the
+ * caller last observed it, so the write is refused rather than clobbering newer
+ * state. Exit code 5 lets scripts distinguish this from other failures.
+ */
+export class ConflictError extends CtxError {
+  constructor(message: string) {
+    super(message, 5);
+    this.name = "ConflictError";
+  }
+}
+
+/** Thrown when a validated write receives invalid input. Exit code 2. */
+export class ValidationError extends CtxError {
+  constructor(message: string) {
+    super(message, 2);
+    this.name = "ValidationError";
+  }
+}
