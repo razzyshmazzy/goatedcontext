@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+
+# Local test scratch dirs
+.tmp/
+coverage/
+
+# Never commit a real ctx home
+.ctx/

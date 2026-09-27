@@ -1,0 +1,33 @@
+{
+  "name": "ctx",
+  "version": "0.1.0",
+  "description": "A persistent, local-first developer-context layer for AI coding agents.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "ctx": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "skills",
+    "README.md",
+    "ARCHITECTURE.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "ctx": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.5.0"
+  }
+}
