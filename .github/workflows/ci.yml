@@ -23,12 +23,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Node is the production runtime; pin the engines baseline so the
-      # Node-runtime test exercises the minimum supported version.
+      # Node is the production runtime. Use a version that ships the built-in
+      # node:sqlite (the engines baseline is >=22.13); 24 is the local dev version.
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -39,11 +39,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # better-sqlite3 is the Node backend; rebuild its native addon against this
-      # runner's Node ABI so the published-CLI path is genuinely exercised.
-      - name: Rebuild native SQLite for Node
-        run: npm rebuild better-sqlite3
-
       - name: Typecheck
         run: bun run typecheck
 
@@ -52,3 +47,50 @@ jobs:
 
       - name: Test
         run: bun test
+
+  # Exercise the BUILT CLI on plain Node (no Bun) across the supported matrix,
+  # so the published node:sqlite runtime is genuinely tested — not simulated.
+  node-runtime:
+    name: node-runtime (node ${{ matrix.node }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["22", "24"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      # Drive the built bundle with the real `node` binary in an isolated CTX_HOME.
+      # No native addon is installed, so this must work with node:sqlite alone.
+      - name: Run built CLI on Node
+        shell: bash
+        env:
+          CTX_HOME: ${{ runner.temp }}/ctx-home
+          CTX_SECRET_BACKEND: file
+        run: |
+          set -e
+          node dist/index.js --version
+          node dist/index.js init
+          node dist/index.js status
+          node dist/index.js doctor --json > /dev/null
+          echo '{"cwd":".","prompt":"install a package dependency"}' | node dist/index.js hook claude-prompt
+          node dist/index.js stats

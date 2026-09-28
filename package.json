@@ -1,6 +1,6 @@
 {
   "name": "goatedcontext",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "A persistent, local-first developer-context layer for AI coding agents. Your preferences follow you across repos and reach Claude Code automatically.",
   "type": "module",
   "license": "MIT",
@@ -34,7 +34,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "ctx": "bun run src/index.ts",
@@ -45,13 +45,9 @@
     "prepublishOnly": "bun run typecheck && bun test && bun run build"
   },
   "dependencies": {
-    "better-sqlite3": "^11.10.0",
     "commander": "^12.1.0",
     "zod": "^3.23.8"
   },
-  "trustedDependencies": [
-    "better-sqlite3"
-  ],
   "devDependencies": {
     "@types/bun": "^1.1.0",
     "typescript": "^5.5.0"

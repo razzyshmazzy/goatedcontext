@@ -14,6 +14,8 @@ Your coding style, architecture preferences, repo rules, and dev environments fo
 npx goatedcontext setup
 ```
 
+Requires Node 22.13+ (uses Node's built-in SQLite — no native build, no compiler).
+
 Restart Claude Code.
 
 
@@ -101,7 +103,7 @@ Repo rules override global ones. Preferences are proposed, never silently made p
 
 ## Development
 
-Built with [Bun](https://bun.sh); published as a normal npm package that runs on Node ≥ 20 (no Bun needed at runtime).
+Built with [Bun](https://bun.sh); published as a normal npm package that runs on Node ≥ 22.13 using Node's built-in `node:sqlite` (no Bun and no native addon needed at runtime).
 
 ```powershell
 git clone https://github.com/razzyshmazzy/goatedcontext

@@ -16,11 +16,13 @@ Source, tests, and scratch files are intentionally excluded.
 ## Runtime model
 
 - **Development/tests** run under Bun (`bun:sqlite`).
-- **Published CLI** runs under Node ≥ 20 using `better-sqlite3` (a normal
-  dependency with prebuilt native binaries). Bun is never required at runtime.
+- **Published CLI** runs under Node ≥ 22.13 using the built-in `node:sqlite`. Bun
+  is never required at runtime, and there is **no native dependency** — no
+  `node-gyp`, prebuilt binary download, or C++/Python toolchain.
 
 The SQLite backend is chosen at runtime in `src/storage/sqlite/driver.ts`; the
-build marks `better-sqlite3` and `bun:sqlite` as external so neither is inlined.
+build keeps `bun:sqlite` external (so it never enters the Node bundle) while
+`node:sqlite` is a Node built-in and is external automatically.
 
 ## Before publishing
 
@@ -51,9 +53,10 @@ CTX_HOME=/tmp/ctx-home /tmp/ctx-check/bin/ctx status
 
 ## Version
 
-Bump the version in **both** `package.json` and the `VERSION` constant in
-`src/cli/index.ts` (they must match — `ctx setup` uses the version to decide when
-to upgrade a global install). Use semver; this packaging work is `0.2.0`.
+`package.json` is the **single source of truth** for the version. Bump it there
+only (e.g. `npm pkg set version=0.2.3`). The build injects that value into the
+bundle via a `--define __CTX_VERSION__` replacement, so `ctx --version` always
+matches `npm pkg get version` — there is no second constant to keep in sync.
 
 ## First publish
 

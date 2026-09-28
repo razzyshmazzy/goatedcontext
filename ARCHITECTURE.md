@@ -39,11 +39,15 @@ shaped the way it is. The guiding principle:
   abstraction for secret values.
 
 **Runtime.** ctx is developed and tested with Bun but published as a normal npm
-package that runs on Node ≥ 20 (`npx goatedcontext setup`). The only
+package that runs on Node ≥ 22.13 (`npx goatedcontext setup`). The only
 runtime-specific piece is SQLite: `storage/sqlite/driver.ts` exposes one tiny
-synchronous interface and selects `bun:sqlite` under Bun or `better-sqlite3` under
-Node at open time (both loaded via `createRequire`, so neither leaks into the other
-runtime's bundle). Everything else uses `node:` APIs that work on both.
+synchronous interface and selects `bun:sqlite` under Bun or the built-in
+`node:sqlite` under Node at open time (both loaded via `createRequire`, so neither
+leaks into the other runtime's bundle). Because `node:sqlite` ships with Node, the
+published package has **no native dependency** — no `node-gyp`, prebuilt binary, or
+C++/Python toolchain. Any small behavioral difference between the two bindings
+(parameter coercion, missing-row result, `run()` metadata) is normalized inside the
+driver. Everything else uses `node:` APIs that work on both.
 
 ### Directory layout
 

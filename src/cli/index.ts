@@ -20,10 +20,9 @@ import { runSetup, renderSetup } from "./setup.ts";
 import { readStdin, readStdinLine, runChildInherit } from "../utils/runtime.ts";
 import { timeAgo } from "../utils/time.ts";
 import { toJson as statsToJson } from "../core/stats/stats.ts";
+import { VERSION } from "../version.ts";
 import type { Scope } from "../core/preferences/types.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
-
-const VERSION = "0.2.0";
 
 /** Args after a `--`/`--exec` separator, captured by the entry point for `env run`. */
 export interface CliDeps {
