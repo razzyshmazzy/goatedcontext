@@ -188,6 +188,10 @@ Persistent developer preferences are retrieved for you automatically.
 - When the user expresses a reusable engineering preference or correction, use the
   \`context-learn\` skill to propose it (with \`--agent-id\`/\`--session-id\`).
   Proposals are NOT permanent until the developer approves them.
+- If the user asks to see goatedcontext/ctx usage stats (e.g. "show my ctx stats",
+  "how often has ctx helped", "how many times has ctx injected preferences"), run
+  \`ctx stats\` and show the result rather than estimating from memory. Only when
+  asked — never run it automatically.
 - Never store secrets, credentials, tokens, private keys, or environment variable
   values as developer preferences. Secrets belong only in \`ctx\` environments
   (\`context-env\` skill).

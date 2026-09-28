@@ -18,6 +18,8 @@ import { line, printJson, warn } from "./output.ts";
 import { runDoctor, renderDoctor } from "./doctor.ts";
 import { runSetup, renderSetup } from "./setup.ts";
 import { readStdin, readStdinLine, runChildInherit } from "../utils/runtime.ts";
+import { timeAgo } from "../utils/time.ts";
+import { toJson as statsToJson } from "../core/stats/stats.ts";
 import type { Scope } from "../core/preferences/types.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
 
@@ -118,6 +120,7 @@ export function buildProgram(deps: CliDeps): Command {
         const envs = ctx.environments.listApplicable(repo?.id ?? null);
         const claude = detectClaude(opts.claudeHome);
         const secret = ctx.secrets.describe();
+        const stats = ctx.stats.read();
 
         const summary = {
           version: VERSION,
@@ -132,6 +135,7 @@ export function buildProgram(deps: CliDeps): Command {
           },
           environments: envs.map((e) => ({ name: e.environment.name, available: e.available })),
           claude,
+          usefulInjections: stats.contextInjections,
           storage: {
             walEnabled: true,
             secretBackend: secret.backend,
@@ -169,6 +173,11 @@ export function buildProgram(deps: CliDeps): Command {
             ? "  ✓ proactive retrieval hook installed"
             : "  ! proactive retrieval hook missing (run: ctx install claude)",
         );
+        line(
+          stats.contextInjections > 0
+            ? `  ✓ ${stats.contextInjections} useful injection${stats.contextInjections === 1 ? "" : "s"} so far`
+            : "  · no useful injections yet",
+        );
         line("");
         line("Storage:");
         line("  SQLite WAL enabled");
@@ -194,6 +203,41 @@ export function buildProgram(deps: CliDeps): Command {
       if (opts.json) printJson(report);
       else for (const l of renderDoctor(report)) line(l);
       if (!report.ok) process.exitCode = 1;
+    });
+
+  // ---- stats --------------------------------------------------------------
+  program
+    .command("stats")
+    .description("Show local-only effectiveness stats: how often ctx has injected useful context.")
+    .option("--json", "Output stable machine-readable JSON (raw ISO timestamp)")
+    .option("--reset", "Clear only the stats counters (never touches preferences/environments/history)")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        if (opts.reset) {
+          const ok = ctx.stats.reset();
+          if (opts.json) return printJson({ reset: ok, stats: statsToJson(ctx.stats.read()) });
+          if (ok) line("goatedcontext stats reset.");
+          else warn("Could not reset stats (the stats store was not writable).");
+          if (!ok) process.exitCode = 1;
+          return;
+        }
+
+        const s = ctx.stats.read();
+        if (opts.json) return printJson(statsToJson(s));
+
+        const row = (label: string, value: number) =>
+          line(`${(label + ":").padEnd(22)}${String(value).padStart(6)}`);
+        line("goatedcontext stats");
+        line("");
+        row("Hook runs", s.hookRuns);
+        row("Useful injections", s.contextInjections);
+        row("No relevant context", s.noMatch);
+        row("Preferences injected", s.preferencesInjected);
+        row("Proposals created", s.proposalsCreated);
+        line("");
+        line("Last useful injection:");
+        line(timeAgo(s.lastInjectionAt));
+      });
     });
 
   // ---- remember -----------------------------------------------------------
@@ -263,6 +307,9 @@ export function buildProgram(deps: CliDeps): Command {
           source: opts.source,
           ...provenance(opts),
         });
+        // Count only brand-new proposals (decision A): when an equivalent proposal
+        // already exists we merely accumulate evidence, which is not a new proposal.
+        if (!result.merged) ctx.stats.recordProposalCreated();
         if (opts.json) return printJson(result);
         const p = result.preference;
         const c = ctx.preferences.evidenceCount(p.id);
@@ -559,7 +606,11 @@ export function buildProgram(deps: CliDeps): Command {
         withContext(deps, (ctx) => {
           const result = ctx.retrieval.retrieve({ cwd, task: prompt, track: false });
           const block = formatHookContext(result);
+          // Emit the injected block BEFORE touching stats, so a stats write can
+          // never affect what Claude receives. Stats recording is itself fail-open.
           if (block) process.stdout.write(block + "\n");
+          if (block) ctx.stats.recordHookInjection(result.preferences.length);
+          else ctx.stats.recordHookNoMatch();
           if (debug) hookDebug(deps, `fired injected=${block ? "yes" : "no"} n=${result.preferences.length} cwd=${cwd}`);
         });
       } catch (err) {

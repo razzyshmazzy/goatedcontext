@@ -21,7 +21,7 @@ Restart Claude Code.
 ctx status
 ```
 
-No repo to clone, no Bun, no manual steps. `setup` initializes your local context, installs the Claude Code adapter (skills + proactive hook), and leaves a persistent `ctx` command on your PATH. It's idempotent — run it again anytime to repair or verify.
+If something looks wrong, rerun the installation; it's idempotent, meaning you can run it again anytime to repair or verify.
 
 ## Try it
 
@@ -33,11 +33,14 @@ Then open any repo and use Claude normally.
 
 Relevant preferences are injected automatically before Claude works. If nothing is relevant, nothing is injected.
 
+In that sense, GoatedContext works similar to my [AquaAgent](https://github.com/razzyshmazzy/AquaAgent) but minus the semantic embedding.
+
 ## Useful
 
 ```powershell
 ctx doctor
 ctx status
+ctx stats             # see how often goatedcontext has injected useful context
 ctx prefs
 ctx prefs pending
 ctx prefs approve <id>

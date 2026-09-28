@@ -8,6 +8,7 @@ import { RepoService } from "./repos/repo.ts";
 import { EnvironmentService } from "./environments/service.ts";
 import { EventService } from "./events/service.ts";
 import { RetrievalEngine } from "./retrieval/retrieval.ts";
+import { StatsStore } from "./stats/stats.ts";
 
 /**
  * The composition root for the ctx engine. Owns the database, config, secret
@@ -25,6 +26,8 @@ export class CtxContext {
   readonly environments: EnvironmentService;
   readonly events: EventService;
   readonly retrieval: RetrievalEngine;
+  /** Local-only aggregate effectiveness stats (a plain JSON file, never in SQLite). */
+  readonly stats: StatsStore;
 
   private constructor(paths: CtxPaths, config: Config, db: Database, secrets: SecretStore) {
     this.paths = paths;
@@ -35,6 +38,7 @@ export class CtxContext {
     this.repos = new RepoService(db);
     this.environments = new EnvironmentService(db, secrets);
     this.events = new EventService(db);
+    this.stats = new StatsStore(paths.home);
     this.retrieval = new RetrievalEngine(
       db,
       this.preferences,
