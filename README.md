@@ -1,5 +1,7 @@
 # goatedcontext
 
+[![CI](https://github.com/razzyshmazzy/goatedcontext/actions/workflows/ci.yml/badge.svg)](https://github.com/razzyshmazzy/goatedcontext/actions/workflows/ci.yml)
+
 > “You know what’s funny? GOATS!” — Goat Simulator
 
 Persistent developer preferences for Claude Code.
