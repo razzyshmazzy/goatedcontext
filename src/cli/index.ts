@@ -10,6 +10,7 @@ import { installClaude } from "../adapters/claude/installer.ts";
 import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
 import { detectPromptHook, formatHookContext } from "../adapters/claude/hook.ts";
 import { simulateHook } from "../adapters/claude/test-hook.ts";
+import { findConflicts } from "../core/preferences/conflicts.ts";
 import { appendFileSync } from "node:fs";
 import { line, printJson, warn } from "./output.ts";
 import { runDoctor, renderDoctor } from "./doctor.ts";
@@ -381,6 +382,76 @@ export function buildProgram(deps: CliDeps): Command {
         line("");
         line("This preference exists because it was recorded from the evidence above and");
         line("has not been rejected. Repo preferences override global ones during retrieval.");
+      });
+    });
+
+  // ---- conflicts ----------------------------------------------------------
+  program
+    .command("conflicts")
+    .description("Show active preferences that compete (only one can apply). Never auto-resolved.")
+    .option("--repo", "Analyze the current repo's effective set (repo + global)")
+    .option("--global", "Analyze global preferences only")
+    .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      if (opts.repo && opts.global) {
+        throw new CtxError("Use only one of --repo or --global.");
+      }
+      withContext(deps, (ctx) => {
+        const repo = ctx.repos.resolve(opts.cwd);
+        if (opts.repo && !repo) {
+          throw new CtxError("Not inside a git repository. --repo requires a git repo.");
+        }
+
+        const actives = ctx.preferences
+          .list()
+          .filter((p) => p.status === "approved" || p.status === "locked");
+        const globals = actives.filter((p) => p.scope === "global");
+
+        // Default follows the current context: in a repo, analyze its effective set
+        // (repo + global); otherwise fall back to global-only.
+        const scopeMode: "global" | "repo" = opts.global ? "global" : opts.repo || repo ? "repo" : "global";
+        const analyzing =
+          scopeMode === "global" ? "global" : `global + repo (${repo!.name})`;
+
+        let candidates = globals;
+        if (scopeMode === "repo") {
+          const repoPrefs = actives.filter((p) => p.scope === "repo" && p.repoId === repo!.id);
+          candidates = [...globals, ...repoPrefs];
+        }
+
+        const conflicts = findConflicts(candidates);
+
+        if (opts.json) {
+          return printJson({ analyzing, count: conflicts.length, conflicts });
+        }
+
+        line(`Conflicts — ${analyzing}`);
+        line("");
+        if (conflicts.length === 0) {
+          return line("No conflicts among active preferences.");
+        }
+        line(`${conflicts.length} conflict(s) found.`);
+        conflicts.forEach((c, i) => {
+          const heading =
+            c.kind === "exclusive-domain"
+              ? `exclusive-domain: ${c.domain}`
+              : `same-subject${c.domain ? ` (${c.domain})` : ""}: ${c.subject}`;
+          line("");
+          line(`${i + 1}) ${heading}`);
+          line(`   ${c.reason}`);
+          if (c.ambiguous) {
+            line("   ! ambiguous: members share the highest precedence — retrieval falls back to relevance/order.");
+          }
+          for (const m of c.members) {
+            const mark = m.applies ? "→ applies   " : "  suppressed ";
+            line(
+              `   ${mark} (${shortId(m.id)}) [${m.scope}/${m.status}] polarity=${m.polarity}  ${m.rule}`,
+            );
+          }
+        });
+        line("");
+        line("Resolve manually (e.g. `ctx forget <id>`, re-scope, or lock a rule); ctx never auto-resolves.");
       });
     });
 
