@@ -11,6 +11,7 @@ import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
 import { detectPromptHook, formatHookContext } from "../adapters/claude/hook.ts";
 import { appendFileSync } from "node:fs";
 import { line, printJson, warn } from "./output.ts";
+import { runDoctor, renderDoctor } from "./doctor.ts";
 import type { Scope } from "../core/preferences/types.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
 
@@ -149,6 +150,25 @@ export function buildProgram(deps: CliDeps): Command {
         line(`  secret backend: ${secret.backend}`);
         if (!secret.secure) line(`  WARNING: ${secret.note}`);
       });
+    });
+
+  // ---- doctor -------------------------------------------------------------
+  program
+    .command("doctor")
+    .description("Diagnose the ctx installation and suggest fixes for common problems.")
+    .option("--cwd <dir>", "Working directory", process.cwd())
+    .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      const report = runDoctor({
+        version: VERSION,
+        env: deps.env ?? process.env,
+        cwd: opts.cwd,
+        claudeHome: opts.claudeHome,
+      });
+      if (opts.json) printJson(report);
+      else for (const l of renderDoctor(report)) line(l);
+      if (!report.ok) process.exitCode = 1;
     });
 
   // ---- remember -----------------------------------------------------------

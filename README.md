@@ -51,12 +51,15 @@ Relevant preferences are injected automatically before Claude works. If nothing 
 ## Useful
 
 ```powershell
+ctx doctor
 ctx status
 ctx prefs
 ctx prefs pending
 ctx prefs approve <id>
 ctx why <id>
 ```
+
+`ctx doctor` checks your install end to end (database, schema, Git, secret backend, Claude skills/hook, and whether `ctx` resolves on PATH) and prints a concrete fix for anything broken. Add `--json` for scripts.
 
 ## Secrets & environments
 

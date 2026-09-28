@@ -116,6 +116,19 @@ export function detectPromptHook(settingsFile: string): boolean {
   return groups.some((g) => Array.isArray(g?.hooks) && g.hooks.some(isOurHook));
 }
 
+/** The exact command string configured for our prompt hook, or null if absent. */
+export function getPromptHookCommand(settingsFile: string): string | null {
+  const { obj } = readSettings(settingsFile);
+  if (!obj) return null;
+  const groups = (obj as { hooks?: { UserPromptSubmit?: HookGroup[] } })?.hooks?.UserPromptSubmit;
+  if (!Array.isArray(groups)) return null;
+  for (const g of groups) {
+    if (!Array.isArray(g?.hooks)) continue;
+    for (const h of g.hooks) if (isOurHook(h)) return h.command;
+  }
+  return null;
+}
+
 /**
  * Format the compact context block injected at prompt time. Returns null when
  * there is nothing relevant — so the user never sees ctx when it has nothing to
