@@ -102,3 +102,5 @@ Repo rules override global ones. Preferences are proposed, never silently made p
 bun test
 bun run typecheck
 ```
+
+![KonaGoat](https://imgur.com/a/jycdRlk)
