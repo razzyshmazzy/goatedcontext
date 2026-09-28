@@ -84,13 +84,17 @@ jobs:
       - name: Run built CLI on Node
         shell: bash
         env:
-          CTX_HOME: ${{ runner.temp }}/ctx-home
+          # Unique per matrix cell so parallel jobs never share a SQLite file.
+          CTX_HOME: ${{ runner.temp }}/ctx-home-${{ matrix.node }}
           CTX_SECRET_BACKEND: file
         run: |
           set -e
           node dist/index.js --version
           node dist/index.js init
           node dist/index.js status
-          node dist/index.js doctor --json > /dev/null
+          # `--skip-adapter` omits the optional Claude-adapter checks (absent on a
+          # bare runner) while STILL failing on real DB/runtime/config errors, so
+          # this stays a genuine gate rather than an ignored exit code.
+          node dist/index.js doctor --skip-adapter --json > /dev/null
           echo '{"cwd":".","prompt":"install a package dependency"}' | node dist/index.js hook claude-prompt
           node dist/index.js stats

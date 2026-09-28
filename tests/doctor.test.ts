@@ -102,6 +102,56 @@ test("missing Claude adapter reports hook/skills as failures", () => {
   rmSync(claudeHome, { recursive: true, force: true });
 });
 
+test("--skip-adapter omits the Claude checks and passes without an install", () => {
+  const home = initHome();
+  const claudeHome = tmp("ctx-doctor-claude-"); // exists but empty (no install)
+
+  const report = runDoctor({
+    version: "0.1.2",
+    env: { CTX_HOME: home, CTX_SECRET_BACKEND: "file" },
+    claudeHome,
+    which: neverFound,
+    skipAdapter: true,
+  });
+
+  // None of the optional Claude adapter checks are present…
+  for (const id of ["claude-home", "skills", "instructions", "hook", "hook-on-path"]) {
+    expect(report.checks.find((c) => c.id === id)).toBeUndefined();
+  }
+  // …and the report is healthy despite Claude not being installed.
+  expect(report.ok).toBe(true);
+  // Core checks still ran.
+  expect(check(report, "db-readable").status).toBe("ok");
+  expect(check(report, "integrity").status).toBe("ok");
+
+  rmSync(home, { recursive: true, force: true });
+  rmSync(claudeHome, { recursive: true, force: true });
+});
+
+test("--skip-adapter still FAILS on a real database error", () => {
+  const home = tmp("ctx-doctor-home-");
+  mkdirSync(home, { recursive: true });
+  // Garbage where the DB should be — a genuine runtime/DB error CI must catch.
+  writeFileSync(join(home, "ctx.db"), "this is definitely not a sqlite database", "utf8");
+
+  const report = runDoctor({
+    version: "0.1.2",
+    env: { CTX_HOME: home, CTX_SECRET_BACKEND: "file" },
+    which: neverFound,
+    skipAdapter: true,
+  });
+
+  // Skipping the adapter must NOT mask real DB failures.
+  const readable = check(report, "db-readable");
+  const failing: CheckStatus[] = [readable.status];
+  const integrity = report.checks.find((c) => c.id === "integrity");
+  if (integrity) failing.push(integrity.status);
+  expect(failing).toContain("fail");
+  expect(report.ok).toBe(false);
+
+  rmSync(home, { recursive: true, force: true });
+});
+
 test("malformed config.json is reported as a failure", () => {
   const home = initHome();
   writeFileSync(join(home, "config.json"), "{ this is : not valid json", "utf8");

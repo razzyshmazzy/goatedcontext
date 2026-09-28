@@ -191,6 +191,10 @@ export function buildProgram(deps: CliDeps): Command {
     .description("Diagnose the ctx installation and suggest fixes for common problems.")
     .option("--cwd <dir>", "Working directory", process.cwd())
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option(
+      "--skip-adapter",
+      "Skip the optional Claude adapter checks (CI-safe: still fails on real DB/runtime/config errors)",
+    )
     .option("--json", "Output JSON")
     .action((opts) => {
       const report = runDoctor({
@@ -198,6 +202,7 @@ export function buildProgram(deps: CliDeps): Command {
         env: deps.env ?? process.env,
         cwd: opts.cwd,
         claudeHome: opts.claudeHome,
+        skipAdapter: Boolean(opts.skipAdapter),
       });
       if (opts.json) printJson(report);
       else for (const l of renderDoctor(report)) line(l);

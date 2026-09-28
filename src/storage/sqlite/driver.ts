@@ -23,6 +23,8 @@
  * core services never see a runtime-specific quirk.
  */
 import { createRequire } from "node:module";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -146,11 +148,28 @@ function suppressSqliteExperimentalWarning(): void {
  * backend.
  */
 export function openDb(path: string, opts: OpenOptions = {}): Database {
+  const readonly = opts.readonly ?? false;
+  // Guarantee the open's own preconditions so it never fails with SQLite's opaque
+  // "unable to open database file" (which otherwise surfaces at the first
+  // statement, obscuring the real cause). This makes openDb self-sufficient
+  // regardless of caller, cwd, CTX_HOME, or OS — the parent dir no longer has to
+  // be pre-created by every caller.
+  if (path !== ":memory:") {
+    if (readonly) {
+      // A read-only open cannot create the file; give a clear, portable error.
+      if (!existsSync(path)) {
+        throw new Error(`Cannot open SQLite database read-only — file does not exist: ${path}`);
+      }
+    } else {
+      // A read-write/create open needs its parent directory to exist first.
+      mkdirSync(dirname(path), { recursive: true });
+    }
+  }
   if (isBun) {
     const { Database: BunDatabase } = nodeRequire("bun:sqlite");
     const raw = new BunDatabase(path, {
-      readonly: opts.readonly ?? false,
-      create: opts.create ?? !opts.readonly,
+      readonly,
+      create: opts.create ?? !readonly,
     });
     return wrapBun(raw);
   }
@@ -159,7 +178,7 @@ export function openDb(path: string, opts: OpenOptions = {}): Database {
   // node:sqlite opens read-write and creates the file by default; a read-only
   // open requires the file to already exist (matching the previous
   // `fileMustExist` behavior used by the doctor's integrity check).
-  const raw = new DatabaseSync(path, { readOnly: opts.readonly ?? false });
+  const raw = new DatabaseSync(path, { readOnly: readonly });
   return wrapNode(raw);
 }
 

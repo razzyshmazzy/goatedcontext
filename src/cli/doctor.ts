@@ -56,6 +56,13 @@ export interface DoctorDeps {
   claudeHome?: string;
   /** Resolve an executable on PATH (injectable for tests). */
   which?: (cmd: string, path?: string) => string | null;
+  /**
+   * Skip the optional Claude adapter checks (skills/instructions/hook/PATH).
+   * Intended for CI/headless runs where Claude Code is intentionally absent: the
+   * core DB/runtime/config/secret checks still run and can still fail the report,
+   * but the missing optional integration does not.
+   */
+  skipAdapter?: boolean;
 }
 
 function defaultWhich(cmd: string, path?: string): string | null {
@@ -93,6 +100,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
   const env = deps.env ?? process.env;
   const cwd = deps.cwd ?? process.cwd();
   const which = deps.which ?? defaultWhich;
+  const skipAdapter = deps.skipAdapter ?? false;
   const paths = resolvePaths(env);
   const claudeHome = deps.claudeHome ?? join(homedir(), ".claude");
 
@@ -320,76 +328,81 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
   }
 
   // ---- Claude adapter ------------------------------------------------------
-  add({
-    section: "Claude",
-    id: "claude-home",
-    label: "config location",
-    status: existsSync(claudeHome) ? "ok" : "warn",
-    detail: claudeHome,
-    fix: existsSync(claudeHome) ? undefined : "Run `ctx install claude` after installing Claude Code.",
-  });
+  // Optional integration. `--skip-adapter` omits this whole section so a headless
+  // /CI run is not failed by the (expected) absence of Claude Code, while every
+  // core DB/runtime/config/secret check above still runs and can still fail.
+  if (!skipAdapter) {
+    add({
+      section: "Claude",
+      id: "claude-home",
+      label: "config location",
+      status: existsSync(claudeHome) ? "ok" : "warn",
+      detail: claudeHome,
+      fix: existsSync(claudeHome) ? undefined : "Run `ctx install claude` after installing Claude Code.",
+    });
 
-  const skillFile = join(claudeHome, "skills", "context", "SKILL.md");
-  add({
-    section: "Claude",
-    id: "skills",
-    label: "skills installed",
-    status: existsSync(skillFile) ? "ok" : "fail",
-    fix: existsSync(skillFile) ? undefined : "Run `ctx install claude`.",
-  });
+    const skillFile = join(claudeHome, "skills", "context", "SKILL.md");
+    add({
+      section: "Claude",
+      id: "skills",
+      label: "skills installed",
+      status: existsSync(skillFile) ? "ok" : "fail",
+      fix: existsSync(skillFile) ? undefined : "Run `ctx install claude`.",
+    });
 
-  const instructionsFile = join(claudeHome, "CLAUDE.md");
-  let instructionsOk = false;
-  try {
-    instructionsOk =
-      existsSync(instructionsFile) &&
-      readFileSync(instructionsFile, "utf8").includes(CTX_INSTRUCTION_BEGIN);
-  } catch {
-    instructionsOk = false;
+    const instructionsFile = join(claudeHome, "CLAUDE.md");
+    let instructionsOk = false;
+    try {
+      instructionsOk =
+        existsSync(instructionsFile) &&
+        readFileSync(instructionsFile, "utf8").includes(CTX_INSTRUCTION_BEGIN);
+    } catch {
+      instructionsOk = false;
+    }
+    add({
+      section: "Claude",
+      id: "instructions",
+      label: "global instructions installed",
+      status: instructionsOk ? "ok" : "fail",
+      fix: instructionsOk ? undefined : "Run `ctx install claude`.",
+    });
+
+    const settingsFile = join(claudeHome, "settings.json");
+    let hookInstalled = false;
+    try {
+      hookInstalled = detectPromptHook(settingsFile);
+    } catch {
+      hookInstalled = false;
+    }
+    add({
+      section: "Claude",
+      id: "hook",
+      label: "proactive retrieval hook installed",
+      status: hookInstalled ? "ok" : "fail",
+      fix: hookInstalled ? undefined : "Run `ctx install claude`.",
+    });
+
+    // Hook command must resolve on PATH, or Claude cannot run it.
+    const hookCommand =
+      (hookInstalled ? getPromptHookCommand(settingsFile) : null) ?? HOOK_COMMAND_DEFAULT;
+    const exe = commandExecutable(hookCommand);
+    let resolved: string | null = null;
+    if (exe.includes("/") || exe.includes("\\")) {
+      resolved = existsSync(exe) ? exe : null;
+    } else {
+      resolved = which(exe, env.PATH);
+    }
+    add({
+      section: "Claude",
+      id: "hook-on-path",
+      label: `hook command resolves on PATH (${exe})`,
+      status: resolved ? "ok" : "fail",
+      detail: resolved ?? "not found",
+      fix: resolved
+        ? undefined
+        : "Run `npx goatedcontext setup`, or add the npm global bin directory to PATH.",
+    });
   }
-  add({
-    section: "Claude",
-    id: "instructions",
-    label: "global instructions installed",
-    status: instructionsOk ? "ok" : "fail",
-    fix: instructionsOk ? undefined : "Run `ctx install claude`.",
-  });
-
-  const settingsFile = join(claudeHome, "settings.json");
-  let hookInstalled = false;
-  try {
-    hookInstalled = detectPromptHook(settingsFile);
-  } catch {
-    hookInstalled = false;
-  }
-  add({
-    section: "Claude",
-    id: "hook",
-    label: "proactive retrieval hook installed",
-    status: hookInstalled ? "ok" : "fail",
-    fix: hookInstalled ? undefined : "Run `ctx install claude`.",
-  });
-
-  // Hook command must resolve on PATH, or Claude cannot run it.
-  const hookCommand =
-    (hookInstalled ? getPromptHookCommand(settingsFile) : null) ?? HOOK_COMMAND_DEFAULT;
-  const exe = commandExecutable(hookCommand);
-  let resolved: string | null = null;
-  if (exe.includes("/") || exe.includes("\\")) {
-    resolved = existsSync(exe) ? exe : null;
-  } else {
-    resolved = which(exe, env.PATH);
-  }
-  add({
-    section: "Claude",
-    id: "hook-on-path",
-    label: `hook command resolves on PATH (${exe})`,
-    status: resolved ? "ok" : "fail",
-    detail: resolved ?? "not found",
-    fix: resolved
-      ? undefined
-      : "Run `npx goatedcontext setup`, or add the npm global bin directory to PATH.",
-  });
 
   const ok = !checks.some((c) => c.status === "fail");
   const hasWarnings = checks.some((c) => c.status === "warn");

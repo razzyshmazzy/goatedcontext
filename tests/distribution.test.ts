@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,8 +56,10 @@ test("built CLI exercises node:sqlite end-to-end under Node", () => {
     expect(init.stderr).not.toContain("ExperimentalWarning");
     expect(existsSync(join(home, "ctx.db"))).toBe(true);
     // WAL is persisted in the DB header (the -wal file itself is checkpointed
-    // away on clean close, so we reopen and read the journal mode instead).
-    const probe = openDb(join(home, "ctx.db"), { readonly: true });
+    // away on clean close, so we reopen and read the journal mode instead). Open
+    // read-write here: a read-only reopen of a WAL database is sensitive to
+    // sidecar/permission timing across OSes, and we only need to read the header.
+    const probe = openDb(join(home, "ctx.db"));
     const jm = probe.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get();
     probe.close();
     expect(jm?.journal_mode?.toLowerCase()).toBe("wal");
@@ -82,6 +84,12 @@ test("built CLI exercises node:sqlite end-to-end under Node", () => {
 
 // Concurrency under node:sqlite + WAL: many separate Node processes writing at
 // once must not lose updates or hit unhandled "database is locked".
+//
+// This uses ASYNC `spawn` (not `spawnSync`), so the child processes genuinely run
+// in parallel — `spawnSync` inside Promise.all would serialize, testing nothing.
+// We record each child's live window and assert the peak overlap is > 1 (proving
+// real concurrency), then assert the exact final row count (proving no lost/dup
+// writes under contention).
 test("concurrent Node processes write safely under node:sqlite/WAL", async () => {
   const dist = join(ROOT, "dist", "index.js");
   const node = whichSync("node");
@@ -94,24 +102,55 @@ test("concurrent Node processes write safely under node:sqlite/WAL", async () =>
     const env = { ...process.env, CTX_HOME: home, CTX_SECRET_BACKEND: "file" };
     spawnSync(node, [dist, "init"], { encoding: "utf8", env });
 
-    const N = 12;
-    await Promise.all(
-      Array.from({ length: N }, (_, i) =>
-        new Promise<void>((resolve, reject) => {
-          const p = spawnSync(
-            node,
-            [dist, "remember", "--scope", "global", "--category", "general", `Distinct concurrent rule ${i}.`],
-            { encoding: "utf8", env },
-          );
-          if (p.status === 0 && !/(database is locked)/i.test(p.stderr)) resolve();
-          else reject(new Error(`proc ${i} failed: code=${p.status} err=${p.stderr}`));
-        }),
-      ),
-    );
+    interface Span {
+      code: number | null;
+      stderr: string;
+      start: number;
+      end: number;
+    }
+    const runRemember = (i: number): Promise<Span> =>
+      new Promise((resolve) => {
+        const start = performance.now();
+        const child = spawn(
+          node,
+          [dist, "remember", "--scope", "global", "--category", "general", `Distinct concurrent rule ${i}.`],
+          { env },
+        );
+        let stderr = "";
+        child.stderr.on("data", (d) => (stderr += d.toString()));
+        child.on("close", (code) => resolve({ code, stderr, start, end: performance.now() }));
+      });
 
+    const N = 16;
+    // Launch all children first (synchronously kick off spawn), THEN await — this
+    // guarantees they are alive simultaneously rather than one-at-a-time.
+    const spans = await Promise.all(Array.from({ length: N }, (_, i) => runRemember(i)));
+
+    // Every process succeeded and none surfaced a lock error.
+    for (const s of spans) {
+      expect(s.code).toBe(0);
+      expect(s.stderr).not.toMatch(/database is locked/i);
+    }
+
+    // Genuine overlap: sweep the [start,end) windows and take the peak concurrency.
+    const events = spans
+      .flatMap((s) => [
+        { t: s.start, d: 1 },
+        { t: s.end, d: -1 },
+      ])
+      .sort((a, b) => a.t - b.t || a.d - b.d);
+    let live = 0;
+    let peak = 0;
+    for (const e of events) {
+      live += e.d;
+      if (live > peak) peak = live;
+    }
+    expect(peak).toBeGreaterThan(1); // processes truly ran at the same time
+
+    // Exact final count: N distinct rules → N rows, no lost or duplicated writes.
     const prefs = spawnSync(node, [dist, "prefs", "--json"], { encoding: "utf8", env });
     const list = JSON.parse(prefs.stdout);
-    expect(list).toHaveLength(N); // no lost writes
+    expect(list).toHaveLength(N);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
