@@ -9,6 +9,7 @@ import { shortId } from "../utils/id.ts";
 import { installClaude } from "../adapters/claude/installer.ts";
 import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
 import { detectPromptHook, formatHookContext } from "../adapters/claude/hook.ts";
+import { simulateHook } from "../adapters/claude/test-hook.ts";
 import { appendFileSync } from "node:fs";
 import { line, printJson, warn } from "./output.ts";
 import { runDoctor, renderDoctor } from "./doctor.ts";
@@ -432,6 +433,49 @@ export function buildProgram(deps: CliDeps): Command {
         if (debug) hookDebug(deps, `error: ${(err as Error).message}`);
         // swallow — fail open
       }
+    });
+
+  // ---- test-hook (debug the prompt-retrieval hook without launching Claude) --
+  program
+    .command("test-hook")
+    .description("Dry-run the Claude prompt-retrieval hook for a task, without launching Claude.")
+    .requiredOption("--task <text>", "The task/prompt to simulate")
+    .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        const result = simulateHook(ctx, { cwd: opts.cwd, task: opts.task });
+        if (opts.json) return printJson(result);
+
+        line(`Task: ${result.task.trim() ? result.task : "(empty)"}`);
+        line(
+          `Repository: ${result.repo ? `${result.repo.name} (${result.repo.identity})` : "(none / not a git repo)"}`,
+        );
+        line(`Would inject context: ${result.wouldInject ? "yes" : "no"}`);
+        line("");
+        line(`Matched preferences (${result.preferences.length}):`);
+        if (result.preferences.length === 0) line("  (none)");
+        for (const p of result.preferences) {
+          const domain = p.domain ? `/${p.domain}` : "";
+          line(`  - [${p.scope}${domain}] ${p.rule}  (relevance=${p.relevance.toFixed(2)})`);
+        }
+        if (result.overridden.length > 0) {
+          line("");
+          line(`Suppressed by higher-precedence rules (${result.overridden.length}):`);
+          for (const o of result.overridden) {
+            line(`  - (${shortId(o.id)}) ${o.rule}  →  superseded by ${shortId(o.supersededBy)}`);
+          }
+        }
+        line("");
+        if (result.block) {
+          line("Injected context block:");
+          line("----------------------------------------");
+          line(result.block);
+          line("----------------------------------------");
+        } else {
+          line("Injected context block: (nothing would be injected)");
+        }
+      });
     });
 
   // ---- repo ---------------------------------------------------------------

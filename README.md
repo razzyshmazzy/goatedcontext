@@ -61,6 +61,8 @@ ctx why <id>
 
 `ctx doctor` checks your install end to end (database, schema, Git, secret backend, Claude skills/hook, and whether `ctx` resolves on PATH) and prints a concrete fix for anything broken. Add `--json` for scripts.
 
+`ctx test-hook --task "..."` dry-runs the proactive-retrieval hook for a task without launching Claude, so you can see exactly which preferences would be injected. Add `--json` for scripts.
+
 ## Secrets & environments
 
 Reusable environment-variable bundles.
