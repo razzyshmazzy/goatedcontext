@@ -164,7 +164,8 @@ export class RepoService {
     this.db
       .query(
         `INSERT INTO repos (id, identity, name, remote_url, root_path, has_remote, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(identity) DO NOTHING`,
       )
       .run(
         id,
@@ -176,7 +177,21 @@ export class RepoService {
         ts,
         ts,
       );
-    return this.getById(id)!;
+    // Re-select by identity: returns our row, or a row a concurrent caller committed.
+    return this.getByIdentity(input.identity)!;
+  }
+
+  /**
+   * Resolve the repo for `cwd` WITHOUT writing — detect the identity and return the
+   * existing row, or null if the repo isn't registered yet (or `cwd` isn't a git
+   * repo). Used by the high-frequency prompt-hook read path so it never registers a
+   * repo or contends on a write. A repo with no row has no repo-scoped preferences
+   * by definition, so a read loses nothing by not registering it here.
+   */
+  resolveReadOnly(cwd: string): Repo | null {
+    const detected = detectRepoIdentity(cwd);
+    if (!detected) return null;
+    return this.getByIdentity(detected.identity);
   }
 
   /** Resolve the repo for `cwd`, registering it on first sight. Null if not a git repo. */
@@ -210,11 +225,16 @@ export class RepoService {
       return existing;
     }
 
+    // First sight: insert, tolerating a concurrent process that registers the same
+    // identity at the same instant (e.g. several `ctx` invocations at once). Without
+    // ON CONFLICT the loser of that race would hit "UNIQUE constraint failed:
+    // repos.identity". Re-select by identity to return whichever row won.
     const id = newId();
     this.db
       .query(
         `INSERT INTO repos (id, identity, name, remote_url, root_path, has_remote, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(identity) DO NOTHING`,
       )
       .run(
         id,
@@ -226,6 +246,6 @@ export class RepoService {
         ts,
         ts,
       );
-    return this.getById(id)!;
+    return this.getByIdentity(detected.identity)!;
   }
 }

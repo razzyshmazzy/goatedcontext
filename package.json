@@ -24,8 +24,8 @@
     "sqlite"
   ],
   "bin": {
-    "goatedcontext": "./dist/index.js",
-    "ctx": "./dist/index.js"
+    "goatedcontext": "dist/index.js",
+    "ctx": "dist/index.js"
   },
   "files": [
     "dist",

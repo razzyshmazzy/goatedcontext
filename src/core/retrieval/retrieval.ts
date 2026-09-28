@@ -146,7 +146,11 @@ export class RetrievalEngine {
 
   retrieve(opts: RetrievalOptions): RetrievalResult {
     const limit = clampLimit(opts.limit ?? DEFAULT_LIMIT);
-    const repo = this.repos.resolve(opts.cwd);
+    // The prompt hook (track === false) must stay a pure read: resolve the repo
+    // without registering it, so concurrent hooks never write or contend. Other
+    // callers (e.g. `ctx get`) keep registering the repo on first sight.
+    const repo =
+      opts.track === false ? this.repos.resolveReadOnly(opts.cwd) : this.repos.resolve(opts.cwd);
     const task = opts.task?.trim() || null;
 
     // Gather + rank + resolve inside a read snapshot so a concurrent commit is
