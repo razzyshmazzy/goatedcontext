@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic, withFileLock } from "../../utils/fs.ts";
@@ -82,9 +82,159 @@ export function installClaude(opts: ClaudeInstallOptions = {}): ClaudeInstallRes
   });
 }
 
+export interface ClaudeRepairResult {
+  skillsDir: string;
+  /** Per-skill outcome: already correct, or rewritten because missing/corrupt. */
+  skills: { dir: string; action: "ok" | "restored" }[];
+  instructionsFile: string;
+  instructionsAction: "ok" | "restored" | "repaired";
+  settingsFile: string;
+  hookAction: HookAction;
+}
+
+/**
+ * Repair a Claude install: rewrite any missing or corrupted ctx-owned files
+ * (skills, the instruction block) and restore the prompt hook, while preserving
+ * every unrelated Claude setting, hook and instruction. Idempotent — repairing a
+ * healthy install reports everything "ok"/"unchanged" and changes nothing.
+ */
+export function repairClaude(opts: ClaudeInstallOptions = {}): ClaudeRepairResult {
+  const claudeHome = opts.claudeHome ?? join(homedir(), ".claude");
+  mkdirSync(claudeHome, { recursive: true });
+  const lockFile = join(claudeHome, ".ctx-install.lock");
+
+  return withFileLock(lockFile, () => {
+    const skillsRoot = join(claudeHome, "skills");
+    mkdirSync(skillsRoot, { recursive: true });
+
+    const skills: { dir: string; action: "ok" | "restored" }[] = [];
+    for (const skill of CLAUDE_SKILLS) {
+      const dir = join(skillsRoot, skill.dir);
+      const file = join(dir, "SKILL.md");
+      let healthy = false;
+      try {
+        healthy = existsSync(file) && readFileSync(file, "utf8") === skill.content;
+      } catch {
+        healthy = false;
+      }
+      if (!healthy) {
+        mkdirSync(dir, { recursive: true });
+        writeFileAtomic(file, skill.content, 0o644);
+      }
+      skills.push({ dir: skill.dir, action: healthy ? "ok" : "restored" });
+    }
+
+    // Determine whether a well-formed block already existed, to distinguish a
+    // clean restore from a repair of damaged content.
+    const instructionsFile = join(claudeHome, "CLAUDE.md");
+    const hadWellFormedBlock = instructionBlockState(instructionsFile) === "well-formed";
+    const upsert = upsertInstructionBlock(instructionsFile);
+    const instructionsAction: ClaudeRepairResult["instructionsAction"] =
+      upsert === "unchanged" ? "ok" : hadWellFormedBlock ? "repaired" : "restored";
+
+    const settingsFile = join(claudeHome, "settings.json");
+    const hookAction = opts.disableHook
+      ? removePromptHook(settingsFile)
+      : upsertPromptHook(settingsFile, opts.hookCommand ?? HOOK_COMMAND_DEFAULT);
+
+    return { skillsDir: skillsRoot, skills, instructionsFile, instructionsAction, settingsFile, hookAction };
+  });
+}
+
+export interface ClaudeUninstallResult {
+  skillsDir: string;
+  /** ctx skill dirs that existed and were removed. */
+  removedSkills: string[];
+  instructionsFile: string;
+  instructionsAction: "removed" | "absent";
+  settingsFile: string;
+  hookAction: HookAction;
+}
+
+/**
+ * Remove ONLY the goatedcontext-owned Claude integration: the ctx skills, the ctx
+ * instruction block, and the ctx prompt hook. Unrelated skills, hooks, settings and
+ * user instructions are preserved. Never touches ~/.ctx, so preferences and
+ * environments are untouched. Idempotent.
+ */
+export function uninstallClaude(opts: ClaudeInstallOptions = {}): ClaudeUninstallResult {
+  const claudeHome = opts.claudeHome ?? join(homedir(), ".claude");
+  const lockFile = join(claudeHome, ".ctx-install.lock");
+  const skillsRoot = join(claudeHome, "skills");
+  const settingsFile = join(claudeHome, "settings.json");
+  const instructionsFile = join(claudeHome, "CLAUDE.md");
+
+  if (!existsSync(claudeHome)) {
+    return {
+      skillsDir: skillsRoot,
+      removedSkills: [],
+      instructionsFile,
+      instructionsAction: "absent",
+      settingsFile,
+      hookAction: "absent",
+    };
+  }
+
+  mkdirSync(claudeHome, { recursive: true });
+  return withFileLock(lockFile, () => {
+    const removedSkills: string[] = [];
+    for (const skill of CLAUDE_SKILLS) {
+      const dir = join(skillsRoot, skill.dir);
+      if (existsSync(dir)) {
+        rmSync(dir, { recursive: true, force: true });
+        removedSkills.push(skill.dir);
+      }
+    }
+
+    const instructionsAction = removeInstructionBlock(instructionsFile);
+    const hookAction = removePromptHook(settingsFile);
+
+    return { skillsDir: skillsRoot, removedSkills, instructionsFile, instructionsAction, settingsFile, hookAction };
+  });
+}
+
+/** Classify the ctx block in an instructions file for reporting/repair decisions. */
+function instructionBlockState(file: string): "none" | "well-formed" | "damaged" {
+  if (!existsSync(file)) return "none";
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return "none";
+  }
+  const begin = text.indexOf(CTX_INSTRUCTION_BEGIN);
+  if (begin === -1) return "none";
+  const end = text.indexOf(CTX_INSTRUCTION_END, begin);
+  return end !== -1 ? "well-formed" : "damaged";
+}
+
+/**
+ * Remove every ctx instruction block from `text`, preserving everything else.
+ * Handles duplicated blocks and a damaged block whose end marker is missing
+ * (treated as running to end-of-file). Returns the cleaned text and whether any
+ * block was found.
+ */
+function removeAllCtxBlocks(text: string): { text: string; changed: boolean } {
+  let out = text;
+  let changed = false;
+  while (true) {
+    const b = out.indexOf(CTX_INSTRUCTION_BEGIN);
+    if (b === -1) break;
+    const e = out.indexOf(CTX_INSTRUCTION_END, b);
+    out =
+      e !== -1
+        ? out.slice(0, b) + out.slice(e + CTX_INSTRUCTION_END.length)
+        : out.slice(0, b); // damaged: no end marker → strip to EOF
+    changed = true;
+  }
+  return { text: out, changed };
+}
+
 /**
  * Adds/refreshes the ctx block in a global instructions file without disturbing
- * anything else. Atomic write; callers that may race should hold the install lock.
+ * anything else. Robust against a damaged (end-marker-less) or duplicated block:
+ * a well-formed block is refreshed in place, otherwise the file is cleaned and a
+ * single fresh block is appended. Atomic write; racing callers hold the install lock.
  */
 export function upsertInstructionBlock(file: string): "created" | "updated" | "unchanged" {
   if (!existsSync(file)) {
@@ -97,15 +247,35 @@ export function upsertInstructionBlock(file: string): "created" | "updated" | "u
   const end = current.indexOf(CTX_INSTRUCTION_END);
 
   if (begin !== -1 && end !== -1 && end > begin) {
+    // Well-formed block: refresh it in place, deduping any stray blocks after it.
     const before = current.slice(0, begin);
-    const after = current.slice(end + CTX_INSTRUCTION_END.length);
+    const after = removeAllCtxBlocks(current.slice(end + CTX_INSTRUCTION_END.length)).text;
     const next = before + CTX_INSTRUCTION_BLOCK + after;
     if (next === current) return "unchanged";
     writeFileAtomic(file, next, 0o644);
     return "updated";
   }
 
-  const separator = current.endsWith("\n") ? "\n" : "\n\n";
-  writeFileAtomic(file, current + separator + CTX_INSTRUCTION_BLOCK + "\n", 0o644);
+  // No block, or a damaged begin-without-end: strip any remnants and append fresh.
+  const cleaned = removeAllCtxBlocks(current).text;
+  const separator = cleaned.length === 0 ? "" : cleaned.endsWith("\n") ? "\n" : "\n\n";
+  const next = cleaned + separator + CTX_INSTRUCTION_BLOCK + "\n";
+  if (next === current) return "unchanged";
+  writeFileAtomic(file, next, 0o644);
   return "updated";
+}
+
+/**
+ * Remove the ctx instruction block, preserving unrelated user instructions.
+ * Returns "removed" when a block was present, "absent" otherwise.
+ */
+export function removeInstructionBlock(file: string): "removed" | "absent" {
+  if (!existsSync(file)) return "absent";
+  const current = readFileSync(file, "utf8");
+  const { text, changed } = removeAllCtxBlocks(current);
+  if (!changed) return "absent";
+  // Tidy blank lines left behind by the removal.
+  const tidy = text.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
+  writeFileAtomic(file, tidy, 0o644);
+  return "removed";
 }

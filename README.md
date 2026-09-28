@@ -65,6 +65,8 @@ ctx why <id>
 
 `ctx export` writes a portable JSON bundle of your preferences, evidence, and repo links (never secrets) to stdout, or to a file with `--out`. `ctx import <file>` merges a bundle back in — idempotently, without duplicating rules or overwriting existing ones. Use `-` as the file to read from stdin.
 
+`ctx install claude --repair` rewrites any missing or corrupted ctx files and restores the hook, leaving unrelated Claude config untouched. `ctx uninstall claude` removes only the ctx integration (skills, instruction block, hook) — your preferences and environments are kept.
+
 `ctx conflicts` lists active preferences that compete for the same decision (e.g. two package managers, or a rule and its negation), shows which one wins during retrieval, and never auto-resolves. Add `--global`, `--repo`, or `--json`.
 
 `ctx doctor` checks your install end to end (database, schema, Git, secret backend, Claude skills/hook, and whether `ctx` resolves on PATH) and prints a concrete fix for anything broken. Add `--json` for scripts.

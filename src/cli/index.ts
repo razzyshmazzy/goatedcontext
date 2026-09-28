@@ -6,7 +6,7 @@ import { ZodError } from "zod";
 import { CtxContext } from "../core/context.ts";
 import { CtxError, ValidationError } from "../utils/errors.ts";
 import { shortId } from "../utils/id.ts";
-import { installClaude } from "../adapters/claude/installer.ts";
+import { installClaude, repairClaude, uninstallClaude } from "../adapters/claude/installer.ts";
 import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
 import { detectPromptHook, formatHookContext } from "../adapters/claude/hook.ts";
 import { simulateHook } from "../adapters/claude/test-hook.ts";
@@ -854,11 +854,32 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
     .option("--hook-command <cmd>", "Command Claude runs for the prompt hook", "ctx hook claude-prompt")
     .option("--disable-hook", "Remove the proactive-retrieval hook (keeps skills & preferences)")
+    .option("--repair", "Rewrite any missing/corrupt ctx files and restore the hook")
     .option("--json", "Output JSON")
     .action((target, opts) => {
       if (target !== "claude") {
         throw new CtxError(`Unknown install target "${target}". Supported: claude`);
       }
+      const hookLabelOf = (a: string) =>
+        a === "error"
+          ? "NOT configured (existing settings.json is not valid JSON — left untouched)"
+          : a;
+
+      if (opts.repair) {
+        const result = repairClaude({
+          claudeHome: opts.claudeHome,
+          hookCommand: opts.hookCommand,
+          disableHook: Boolean(opts.disableHook),
+        });
+        if (opts.json) return printJson(result);
+        line("Repaired Claude Code adapter.");
+        line(`  skills dir:    ${result.skillsDir}`);
+        for (const s of result.skills) line(`  skill:         ${s.dir} (${s.action})`);
+        line(`  instructions:  ${result.instructionsFile} (${result.instructionsAction})`);
+        line(`  prompt hook:   ${result.settingsFile} (${hookLabelOf(result.hookAction)})`);
+        return;
+      }
+
       const result = installClaude({
         claudeHome: opts.claudeHome,
         hookCommand: opts.hookCommand,
@@ -869,11 +890,28 @@ export function buildProgram(deps: CliDeps): Command {
       line(`  skills dir:    ${result.skillsDir}`);
       line(`  skills:        ${result.installedSkills.join(", ")}`);
       line(`  instructions:  ${result.instructionsFile} (${result.instructionsAction})`);
-      const hookLabel =
-        result.hookAction === "error"
-          ? "NOT configured (existing settings.json is not valid JSON — left untouched)"
-          : result.hookAction;
-      line(`  prompt hook:   ${result.settingsFile} (${hookLabel})`);
+      line(`  prompt hook:   ${result.settingsFile} (${hookLabelOf(result.hookAction)})`);
+    });
+
+  // ---- uninstall ----------------------------------------------------------
+  program
+    .command("uninstall")
+    .description("Remove a ctx agent adapter (skills, instruction block, hook). Keeps your preferences & environments.")
+    .argument("<target>", "Adapter target (claude)")
+    .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--json", "Output JSON")
+    .action((target, opts) => {
+      if (target !== "claude") {
+        throw new CtxError(`Unknown uninstall target "${target}". Supported: claude`);
+      }
+      const result = uninstallClaude({ claudeHome: opts.claudeHome });
+      if (opts.json) return printJson(result);
+      line("Removed the ctx Claude Code adapter. Your preferences and environments are untouched.");
+      line(
+        `  skills:        ${result.removedSkills.length ? result.removedSkills.join(", ") : "(none present)"}`,
+      );
+      line(`  instructions:  ${result.instructionsFile} (${result.instructionsAction})`);
+      line(`  prompt hook:   ${result.settingsFile} (${result.hookAction})`);
     });
 
   return program;
