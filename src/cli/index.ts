@@ -534,23 +534,29 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--value <value>", "The secret value (note: may be visible in shell history)")
     .option("--from-env <NAME>", "Read the value from this process env var instead")
     .option("--cwd <dir>", "Working directory", process.cwd())
-    .action((name, varName, opts) => {
+    .action(async (name, varName, opts) => {
+      let value: string | undefined = opts.value;
+      if (value == null && opts.fromEnv) {
+        value = (deps.env ?? process.env)[opts.fromEnv];
+        if (value == null) {
+          throw new CtxError(`Env var "${opts.fromEnv}" is not set in the current process.`);
+        }
+      }
+      // No flag given: read the secret from stdin (a pipe, or an interactive line).
+      // This keeps the value out of shell history. ctx never echoes it.
+      if (value == null) {
+        value = await readSecretFromStdin(varName);
+      }
+      if (value == null || value.length === 0) {
+        throw new CtxError(
+          "No value provided. Use --value <v>, --from-env <NAME>, or pipe/type the value on stdin.",
+        );
+      }
+      const secret = value;
       withContext(deps, (ctx) => {
         const repo = ctx.repos.resolve(opts.cwd);
         const environment = ctx.environments.requireByName(name, repo?.id ?? null);
-        let value: string | undefined = opts.value;
-        if (value == null && opts.fromEnv) {
-          value = (deps.env ?? process.env)[opts.fromEnv];
-          if (value == null) {
-            throw new CtxError(`Env var "${opts.fromEnv}" is not set in the current process.`);
-          }
-        }
-        if (value == null) {
-          throw new CtxError(
-            "Provide a value with --value <v> or --from-env <NAME>. (ctx never prints the value.)",
-          );
-        }
-        ctx.environments.setVariable(environment.id, varName, value);
+        ctx.environments.setVariable(environment.id, varName, secret);
         line(`Set ${varName} for environment "${name}" (value stored securely).`);
       });
     });
@@ -653,6 +659,29 @@ export function buildProgram(deps: CliDeps): Command {
     });
 
   return program;
+}
+
+/**
+ * Read a single secret value from stdin (one line). Works with a pipe
+ * (`echo $KEY | ctx env set …`) and interactively (type/paste the value, Enter).
+ * ctx never echoes the value back.
+ */
+async function readSecretFromStdin(varName: string): Promise<string | undefined> {
+  if (process.stdin.isTTY) {
+    process.stderr.write(`Enter value for ${varName} (read from stdin, not echoed by ctx): `);
+  }
+  const decoder = new TextDecoder();
+  let buf = "";
+  for await (const chunk of Bun.stdin.stream()) {
+    buf += decoder.decode(chunk);
+    const nl = buf.indexOf("\n");
+    if (nl !== -1) {
+      buf = buf.slice(0, nl);
+      break;
+    }
+  }
+  const value = buf.replace(/\r$/, "").trim();
+  return value.length > 0 ? value : undefined;
 }
 
 /** Best-effort hook diagnostics to <CTX_HOME>/hook.log (only when --debug/CTX_HOOK_DEBUG). */

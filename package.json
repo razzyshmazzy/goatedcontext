@@ -16,6 +16,7 @@
   ],
   "scripts": {
     "ctx": "bun run src/index.ts",
+    "build": "tsc --noEmit && bun build ./src/index.ts --outdir dist --target bun",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
