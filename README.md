@@ -63,6 +63,8 @@ ctx why <id>
 
 `ctx history` shows a compact, local, append-only log of recent changes (remembered, proposed, approved, rejected, locked/unlocked, forgotten, and environment add/remove) with provenance. Add `--repo`, `--limit <n>`, or `--json`. Secret values are never recorded.
 
+`ctx export` writes a portable JSON bundle of your preferences, evidence, and repo links (never secrets) to stdout, or to a file with `--out`. `ctx import <file>` merges a bundle back in — idempotently, without duplicating rules or overwriting existing ones. Use `-` as the file to read from stdin.
+
 `ctx conflicts` lists active preferences that compete for the same decision (e.g. two package managers, or a rule and its negation), shows which one wins during retrieval, and never auto-resolves. Add `--global`, `--repo`, or `--json`.
 
 `ctx doctor` checks your install end to end (database, schema, Git, secret backend, Claude skills/hook, and whether `ctx` resolves on PATH) and prints a concrete fix for anything broken. Add `--json` for scripts.

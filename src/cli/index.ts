@@ -11,6 +11,8 @@ import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
 import { detectPromptHook, formatHookContext } from "../adapters/claude/hook.ts";
 import { simulateHook } from "../adapters/claude/test-hook.ts";
 import { findConflicts } from "../core/preferences/conflicts.ts";
+import { exportData, importData } from "../core/transfer/transfer.ts";
+import { writeFileSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { line, printJson, warn } from "./output.ts";
 import { runDoctor, renderDoctor } from "./doctor.ts";
@@ -799,6 +801,48 @@ export function buildProgram(deps: CliDeps): Command {
         ctx.environments.remove(environment);
         if (opts.json) return printJson({ removed: name });
         line(`Removed environment "${name}" and its secrets.`);
+      });
+    });
+
+  // ---- export -------------------------------------------------------------
+  program
+    .command("export")
+    .description("Export preferences, evidence and repo links as a portable JSON bundle. Never exports secrets.")
+    .option("--out <file>", "Write the bundle to a file instead of stdout")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        const bundle = exportData(ctx);
+        if (opts.out) {
+          writeFileSync(opts.out, JSON.stringify(bundle, null, 2) + "\n", { mode: 0o600 });
+          warn(`Exported ${bundle.preferences.length} preference(s) to ${opts.out}.`);
+        } else {
+          printJson(bundle);
+        }
+      });
+    });
+
+  // ---- import -------------------------------------------------------------
+  program
+    .command("import")
+    .description("Import a preference bundle produced by `ctx export`. Idempotent; never overwrites existing rules.")
+    .argument("<file>", "Path to a JSON bundle (or - for stdin)")
+    .option("--json", "Output JSON")
+    .action(async (file, opts) => {
+      const raw = file === "-" ? await Bun.stdin.text() : readFileSync(file, "utf8");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new CtxError(`"${file}" is not valid JSON.`);
+      }
+      withContext(deps, (ctx) => {
+        const summary = importData(ctx, parsed);
+        if (opts.json) return printJson(summary);
+        line(
+          `Imported ${summary.imported} new preference(s); ` +
+            `${summary.skipped} skipped (duplicates/unlinkable); ` +
+            `${summary.reposLinked} repo(s) linked.`,
+        );
       });
     });
 

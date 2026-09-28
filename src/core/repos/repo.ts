@@ -119,6 +119,49 @@ export class RepoService {
     return row ? rowToRepo(row) : null;
   }
 
+  /** All known repositories, newest first. */
+  list(): Repo[] {
+    return this.db
+      .query<RepoRow, []>("SELECT * FROM repos ORDER BY created_at DESC, id ASC")
+      .all()
+      .map(rowToRepo);
+  }
+
+  /**
+   * Get an existing repo by its stable identity, or create one from portable
+   * metadata (used by `ctx import`). Unlike `resolve`, this does not touch git —
+   * the identity is authoritative. `rootPath` may be a foreign path; it is only
+   * advisory and is refreshed by `resolve` next time the repo is opened locally.
+   */
+  ensureByIdentity(input: {
+    identity: string;
+    name: string;
+    remoteUrl: string | null;
+    hasRemote: boolean;
+    rootPath: string;
+  }): Repo {
+    const existing = this.getByIdentity(input.identity);
+    if (existing) return existing;
+    const id = newId();
+    const ts = nowIso();
+    this.db
+      .query(
+        `INSERT INTO repos (id, identity, name, remote_url, root_path, has_remote, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.identity,
+        input.name,
+        input.remoteUrl,
+        input.rootPath,
+        input.hasRemote ? 1 : 0,
+        ts,
+        ts,
+      );
+    return this.getById(id)!;
+  }
+
   /** Resolve the repo for `cwd`, registering it on first sight. Null if not a git repo. */
   resolve(cwd: string): Repo | null {
     const detected = detectRepoIdentity(cwd);

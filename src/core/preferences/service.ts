@@ -345,6 +345,85 @@ export class PreferenceService {
     return best;
   }
 
+  /**
+   * Insert a preference from a portable export record, or merge its evidence into
+   * an equivalent preference that already exists (same scope + repo + subject +
+   * polarity). This keeps `ctx import` idempotent and prevents duplicate-preference
+   * explosion, while preserving genuine contradictions (opposite polarity → a
+   * different dedup key → kept separately). Status/confidence/timestamps from the
+   * record are preserved on newly-created rows; existing rows are never mutated.
+   */
+  importOne(
+    rec: {
+      rule: string;
+      category: string;
+      domain: string | null;
+      polarity: Polarity;
+      scope: Scope;
+      status: Status;
+      confidence: number;
+      createdAt: string;
+      updatedAt: string;
+      evidence: { source: string; text: string; agentId: string | null; sessionId: string | null }[];
+    },
+    repoId: string | null,
+  ): { id: string; created: boolean } {
+    this.validateScope(rec.scope, repoId);
+    const key = dedupKey(rec.scope, repoId, rec.rule, rec.polarity);
+
+    return withWriteTx(this.db, () => {
+      const existing = this.db
+        .query<PreferenceRow, [string]>("SELECT * FROM preferences WHERE dedup_key = ? LIMIT 1")
+        .get(key);
+      if (existing) {
+        for (const e of rec.evidence) {
+          this.insertEvidence(existing.id, {
+            source: e.source,
+            repoId,
+            text: e.text,
+            agentId: e.agentId,
+            sessionId: e.sessionId,
+          });
+        }
+        return { id: existing.id, created: false };
+      }
+
+      const id = newId();
+      this.db
+        .query(
+          `INSERT INTO preferences
+             (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
+              confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
+        )
+        .run(
+          id,
+          rec.rule,
+          this.sim.normalize(rec.rule),
+          rec.category,
+          rec.domain,
+          rec.polarity,
+          rec.scope,
+          repoId,
+          rec.status,
+          rec.confidence,
+          rec.createdAt,
+          rec.updatedAt,
+          key,
+        );
+      for (const e of rec.evidence) {
+        this.insertEvidence(id, {
+          source: e.source,
+          repoId,
+          text: e.text,
+          agentId: e.agentId,
+          sessionId: e.sessionId,
+        });
+      }
+      return { id, created: true };
+    });
+  }
+
   // ---- evidence -----------------------------------------------------------
 
   /**
