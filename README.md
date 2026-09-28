@@ -11,7 +11,7 @@ Your coding style, architecture preferences, repo rules, and dev environments fo
 Requires [Bun](https://bun.sh) ≥ 1.1.
 
 ```powershell
-git clone <YOUR_REPO_URL>
+git clone https://github.com/razzyshmazzy/goatedcontext
 cd goatedcontext
 bun install
 bun run build
@@ -95,7 +95,6 @@ Repo rules override global ones. Preferences are proposed, never silently made p
 ## More
 
 - [Architecture](./ARCHITECTURE.md)
-- [Live Claude worker test](./CLAUDE_WORKER_DOGFOOD_REPORT_V2.md)
 
 ## Development
 
