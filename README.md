@@ -103,4 +103,4 @@ bun test
 bun run typecheck
 ```
 
-![KonaGoat](https://imgur.com/a/jycdRlk)
+![KonaGoat](https://imgur.com/R99FYau)
