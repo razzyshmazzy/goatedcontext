@@ -16,7 +16,6 @@ npx goatedcontext setup
 
 Restart Claude Code.
 
-That's it.
 
 ```bash
 ctx status
