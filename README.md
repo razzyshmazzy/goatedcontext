@@ -105,4 +105,4 @@ bun run typecheck
 
 ## KonaGoat
 
-![KonaGoat](https://i.imgur.com/R99FYau.jpeg)
+![Konata Izumi as a goat](https://i.imgur.com/R99FYau.jpeg)
