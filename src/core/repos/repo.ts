@@ -42,23 +42,40 @@ function rowToRepo(r: RepoRow): Repo {
 
 /**
  * Reduce a git remote URL to a canonical, host-relative identity so the same
- * repository maps to the same id regardless of transport (ssh/https) or
- * embedded credentials.
+ * repository maps to the same id regardless of transport (ssh/https), embedded
+ * credentials, a trailing slash, or host letter-case.
  *
- *   git@github.com:acme/app.git        -> github.com/acme/app
- *   https://u:p@github.com/acme/app.git -> github.com/acme/app
+ *   git@github.com:acme/app.git         -> github.com/acme/app
+ *   https://u:p@github.com/acme/app.git/ -> github.com/acme/app
+ *   https://GitHub.com/acme/app          -> github.com/acme/app
+ *
+ * Only the HOST is lowercased: git hosts are case-insensitive, but repository
+ * paths may be case-sensitive on some hosts, so path case is preserved to avoid
+ * merging genuinely distinct repositories.
  */
 export function canonicalizeRemote(url: string): string | null {
   let u = url.trim();
   if (!u) return null;
-  u = u.replace(/\.git$/, "");
+  // Strip a trailing slash, the .git suffix, then any slash it exposed, in order,
+  // so "app.git/", "app/", and "app" all collapse to the same value.
+  u = u.replace(/\/+$/, "").replace(/\.git$/, "").replace(/\/+$/, "");
+
+  let canonical: string;
   // scp-like syntax: git@host:path
   const scp = u.match(/^[\w.-]+@([\w.-]+):(.+)$/);
-  if (scp) return `${scp[1]}/${scp[2]}`.replace(/\/+/g, "/");
-  // strip scheme and credentials
-  u = u.replace(/^[a-z]+:\/\//i, "");
-  u = u.replace(/^[^@/]+@/, "");
-  return u.replace(/\/+/g, "/") || null;
+  if (scp) {
+    canonical = `${scp[1]}/${scp[2]}`.replace(/\/+/g, "/");
+  } else {
+    // strip scheme and credentials
+    u = u.replace(/^[a-z]+:\/\//i, "");
+    u = u.replace(/^[^@/]+@/, "");
+    canonical = u.replace(/\/+/g, "/");
+  }
+  if (!canonical) return null;
+
+  const slash = canonical.indexOf("/");
+  if (slash === -1) return canonical.toLowerCase(); // host only, no path
+  return canonical.slice(0, slash).toLowerCase() + canonical.slice(slash);
 }
 
 /**
