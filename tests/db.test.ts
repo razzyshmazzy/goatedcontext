@@ -6,7 +6,7 @@ test("database initializes with the latest migration applied", () => {
   const row = db
     .query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_migrations")
     .get();
-  expect(row?.v).toBe(2);
+  expect(row?.v).toBe(3);
   db.close();
 });
 
@@ -43,6 +43,7 @@ test("all core tables exist after initialization", () => {
     "evidence",
     "environments",
     "environment_variables",
+    "events",
   ]) {
     expect(names).toContain(t);
   }

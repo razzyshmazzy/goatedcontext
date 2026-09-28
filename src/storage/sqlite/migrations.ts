@@ -119,4 +119,30 @@ export const migrations: Migration[] = [
         WHERE text_hash IS NOT NULL;
     `,
   },
+  {
+    version: 3,
+    name: "events_audit_log",
+    sql: `
+      -- Append-only local audit log. Deliberately has NO foreign keys: an event
+      -- (e.g. "forgotten") must survive the deletion of the preference/environment
+      -- it refers to, so the history stays reconstructable. Secret VALUES are never
+      -- written here — only rule text, names, and safe metadata.
+      CREATE TABLE events (
+        id             TEXT PRIMARY KEY,
+        type           TEXT NOT NULL,
+        preference_id  TEXT,
+        repo_id        TEXT,
+        scope          TEXT,
+        summary        TEXT NOT NULL,
+        detail         TEXT,
+        agent_id       TEXT,
+        session_id     TEXT,
+        created_at     TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_events_created ON events(created_at);
+      CREATE INDEX idx_events_repo ON events(repo_id);
+      CREATE INDEX idx_events_pref ON events(preference_id);
+    `,
+  },
 ];

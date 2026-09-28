@@ -57,8 +57,11 @@ ctx prefs
 ctx prefs pending
 ctx prefs approve <id>
 ctx conflicts
+ctx history
 ctx why <id>
 ```
+
+`ctx history` shows a compact, local, append-only log of recent changes (remembered, proposed, approved, rejected, locked/unlocked, forgotten, and environment add/remove) with provenance. Add `--repo`, `--limit <n>`, or `--json`. Secret values are never recorded.
 
 `ctx conflicts` lists active preferences that compete for the same decision (e.g. two package managers, or a rule and its negation), shows which one wins during retrieval, and never auto-resolves. Add `--global`, `--repo`, or `--json`.
 

@@ -15,6 +15,7 @@ import {
 } from "./types.ts";
 import { JaccardSimilarity, type Similarity } from "./similarity.ts";
 import { inferPrimaryDomain, polarity as detectPolarity, subjectKey } from "./analysis.ts";
+import { recordEvent, type EventType } from "../events/service.ts";
 
 interface PreferenceRow {
   id: string;
@@ -129,6 +130,14 @@ function dedupKey(scope: Scope, repoId: string | null, rule: string, pol: Polari
   return `${scope}|${repoId ?? ""}|${subjectKey(rule)}|${pol}`;
 }
 
+/** Friendly audit event for a status transition (distinguishes unlock from approve). */
+function transitionEventType(from: Status, to: Status): EventType {
+  if (to === "approved") return from === "locked" ? "preference.unlocked" : "preference.approved";
+  if (to === "rejected") return "preference.rejected";
+  if (to === "locked") return "preference.locked";
+  return "preference.approved";
+}
+
 function confidenceFor(evidenceCount: number): number {
   return Math.min(
     PROPOSE_CONFIDENCE_CAP,
@@ -191,6 +200,16 @@ export class PreferenceService {
         agentId: parsed.agentId ?? null,
         sessionId: parsed.sessionId ?? null,
       });
+      recordEvent(this.db, {
+        type: "preference.remembered",
+        preferenceId: id,
+        repoId,
+        scope,
+        summary: parsed.rule,
+        detail: { status, domain, polarity: pol },
+        agentId: parsed.agentId ?? null,
+        sessionId: parsed.sessionId ?? null,
+      });
       return this.getById(id)!;
     });
   }
@@ -229,6 +248,16 @@ export class PreferenceService {
         this.db
           .query("UPDATE preferences SET confidence = ?, updated_at = ? WHERE id = ?")
           .run(confidenceFor(count), nowIso(), existing.id);
+        recordEvent(this.db, {
+          type: "preference.evidence_added",
+          preferenceId: existing.id,
+          repoId,
+          scope,
+          summary: existing.rule,
+          detail: { merged: true, evidenceCount: count },
+          agentId: parsed.agentId ?? null,
+          sessionId: parsed.sessionId ?? null,
+        });
         return { preference: this.getById(existing.id)!, merged: true };
       }
 
@@ -259,6 +288,16 @@ export class PreferenceService {
         source: parsed.source ?? "agent",
         repoId,
         text: parsed.evidence,
+        agentId: parsed.agentId ?? null,
+        sessionId: parsed.sessionId ?? null,
+      });
+      recordEvent(this.db, {
+        type: "preference.proposed",
+        preferenceId: id,
+        repoId,
+        scope,
+        summary: parsed.rule,
+        detail: { domain, polarity: pol },
         agentId: parsed.agentId ?? null,
         sessionId: parsed.sessionId ?? null,
       });
@@ -349,6 +388,16 @@ export class PreferenceService {
         source: e.source,
         repoId: e.repoId,
         text: e.text,
+        agentId: e.agentId ?? null,
+        sessionId: e.sessionId ?? null,
+      });
+      recordEvent(this.db, {
+        type: "preference.evidence_added",
+        preferenceId,
+        repoId: pref.repoId,
+        scope: pref.scope,
+        summary: pref.rule,
+        detail: { source: e.source },
         agentId: e.agentId ?? null,
         sessionId: e.sessionId ?? null,
       });
@@ -454,6 +503,14 @@ export class PreferenceService {
             `not applying "${target}". Re-run to act on the current state (or use --force).`,
         );
       }
+      recordEvent(this.db, {
+        type: transitionEventType(current.status, target),
+        preferenceId: id,
+        repoId: current.repoId,
+        scope: current.scope,
+        summary: current.rule,
+        detail: { from: current.status, to: target },
+      });
       return this.getById(id)!;
     });
   }
@@ -474,6 +531,14 @@ export class PreferenceService {
             `not deleting. Re-run (or use --force).`,
         );
       }
+      recordEvent(this.db, {
+        type: "preference.forgotten",
+        preferenceId: id,
+        repoId: current.repoId,
+        scope: current.scope,
+        summary: current.rule,
+        detail: { status: current.status },
+      });
     });
   }
 

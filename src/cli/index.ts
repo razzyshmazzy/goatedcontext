@@ -455,6 +455,45 @@ export function buildProgram(deps: CliDeps): Command {
       });
     });
 
+  // ---- history ------------------------------------------------------------
+  program
+    .command("history")
+    .description("Show recent local changes to preferences and environments (append-only audit).")
+    .option("--repo", "Only events for the current repository")
+    .option("--limit <n>", "Max events to show", (v) => parseInt(v, 10), 20)
+    .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        let repoId: string | null | undefined;
+        if (opts.repo) {
+          const repo = resolveRepoOrThrow(ctx, opts.cwd);
+          repoId = repo.id;
+        }
+        const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? opts.limit : 20;
+        const events = ctx.events.list(
+          repoId !== undefined ? { repoId, limit } : { limit },
+        );
+
+        if (opts.json) return printJson(events);
+        if (events.length === 0) return line("No history yet.");
+
+        line(`Recent events (${events.length}):`);
+        for (const e of events) {
+          const when = e.createdAt.replace("T", " ").replace(/\..*$/, "");
+          const repoName = e.repoId ? ctx.repos.getById(e.repoId)?.name : null;
+          const scopeLabel = repoName ? `repo:${repoName}` : e.scope ?? "-";
+          const ref = e.preferenceId ? ` (${shortId(e.preferenceId)})` : "";
+          const prov = [e.agentId ? `agent=${e.agentId}` : "", e.sessionId ? `session=${e.sessionId}` : ""]
+            .filter(Boolean)
+            .join(" ");
+          line(
+            `${when}  ${eventLabel(e.type).padEnd(11)} [${scopeLabel}]${ref}  ${e.summary}${prov ? `  (${prov})` : ""}`,
+          );
+        }
+      });
+    });
+
   // ---- get ----------------------------------------------------------------
   program
     .command("get")
@@ -817,6 +856,23 @@ async function readSecretFromStdin(varName: string): Promise<string | undefined>
   }
   const value = buf.replace(/\r$/, "").trim();
   return value.length > 0 ? value : undefined;
+}
+
+/** Compact human label for an audit event type (e.g. "preference.approved" → "approved"). */
+function eventLabel(type: string): string {
+  const map: Record<string, string> = {
+    "preference.remembered": "remembered",
+    "preference.proposed": "proposed",
+    "preference.evidence_added": "evidence",
+    "preference.approved": "approved",
+    "preference.rejected": "rejected",
+    "preference.locked": "locked",
+    "preference.unlocked": "unlocked",
+    "preference.forgotten": "forgotten",
+    "environment.created": "env+",
+    "environment.removed": "env-",
+  };
+  return map[type] ?? type;
 }
 
 /** Best-effort hook diagnostics to <CTX_HOME>/hook.log (only when --debug/CTX_HOOK_DEBUG). */

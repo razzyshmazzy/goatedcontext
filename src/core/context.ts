@@ -6,6 +6,7 @@ import { createSecretStore, type SecretStore } from "../storage/secrets/index.ts
 import { PreferenceService } from "./preferences/service.ts";
 import { RepoService } from "./repos/repo.ts";
 import { EnvironmentService } from "./environments/service.ts";
+import { EventService } from "./events/service.ts";
 import { RetrievalEngine } from "./retrieval/retrieval.ts";
 
 /**
@@ -22,6 +23,7 @@ export class CtxContext {
   readonly preferences: PreferenceService;
   readonly repos: RepoService;
   readonly environments: EnvironmentService;
+  readonly events: EventService;
   readonly retrieval: RetrievalEngine;
 
   private constructor(paths: CtxPaths, config: Config, db: Database, secrets: SecretStore) {
@@ -32,6 +34,7 @@ export class CtxContext {
     this.preferences = new PreferenceService(db);
     this.repos = new RepoService(db);
     this.environments = new EnvironmentService(db, secrets);
+    this.events = new EventService(db);
     this.retrieval = new RetrievalEngine(
       db,
       this.preferences,

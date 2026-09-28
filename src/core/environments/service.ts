@@ -4,6 +4,7 @@ import { newId } from "../../utils/id.ts";
 import { nowIso } from "../../utils/time.ts";
 import { CtxError, NotFoundError } from "../../utils/errors.ts";
 import { envVarSecretRef, type SecretStore } from "../../storage/secrets/index.ts";
+import { recordEvent } from "../events/service.ts";
 
 export const EnvScope = z.enum(["global", "repo"]);
 export type EnvScope = z.infer<typeof EnvScope>;
@@ -118,6 +119,13 @@ export class EnvironmentService {
         ts,
         ts,
       );
+    recordEvent(this.db, {
+      type: "environment.created",
+      repoId,
+      scope,
+      summary: name,
+      detail: { riskLevel: input.riskLevel ?? "test" },
+    });
     return this.getById(id)!;
   }
 
@@ -255,5 +263,11 @@ export class EnvironmentService {
       this.secrets.delete(v.secret_ref);
     }
     this.db.query("DELETE FROM environments WHERE id = ?").run(env.id);
+    recordEvent(this.db, {
+      type: "environment.removed",
+      repoId: env.repoId,
+      scope: env.scope,
+      summary: env.name,
+    });
   }
 }
