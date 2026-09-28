@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import type { SecretStore, SecretBackendInfo } from "./types.ts";
 import { writeFileAtomic, withFileLock } from "../../utils/fs.ts";
@@ -108,12 +109,13 @@ function dpapi(op: "Protect" | "Unprotect", inputB64: string): string | null {
     `$o=[System.Security.Cryptography.ProtectedData]::${op}($b,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);` +
     "[Console]::Out.Write([Convert]::ToBase64String($o))";
   try {
-    const proc = Bun.spawnSync(
-      ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-      { stdin: Buffer.from(inputB64, "utf8"), stdout: "pipe", stderr: "pipe" },
+    const proc = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { input: Buffer.from(inputB64, "utf8"), windowsHide: true },
     );
-    if (proc.exitCode !== 0) return null;
-    const out = proc.stdout.toString().trim();
+    if (proc.status !== 0) return null;
+    const out = (proc.stdout ?? Buffer.alloc(0)).toString("utf8").trim();
     return out.length > 0 ? out : null;
   } catch {
     return null;

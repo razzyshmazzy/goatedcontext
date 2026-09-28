@@ -23,6 +23,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Node is the production runtime; pin the engines baseline so the
+      # Node-runtime test exercises the minimum supported version.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -32,11 +39,16 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # better-sqlite3 is the Node backend; rebuild its native addon against this
+      # runner's Node ABI so the published-CLI path is genuinely exercised.
+      - name: Rebuild native SQLite for Node
+        run: npm rebuild better-sqlite3
+
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Test
-        run: bun test
-
       - name: Build
         run: bun run build
+
+      - name: Test
+        run: bun test

@@ -16,10 +16,12 @@ import { writeFileSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { line, printJson, warn } from "./output.ts";
 import { runDoctor, renderDoctor } from "./doctor.ts";
+import { runSetup, renderSetup } from "./setup.ts";
+import { readStdin, readStdinLine, runChildInherit } from "../utils/runtime.ts";
 import type { Scope } from "../core/preferences/types.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
 
-const VERSION = "0.1.2";
+const VERSION = "0.2.0";
 
 /** Args after a `--`/`--exec` separator, captured by the entry point for `env run`. */
 export interface CliDeps {
@@ -77,6 +79,25 @@ export function buildProgram(deps: CliDeps): Command {
         line(`  config:   ${info.config}`);
         line(`  secrets:  ${info.secretsBackend}`);
       });
+    });
+
+  // ---- setup --------------------------------------------------------------
+  program
+    .command("setup")
+    .description("One command to install everything: initialize ctx, install the Claude Code adapter, and make `ctx` persistent.")
+    .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--skip-global", "Don't install a persistent global `ctx` (advanced/manual installs)")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      const result = runSetup({
+        env: deps.env ?? process.env,
+        version: VERSION,
+        claudeHome: opts.claudeHome,
+        skipGlobalInstall: Boolean(opts.skipGlobal),
+      });
+      if (opts.json) printJson(result);
+      else for (const l of renderSetup(result)) line(l);
+      if (!result.ok) process.exitCode = 1;
     });
 
   // ---- status -------------------------------------------------------------
@@ -529,7 +550,7 @@ export function buildProgram(deps: CliDeps): Command {
       const debug = opts.debug || (deps.env ?? process.env).CTX_HOOK_DEBUG;
       try {
         if (event !== "claude-prompt") return;
-        const raw = await Bun.stdin.text();
+        const raw = await readStdin();
         if (!raw.trim()) return;
         const payload = JSON.parse(raw) as { cwd?: string; prompt?: string };
         const prompt = (payload.prompt ?? "").toString();
@@ -776,14 +797,7 @@ export function buildProgram(deps: CliDeps): Command {
         const childEnv = { ...(deps.env ?? process.env), ...injected };
 
         const [cmd, ...cmdArgs] = passthrough;
-        const child = Bun.spawn([cmd!, ...cmdArgs], {
-          cwd: opts.cwd,
-          env: childEnv,
-          stdin: "inherit",
-          stdout: "inherit",
-          stderr: "inherit",
-        });
-        const code = await child.exited;
+        const code = runChildInherit(cmd!, cmdArgs, { cwd: opts.cwd, env: childEnv });
         if (code !== 0) process.exitCode = code;
       });
     });
@@ -828,7 +842,7 @@ export function buildProgram(deps: CliDeps): Command {
     .argument("<file>", "Path to a JSON bundle (or - for stdin)")
     .option("--json", "Output JSON")
     .action(async (file, opts) => {
-      const raw = file === "-" ? await Bun.stdin.text() : readFileSync(file, "utf8");
+      const raw = file === "-" ? await readStdin() : readFileSync(file, "utf8");
       let parsed: unknown;
       try {
         parsed = JSON.parse(raw);
@@ -926,17 +940,7 @@ async function readSecretFromStdin(varName: string): Promise<string | undefined>
   if (process.stdin.isTTY) {
     process.stderr.write(`Enter value for ${varName} (read from stdin, not echoed by ctx): `);
   }
-  const decoder = new TextDecoder();
-  let buf = "";
-  for await (const chunk of Bun.stdin.stream()) {
-    buf += decoder.decode(chunk);
-    const nl = buf.indexOf("\n");
-    if (nl !== -1) {
-      buf = buf.slice(0, nl);
-      break;
-    }
-  }
-  const value = buf.replace(/\r$/, "").trim();
+  const value = (await readStdinLine()).trim();
   return value.length > 0 ? value : undefined;
 }
 

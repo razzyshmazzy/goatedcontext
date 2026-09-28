@@ -1,32 +1,57 @@
 {
-  "name": "ctx",
-  "version": "0.1.2",
-  "description": "A persistent, local-first developer-context layer for AI coding agents.",
+  "name": "goatedcontext",
+  "version": "0.2.0",
+  "description": "A persistent, local-first developer-context layer for AI coding agents. Your preferences follow you across repos and reach Claude Code automatically.",
   "type": "module",
   "license": "MIT",
+  "author": "razzyshmazzy",
+  "homepage": "https://github.com/razzyshmazzy/goatedcontext#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/razzyshmazzy/goatedcontext.git"
+  },
+  "bugs": {
+    "url": "https://github.com/razzyshmazzy/goatedcontext/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai",
+    "context",
+    "developer-preferences",
+    "cli",
+    "local-first",
+    "sqlite"
+  ],
   "bin": {
-    "ctx": "./src/index.ts"
+    "goatedcontext": "./dist/index.js",
+    "ctx": "./dist/index.js"
   },
   "files": [
-    "src",
-    "skills",
+    "dist",
     "README.md",
     "ARCHITECTURE.md",
     "LICENSE"
   ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "ctx": "bun run src/index.ts",
-    "build": "tsc --noEmit && bun build ./src/index.ts --outdir dist --target bun",
+    "build": "bun run scripts/build.mjs",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
-  },
-  "engines": {
-    "bun": ">=1.1.0"
+    "typecheck": "tsc --noEmit",
+    "prepack": "bun run build",
+    "prepublishOnly": "bun run typecheck && bun test && bun run build"
   },
   "dependencies": {
+    "better-sqlite3": "^11.10.0",
     "commander": "^12.1.0",
     "zod": "^3.23.8"
   },
+  "trustedDependencies": [
+    "better-sqlite3"
+  ],
   "devDependencies": {
     "@types/bun": "^1.1.0",
     "typescript": "^5.5.0"

@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { openDb, type Database } from "./driver.ts";
 import { migrations } from "./migrations.ts";
 import { withWriteTx } from "./tx.ts";
 import type { CtxPaths } from "../paths.ts";
@@ -30,7 +30,7 @@ function isBusy(err: unknown): boolean {
  */
 export function openDatabase(paths: CtxPaths): Database {
   ensureHome(paths);
-  const db = new Database(paths.dbFile, { create: true });
+  const db = openDb(paths.dbFile, { create: true });
   // Always safe, cheap, lock-free settings first.
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
   db.exec("PRAGMA foreign_keys = ON;");
@@ -68,7 +68,7 @@ function isSetupComplete(db: Database): boolean {
 
 /** Open an in-memory database (used by tests that don't need persistence). */
 export function openMemoryDatabase(): Database {
-  const db = new Database(":memory:");
+  const db = openDb(":memory:");
   db.exec("PRAGMA foreign_keys = ON;");
   runMigrations(db);
   return db;

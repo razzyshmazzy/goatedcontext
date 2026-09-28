@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../storage/sqlite/driver.ts";
 import { resolvePaths, type CtxPaths } from "../storage/paths.ts";
 import { loadConfig, ensureHome, type Config } from "../storage/config.ts";
 import { openDatabase } from "../storage/sqlite/db.ts";

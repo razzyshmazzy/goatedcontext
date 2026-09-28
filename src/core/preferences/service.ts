@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../storage/sqlite/driver.ts";
 import { createHash } from "node:crypto";
 import { newId, idMatches } from "../../utils/id.ts";
 import { nowIso } from "../../utils/time.ts";

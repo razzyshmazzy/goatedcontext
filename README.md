@@ -10,35 +10,19 @@ Your coding style, architecture preferences, repo rules, and dev environments fo
 
 ## Install
 
-Requires [Bun](https://bun.sh) ≥ 1.1.
-
-```powershell
-git clone https://github.com/razzyshmazzy/goatedcontext
-cd goatedcontext
-bun install
-bun run build
-bun link
-ctx init
-ctx install claude
+```bash
+npx goatedcontext setup
 ```
 
 Restart Claude Code.
 
-`ctx` must be on your PATH because the Claude hook runs `ctx hook claude-prompt`. A standard Bun install puts `bun link` executables in `~/.bun/bin`.
+That's it.
 
-Verify:
-
-```powershell
+```bash
 ctx status
 ```
 
-You should see:
-
-```text
-✓ skills installed
-✓ global instructions installed
-✓ proactive retrieval hook installed
-```
+No repo to clone, no Bun, no manual steps. `setup` initializes your local context, installs the Claude Code adapter (skills + proactive hook), and leaves a persistent `ctx` command on your PATH. It's idempotent — run it again anytime to repair or verify.
 
 ## Try it
 
@@ -115,10 +99,19 @@ Repo rules override global ones. Preferences are proposed, never silently made p
 
 ## Development
 
+Built with [Bun](https://bun.sh); published as a normal npm package that runs on Node ≥ 20 (no Bun needed at runtime).
+
 ```powershell
+git clone https://github.com/razzyshmazzy/goatedcontext
+cd goatedcontext
+bun install
 bun test
 bun run typecheck
+bun run build   # bundles the Node CLI into dist/
+bun link        # optional: use your local build as `ctx`
 ```
+
+Releasing (maintainers): see [RELEASE.md](./RELEASE.md).
 
 ## KonaGoat
 

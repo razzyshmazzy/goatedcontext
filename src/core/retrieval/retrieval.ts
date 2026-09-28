@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../storage/sqlite/driver.ts";
 import type { Preference } from "../preferences/types.ts";
 import { ACTIVE_STATUSES } from "../preferences/types.ts";
 import type { PreferenceService } from "../preferences/service.ts";

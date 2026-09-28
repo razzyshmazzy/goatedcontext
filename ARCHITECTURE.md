@@ -38,6 +38,13 @@ shaped the way it is. The guiding principle:
 - **`src/storage/`** — SQLite (with migrations) for metadata, and a `SecretStore`
   abstraction for secret values.
 
+**Runtime.** ctx is developed and tested with Bun but published as a normal npm
+package that runs on Node ≥ 20 (`npx goatedcontext setup`). The only
+runtime-specific piece is SQLite: `storage/sqlite/driver.ts` exposes one tiny
+synchronous interface and selects `bun:sqlite` under Bun or `better-sqlite3` under
+Node at open time (both loaded via `createRequire`, so neither leaks into the other
+runtime's bundle). Everything else uses `node:` APIs that work on both.
+
 ### Directory layout
 
 ```
@@ -52,7 +59,7 @@ src/
   storage/
     paths.ts           Resolves ~/.ctx (override with CTX_HOME)
     config.ts          config.json load/save (zod-validated)
-    sqlite/            Database open + ordered migrations
+    sqlite/            Database open + ordered migrations (driver.ts picks the backend)
     secrets/           SecretStore interface + encrypted-file backend
   adapters/
     claude/            Skills (source of truth) + idempotent installer

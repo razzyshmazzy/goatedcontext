@@ -8,7 +8,8 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { Database } from "bun:sqlite";
+import { openDb, sqliteBackend, type Database } from "../storage/sqlite/driver.ts";
+import { runtimeLabel, whichSync } from "../utils/runtime.ts";
 import { resolvePaths } from "../storage/paths.ts";
 import { ConfigSchema } from "../storage/config.ts";
 import { createSecretStore } from "../storage/secrets/index.ts";
@@ -59,7 +60,7 @@ export interface DoctorDeps {
 
 function defaultWhich(cmd: string, path?: string): string | null {
   try {
-    return Bun.which(cmd, path ? { PATH: path } : undefined) ?? null;
+    return whichSync(cmd, path);
   } catch {
     return null;
   }
@@ -103,9 +104,9 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
   add({
     section: "ctx",
     id: "runtime",
-    label: "Bun runtime",
+    label: "runtime",
     status: "ok",
-    detail: typeof Bun !== "undefined" ? `Bun ${Bun.version}` : "unknown",
+    detail: `${runtimeLabel()} · sqlite: ${sqliteBackend()}`,
   });
 
   // ---- paths ---------------------------------------------------------------
@@ -175,7 +176,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
   } else {
     let db: Database | null = null;
     try {
-      db = new Database(paths.dbFile, { readonly: true });
+      db = openDb(paths.dbFile, { readonly: true });
       add({ section: "Database", id: "db-readable", label: "database readable", status: "ok" });
 
       // Integrity check.
@@ -387,7 +388,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
     detail: resolved ?? "not found",
     fix: resolved
       ? undefined
-      : "Run `bun link` in the goatedcontext repo, or add ~/.bun/bin to PATH.",
+      : "Run `npx goatedcontext setup`, or add the npm global bin directory to PATH.",
   });
 
   const ok = !checks.some((c) => c.status === "fail");

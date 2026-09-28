@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "./driver.ts";
 
 function isBusy(err: unknown): boolean {
   const e = err as { code?: string; message?: string };

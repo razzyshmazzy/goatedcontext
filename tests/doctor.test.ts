@@ -75,7 +75,7 @@ test("ctx missing from PATH fails the hook-on-path check with a fix", () => {
 
   const c = check(report, "hook-on-path");
   expect(c.status).toBe("fail");
-  expect(c.fix).toContain("bun link");
+  expect(c.fix).toContain("setup");
   expect(report.ok).toBe(false);
 
   rmSync(home, { recursive: true, force: true });
