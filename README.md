@@ -263,14 +263,24 @@ release.
 ctx install claude
 ```
 
-This installs three global Claude Code skills that call the `ctx` CLI (they never
-re-implement any logic):
+This installs, into your Claude config:
 
-- **`context`** — retrieve relevant preferences before consequential decisions
-  (architecture, dependencies, data modeling, infrastructure, security, testing,
-  significant implementation choices) via `ctx get`.
+**A proactive-retrieval hook (the main mechanism).** A `UserPromptSubmit` hook
+(`ctx hook claude-prompt`) runs on every prompt, calls the same retrieval engine,
+and injects a compact `<ctx-developer-context>` block *before* Claude reasons — so
+relevant preferences are applied without Claude having to remember to look them up.
+When nothing is relevant (e.g. "rename this variable"), it injects nothing. It is
+read-only, fails open (never blocks Claude), and adds ~150 ms. Disable it any time
+with `ctx install claude --disable-hook` (keeps your skills and preferences).
+`ctx status` shows whether it's installed.
+
+**Three global skills** that call the `ctx` CLI (they never re-implement any logic):
+
+- **`context`** — manual/refresh retrieval via `ctx get` (retrieval is normally
+  automatic via the hook, so this is for refreshing or looking up a different task).
 - **`context-learn`** — when you give a correction or express a reusable
-  preference, propose it with `ctx propose`. Explicitly prohibits storing secrets.
+  preference, propose it with `ctx propose` (with `--agent-id`/`--session-id`
+  provenance). Explicitly prohibits storing secrets.
 - **`context-env`** — discover and run environments with `ctx env run`.
 
 It also inserts a small, idempotent block into your global Claude instructions

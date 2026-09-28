@@ -63,6 +63,12 @@ export interface RetrievalOptions {
   limit?: number;
   /** Include `proposed`/`observed` preferences (default false — only in-effect rules). */
   includeProposed?: boolean;
+  /**
+   * Whether to stamp `last_used_at` on returned preferences (default true).
+   * The prompt hook sets this false so high-frequency retrieval stays read-only
+   * and never contends on the write lock.
+   */
+  track?: boolean;
 }
 
 interface Scored {
@@ -159,8 +165,9 @@ export class RetrievalEngine {
       return { top: kept, overridden };
     });
 
-    // Best-effort write, outside the read snapshot.
-    this.prefs.markUsed(top.map((w) => w.pref.id));
+    // Best-effort write, outside the read snapshot. Skipped when track === false
+    // (the prompt hook) so frequent retrieval never takes the write lock.
+    if (opts.track !== false) this.prefs.markUsed(top.map((w) => w.pref.id));
 
     return {
       repo: repo ? { id: repo.id, name: repo.name, identity: repo.identity } : null,

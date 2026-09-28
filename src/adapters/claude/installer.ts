@@ -8,10 +8,20 @@ import {
   CTX_INSTRUCTION_BEGIN,
   CTX_INSTRUCTION_END,
 } from "./skills.ts";
+import {
+  HOOK_COMMAND_DEFAULT,
+  upsertPromptHook,
+  removePromptHook,
+  type HookAction,
+} from "./hook.ts";
 
 export interface ClaudeInstallOptions {
   /** Root of the Claude user config dir. Defaults to ~/.claude (override for tests). */
   claudeHome?: string;
+  /** The shell command Claude runs for the prompt hook (default `ctx hook claude-prompt`). */
+  hookCommand?: string;
+  /** Remove the proactive-retrieval hook instead of installing it (keeps skills/prefs). */
+  disableHook?: boolean;
 }
 
 export interface ClaudeInstallResult {
@@ -19,6 +29,8 @@ export interface ClaudeInstallResult {
   installedSkills: string[];
   instructionsFile: string;
   instructionsAction: "created" | "updated" | "unchanged";
+  settingsFile: string;
+  hookAction: HookAction;
 }
 
 /**
@@ -52,11 +64,20 @@ export function installClaude(opts: ClaudeInstallOptions = {}): ClaudeInstallRes
     const instructionsFile = join(claudeHome, "CLAUDE.md");
     const action = upsertInstructionBlock(instructionsFile);
 
+    // Proactive-retrieval hook lives in settings.json (merged, never clobbering
+    // unrelated hooks/settings; atomic write).
+    const settingsFile = join(claudeHome, "settings.json");
+    const hookAction = opts.disableHook
+      ? removePromptHook(settingsFile)
+      : upsertPromptHook(settingsFile, opts.hookCommand ?? HOOK_COMMAND_DEFAULT);
+
     return {
       skillsDir: skillsRoot,
       installedSkills,
       instructionsFile,
       instructionsAction: action,
+      settingsFile,
+      hookAction,
     };
   });
 }

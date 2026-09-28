@@ -32,28 +32,28 @@ Use this skill BEFORE any consequential engineering decision, including:
 - testing strategy
 - other significant implementation choices
 
-## How to use
+## Automatic retrieval (default)
 
-Run the \`ctx\` CLI to fetch the relevant subset of the developer's context for
-the current repository and task:
+Relevant developer context is usually injected for you automatically: a
+\`ctx\` prompt hook runs on each user message and, when it finds relevant
+preferences, prepends a \`<ctx-developer-context>\` block to the conversation.
+When you see that block, it is authoritative — apply it. If a repo preference and
+a global preference conflict, the repo preference wins. If no block appears, there
+was no relevant stored guidance for this turn; proceed normally.
+
+## Manual retrieval (refresh / special cases)
+
+You normally do NOT need to call \`ctx get\` yourself, because the hook already did.
+Call it manually only to refresh after the task changes substantially, to look up a
+different task than the user's prompt, or when debugging:
 
 \`\`\`bash
 ctx get --cwd "$PWD" --task "<brief description of the current task>"
 \`\`\`
 
-The command returns concise JSON: the detected repository, a relevance-filtered
-and conflict-resolved list of applicable preferences (repo-specific rules override
-global ones), and the environments available here.
-
-\`ctx get\` is read-only and safe to call as often as you like — including while
-other agents are working in the same or other repositories. Call it before each
-consequential decision rather than caching it.
-
-Apply the returned preferences to your decision. If a repo preference and a
-global preference conflict, the repo preference wins. If \`ctx\` returns an empty
-preference list, there is no stored guidance for this task — proceed normally.
-
-Never ask \`ctx\` for secrets — it does not return them, by design.
+It returns concise JSON (repo, relevance-filtered conflict-resolved preferences,
+available environments). It is read-only and safe to call anytime. Never ask \`ctx\`
+for secrets — it does not return them, by design.
 `;
 
 const CONTEXT_LEARN_SKILL = `---
@@ -76,14 +76,20 @@ Use this skill when the developer:
 ## How to use
 
 Propose the preference — do NOT mark it as permanent yourself. \`ctx propose\`
-creates a *proposed* preference the developer reviews later:
+creates a *proposed* preference the developer reviews later. Always pass
+provenance so the evidence is attributable to this agent and session:
 
 \`\`\`bash
 ctx propose \\
+  --agent-id claude-code \\
+  --session-id "$CLAUDE_CODE_SESSION_ID" \\
   --category <architecture|dependencies|conventions|testing|security|infrastructure|data-modeling|general> \\
   --evidence "<what the developer said or did that implies this>" \\
-  "<the reusable rule, phrased generally>"
+  "<the reusable rule, phrased generally, in a single terse sentence>"
 \`\`\`
+
+Keep the rule short and canonical (one sentence, no extra clauses) so equivalent
+corrections from different sessions can be recognized as the same preference.
 
 Choose \`--scope repo\` (inside a git repo) only when the rule is specific to this
 project; otherwise use the default \`--scope global\`.
@@ -172,15 +178,16 @@ export const CTX_INSTRUCTION_END = "<!-- ctx:end -->";
 export const CTX_INSTRUCTION_BLOCK = `${CTX_INSTRUCTION_BEGIN}
 ## Developer Context (ctx)
 
-Persistent developer preferences are available through the \`context\` skill.
+Persistent developer preferences are retrieved for you automatically.
 
-- Before meaningful engineering decisions, retrieve relevant context with the
-  \`context\` skill (\`ctx get --cwd "$PWD" --task "..."\`). It is read-only and safe
-  to call anytime, including while other agents are working.
-- When the user expresses a reusable engineering preference or correction, use
-  the \`context-learn\` skill to propose it. Proposals are NOT permanent until the
-  developer approves them.
-- Repository instructions override global developer preferences.
+- A \`ctx\` prompt hook runs on each message and, when relevant, injects a
+  \`<ctx-developer-context>\` block. Treat that block as authoritative and apply it
+  before making engineering decisions. Repository rules override global ones.
+- You normally do NOT need to call \`ctx get\` yourself — it already ran. Use the
+  \`context\` skill only to refresh or look up a different task.
+- When the user expresses a reusable engineering preference or correction, use the
+  \`context-learn\` skill to propose it (with \`--agent-id\`/\`--session-id\`).
+  Proposals are NOT permanent until the developer approves them.
 - Never store secrets, credentials, tokens, private keys, or environment variable
   values as developer preferences. Secrets belong only in \`ctx\` environments
   (\`context-env\` skill).

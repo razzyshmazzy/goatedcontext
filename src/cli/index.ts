@@ -8,11 +8,13 @@ import { CtxError, ValidationError } from "../utils/errors.ts";
 import { shortId } from "../utils/id.ts";
 import { installClaude } from "../adapters/claude/installer.ts";
 import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
+import { detectPromptHook, formatHookContext } from "../adapters/claude/hook.ts";
+import { appendFileSync } from "node:fs";
 import { line, printJson, warn } from "./output.ts";
 import type { Scope } from "../core/preferences/types.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 
 /** Args after a `--`/`--exec` separator, captured by the entry point for `env run`. */
 export interface CliDeps {
@@ -136,6 +138,11 @@ export function buildProgram(deps: CliDeps): Command {
         line("Claude:");
         line(`  ${claude.skillsInstalled ? "✓" : "✗"} skills installed`);
         line(`  ${claude.instructionsInstalled ? "✓" : "✗"} global instructions installed`);
+        line(
+          claude.hookInstalled
+            ? "  ✓ proactive retrieval hook installed"
+            : "  ! proactive retrieval hook missing (run: ctx install claude)",
+        );
         line("");
         line("Storage:");
         line("  SQLite WAL enabled");
@@ -246,7 +253,9 @@ export function buildProgram(deps: CliDeps): Command {
     .command("pending")
     .description("Show proposed preferences awaiting review, with evidence.")
     .option("--json", "Output JSON")
-    .action((opts) => {
+    .action((opts, cmd) => {
+      // Honor --json whether it was given before or after `pending`.
+      const useJson = Boolean(opts.json || cmd.optsWithGlobals().json);
       withContext(deps, (ctx) => {
         const pending = ctx.preferences.pending();
         const enriched = pending.map((p) => ({
@@ -265,7 +274,7 @@ export function buildProgram(deps: CliDeps): Command {
             at: e.createdAt,
           })),
         }));
-        if (opts.json) return printJson(enriched);
+        if (useJson) return printJson(enriched);
         if (enriched.length === 0) return line("Nothing pending review.");
         for (const p of enriched) {
           line("");
@@ -373,6 +382,36 @@ export function buildProgram(deps: CliDeps): Command {
           }),
         );
       });
+    });
+
+  // ---- hook (internal: called by Claude Code UserPromptSubmit) -------------
+  program
+    .command("hook")
+    .description("Internal: proactive-retrieval hook invoked by Claude Code. Reads hook JSON on stdin.")
+    .argument("<event>", "Hook event (claude-prompt)")
+    .option("--debug", "Write diagnostics to <ctx home>/hook.log")
+    .action(async (event, opts) => {
+      // Fail OPEN: this must never make Claude unusable. Any error → no output,
+      // exit 0, so Claude proceeds with the user's original prompt untouched.
+      const debug = opts.debug || (deps.env ?? process.env).CTX_HOOK_DEBUG;
+      try {
+        if (event !== "claude-prompt") return;
+        const raw = await Bun.stdin.text();
+        if (!raw.trim()) return;
+        const payload = JSON.parse(raw) as { cwd?: string; prompt?: string };
+        const prompt = (payload.prompt ?? "").toString();
+        if (!prompt.trim()) return;
+        const cwd = payload.cwd && payload.cwd.trim().length > 0 ? payload.cwd : process.cwd();
+        withContext(deps, (ctx) => {
+          const result = ctx.retrieval.retrieve({ cwd, task: prompt, track: false });
+          const block = formatHookContext(result);
+          if (block) process.stdout.write(block + "\n");
+          if (debug) hookDebug(deps, `fired injected=${block ? "yes" : "no"} n=${result.preferences.length} cwd=${cwd}`);
+        });
+      } catch (err) {
+        if (debug) hookDebug(deps, `error: ${(err as Error).message}`);
+        // swallow — fail open
+      }
     });
 
   // ---- repo ---------------------------------------------------------------
@@ -589,25 +628,47 @@ export function buildProgram(deps: CliDeps): Command {
     .description("Install an agent adapter. Supported targets: claude")
     .argument("<target>", "Adapter target (claude)")
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--hook-command <cmd>", "Command Claude runs for the prompt hook", "ctx hook claude-prompt")
+    .option("--disable-hook", "Remove the proactive-retrieval hook (keeps skills & preferences)")
     .option("--json", "Output JSON")
     .action((target, opts) => {
       if (target !== "claude") {
         throw new CtxError(`Unknown install target "${target}". Supported: claude`);
       }
-      const result = installClaude({ claudeHome: opts.claudeHome });
+      const result = installClaude({
+        claudeHome: opts.claudeHome,
+        hookCommand: opts.hookCommand,
+        disableHook: Boolean(opts.disableHook),
+      });
       if (opts.json) return printJson(result);
-      line("Installed Claude Code adapter.");
+      line(opts.disableHook ? "Updated Claude Code adapter (hook disabled)." : "Installed Claude Code adapter.");
       line(`  skills dir:    ${result.skillsDir}`);
       line(`  skills:        ${result.installedSkills.join(", ")}`);
       line(`  instructions:  ${result.instructionsFile} (${result.instructionsAction})`);
+      const hookLabel =
+        result.hookAction === "error"
+          ? "NOT configured (existing settings.json is not valid JSON — left untouched)"
+          : result.hookAction;
+      line(`  prompt hook:   ${result.settingsFile} (${hookLabel})`);
     });
 
   return program;
 }
 
+/** Best-effort hook diagnostics to <CTX_HOME>/hook.log (only when --debug/CTX_HOOK_DEBUG). */
+function hookDebug(deps: CliDeps, msg: string): void {
+  try {
+    const home = (deps.env ?? process.env).CTX_HOME ?? "";
+    appendFileSync((home ? home + "/" : "") + "hook.log", `${new Date().toISOString()} ${msg}\n`);
+  } catch {
+    /* diagnostics are best-effort */
+  }
+}
+
 function detectClaude(claudeHome?: string): {
   skillsInstalled: boolean;
   instructionsInstalled: boolean;
+  hookInstalled: boolean;
 } {
   const home = claudeHome ?? join(homedir(), ".claude");
   const skill = join(home, "skills", "context", "SKILL.md");
@@ -619,7 +680,13 @@ function detectClaude(claudeHome?: string): {
   } catch {
     instructionsInstalled = false;
   }
-  return { skillsInstalled: existsSync(skill), instructionsInstalled };
+  let hookInstalled = false;
+  try {
+    hookInstalled = detectPromptHook(join(home, "settings.json"));
+  } catch {
+    hookInstalled = false;
+  }
+  return { skillsInstalled: existsSync(skill), instructionsInstalled, hookInstalled };
 }
 
 /** Entry used by src/index.ts. Handles clean error reporting and exit codes. */
