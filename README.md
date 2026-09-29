@@ -23,7 +23,7 @@ Restart Claude Code.
 ctx status
 ```
 
-If something looks wrong, rerun the installation; it's idempotent, meaning you can run it again anytime to repair or verify.
+To **upgrade**, run the exact same command — `npx goatedcontext setup` installs or updates the persistent `ctx` to the current version and refreshes the Claude integration. It's idempotent: rerun it anytime to upgrade, repair, or verify. You never need to `npm install -g` by hand.
 
 ## Try it
 

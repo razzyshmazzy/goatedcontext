@@ -106,26 +106,93 @@ test("re-running is idempotent: an up-to-date global install is not reinstalled"
   }
 });
 
-test("an out-of-date global install triggers an upgrade", () => {
+test("an out-of-date global install triggers an upgrade and verifies the new version", () => {
   const h = harness();
   try {
     writeFileSync(join(h.binDir, LAUNCHER), "echo ctx", "utf8");
     let installs = 0;
+    let installed = false; // the install actually changes the reported version
 
     const result = runSetup(
       baseOptions(h, {
         which: () => join(h.binDir, LAUNCHER),
         installGlobal: () => {
           installs++;
+          installed = true;
           return { ok: true, detail: "" };
         },
-        verify: () => ({ ok: true, version: "0.0.1" }), // older than opts.version 9.9.9
+        // Before install: old 0.0.1; after install: the running 9.9.9.
+        verify: () => ({ ok: true, version: installed ? "9.9.9" : "0.0.1" }),
       }),
     );
 
     expect(installs).toBe(1);
     expect(result.globalInstall).toBe("upgraded");
+    expect(result.previousVersion).toBe("0.0.1");
+    expect(result.installedVersion).toBe("9.9.9");
+    expect(result.verified).toBe(true);
     expect(result.ok).toBe(true);
+    expect(renderSetup(result).join("\n")).toContain("upgraded ctx 0.0.1 → 9.9.9");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("REGRESSION: npm 'succeeds' but the persistent ctx still reports the OLD version → not ok", () => {
+  const h = harness();
+  try {
+    // This is the reported 0.2.3-stays bug: npm exits 0, but the ctx the user
+    // actually runs never changed version. Setup must FAIL, not print success.
+    writeFileSync(join(h.binDir, LAUNCHER), "echo ctx", "utf8");
+    const result = runSetup(
+      baseOptions(h, {
+        which: () => join(h.binDir, LAUNCHER),
+        installGlobal: () => ({ ok: true, detail: "" }), // npm claims success
+        verify: () => ({ ok: true, version: "0.2.3" }), // but ctx is STILL 0.2.3
+      }),
+    );
+
+    expect(result.globalInstall).toBe("upgraded"); // we attempted an upgrade
+    expect(result.installedVersion).toBe("0.2.3");
+    expect(result.verified).toBe(false); // 0.2.3 !== running 9.9.9
+    expect(result.ok).toBe(false); // must not claim success
+    const text = renderSetup(result).join("\n");
+    expect(text).not.toContain("goat acquired");
+    expect(text).not.toContain("goat upgraded");
+    expect(result.warnings.join("\n")).toContain("0.2.3");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a stale shim shadowing the updated launcher on PATH is diagnosed", () => {
+  const h = harness();
+  try {
+    // Global prefix launcher is updated to 9.9.9, but PATH resolves an OLDER
+    // shim elsewhere. Setup must detect the shadow and explain the fix.
+    const staleDir = mkdtempSync(join(tmpdir(), "ctx-stale-"));
+    const staleShim = join(staleDir, LAUNCHER);
+    writeFileSync(staleShim, "echo stale", "utf8");
+    writeFileSync(join(h.binDir, LAUNCHER), "echo new", "utf8");
+    try {
+      const result = runSetup(
+        baseOptions(h, {
+          // The user's PATH resolves the stale shim, not the npm-prefix launcher.
+          which: () => staleShim,
+          installGlobal: () => ({ ok: true, detail: "" }),
+          // Prefix launcher → 9.9.9; the stale on-PATH shim → 0.2.3.
+          verify: (p: string) => ({ ok: true, version: p === staleShim ? "0.2.3" : "9.9.9" }),
+        }),
+      );
+      expect(result.verified).toBe(false);
+      expect(result.ok).toBe(false);
+      const msg = result.warnings.join("\n");
+      expect(msg).toContain("shadowing");
+      expect(msg).toContain(staleShim);
+      expect(msg).toContain(h.binDir);
+    } finally {
+      rmSync(staleDir, { recursive: true, force: true });
+    }
   } finally {
     h.cleanup();
   }
@@ -186,9 +253,9 @@ test("renderSetup prints the short success summary", () => {
     );
     const text = renderSetup(result).join("\n");
     expect(text).toContain("goatedcontext");
+    expect(text).toContain("installed ctx 9.9.9");
     expect(text).toContain("initialized local context");
-    expect(text).toContain("installed proactive retrieval hook");
-    expect(text).toContain("secrets:");
+    expect(text).toContain("installed Claude integration");
     if (result.ok && result.warnings.length === 0) expect(text).toContain("goat acquired.");
   } finally {
     h.cleanup();
