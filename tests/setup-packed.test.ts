@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { runSetup } from "../src/cli/setup.ts";
 import { openDatabase } from "../src/storage/sqlite/db.ts";
 import { resolvePaths } from "../src/storage/paths.ts";
@@ -87,21 +87,59 @@ function cleanPath(): string {
     .join(delimiter);
 }
 
+// The directories holding `node` and `npm` themselves. These MUST stay on the
+// isolated PATH: if `cleanPath()` (which strips the real global bin dir) happens
+// to remove the directory that also holds the npm shim — as it does on Node
+// version-manager layouts where `npm prefix -g` and the npm shim share a dir —
+// then `which("npm")` fails and the install spawns a bare "npm" with no shell,
+// dying with ENOENT (exit 1, empty stderr). Prepending them makes the harness
+// robust to that layout without touching production code or the assertions.
+const TOOL_DIRS = [NPM, NODE].filter(Boolean).map((p) => dirname(p as string));
+
 function isoEnv(prefix: string, home: string): NodeJS.ProcessEnv {
   const binDir = binDirFor(prefix);
+  const path = [binDir, ...TOOL_DIRS, cleanPath()].filter(Boolean).join(delimiter);
   return {
     ...BASE,
     npm_config_prefix: prefix, // both `npm prefix -g` and `npm install -g` target here
     CTX_HOME: home,
     CTX_SECRET_BACKEND: "file",
-    PATH: binDir + delimiter + cleanPath(),
+    PATH: path,
   };
 }
 
-/** Install a package DIR globally into the isolated prefix (real npm). */
+const REMOVED_NPM_KEYS = Object.keys(process.env).filter((k) => /^npm_/i.test(k));
+
+/**
+ * Install a package DIR globally into the isolated prefix (real npm). On an
+ * unexpected nonzero exit it prints the FULL context (command, args, cwd, prefix,
+ * PATH, npm_config_prefix, exit, stdout, stderr, resolved npm) instead of
+ * swallowing the failure behind a bare exit code.
+ */
 function npmInstallGlobal(pkgDir: string, env: NodeJS.ProcessEnv): number {
   // captureChild handles Windows `.cmd` + spaces-in-path quoting correctly.
-  return captureChild("npm", ["install", "-g", pkgDir], { env }).code;
+  const res = captureChild("npm", ["install", "-g", pkgDir], { env });
+  if (res.code !== 0) {
+    const resolvedNpm = whichSync("npm", env.PATH);
+    console.error(
+      [
+        "",
+        "=== npm install -g FAILED ===",
+        `command:            npm install -g ${pkgDir}`,
+        `resolved npm:       ${resolvedNpm ?? "(whichSync could NOT resolve npm on the isolated PATH)"}`,
+        `cwd:                ${process.cwd()}`,
+        `npm_config_prefix:  ${env.npm_config_prefix ?? "(unset)"}`,
+        `removed npm_* keys: ${REMOVED_NPM_KEYS.join(", ") || "(none)"}`,
+        `PATH:               ${env.PATH}`,
+        `exit code:          ${res.code}`,
+        `stdout:\n${res.stdout || "(empty)"}`,
+        `stderr:\n${res.stderr || "(empty)"}`,
+        "=== end npm failure ===",
+        "",
+      ].join("\n"),
+    );
+  }
+  return res.code;
 }
 
 /** Run the installed launcher's `--version` in a fresh process. */
@@ -126,6 +164,53 @@ function scratch(): { prefix: string; home: string; claudeHome: string; cleanup:
     },
   };
 }
+
+test(
+  "diagnostic: the isolated npm environment can actually run npm",
+  () => {
+    if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
+    const s = scratch();
+    try {
+      const env = isoEnv(s.prefix, s.home);
+      const resolvedNpm = whichSync("npm", env.PATH);
+      // Windows env var names are case-insensitive; the plain-object env may store
+      // them in any casing (e.g. COMSPEC vs ComSpec), so look them up case-insensitively.
+      const envHas = (name: string) =>
+        Object.keys(env).some((k) => k.toLowerCase() === name.toLowerCase() && env[k]);
+      const winVars = ["SystemRoot", "windir", "ComSpec", "PATHEXT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE"];
+      const missing = winVars.filter((k) => !envHas(k));
+      const npmVersion = captureChild("npm", ["--version"], { env });
+      // Only shout when something is actually wrong, so normal runs stay quiet but
+      // a broken isolated env prints exactly why npm can't run.
+      if (!resolvedNpm || npmVersion.code !== 0 || missing.length > 0) {
+        console.warn(
+          [
+            "",
+            "=== isolated npm environment (PROBLEM DETECTED) ===",
+            `removed npm_* keys: ${REMOVED_NPM_KEYS.join(", ") || "(none)"}`,
+            `our npm_config_prefix (must survive): ${env.npm_config_prefix}`,
+            `REAL_GLOBAL (stripped from PATH):     ${REAL_GLOBAL}`,
+            `tool dirs prepended:                  ${TOOL_DIRS.join(", ")}`,
+            `resolved npm on isolated PATH:        ${resolvedNpm ?? "(NOT RESOLVED — this breaks the install)"}`,
+            `npm --version:                        code=${npmVersion.code} out=${npmVersion.stdout.trim() || "(empty)"} err=${npmVersion.stderr.trim() || "(empty)"}`,
+            `required win vars MISSING:            ${missing.join(", ") || "(none)"}`,
+            `PATH:                                 ${env.PATH}`,
+            "=== end ===",
+            "",
+          ].join("\n"),
+        );
+      }
+      // Hard regression guard: npm MUST be resolvable and runnable inside the
+      // isolated env, and the critical Windows process vars must survive.
+      expect(resolvedNpm).not.toBeNull();
+      expect(npmVersion.code).toBe(0);
+      expect(missing).toEqual([]);
+    } finally {
+      s.cleanup();
+    }
+  },
+  TIMEOUT,
+);
 
 test(
   "A. no global installation → fresh install reports the running version",
