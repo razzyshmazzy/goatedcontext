@@ -1,6 +1,6 @@
 {
   "name": "goatedcontext",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "A persistent, local-first developer-context layer for AI coding agents. Your preferences follow you across repos and reach Claude Code automatically.",
   "type": "module",
   "license": "MIT",

@@ -20,6 +20,7 @@ function pref(p: {
     scope: p.scope,
     repoId: p.scope === "repo" ? "repo-1" : null,
     status: p.status,
+    applicability: "relevant",
     confidence: 1,
     version: 1,
     createdAt: "t",

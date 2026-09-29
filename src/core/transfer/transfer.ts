@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { nowIso } from "../../utils/time.ts";
-import { Polarity, Scope, Status } from "../preferences/types.ts";
+import { Applicability, Polarity, Scope, Status } from "../preferences/types.ts";
 import type { CtxContext } from "../context.ts";
 
 /**
@@ -42,6 +42,10 @@ const ExportPreference = z.object({
   polarity: Polarity,
   scope: Scope,
   status: Status,
+  // Additive + default-safe: bundles from ≤0.2.3 have no applicability field and
+  // import as `relevant`, preserving their original behavior. No schema-version
+  // bump is needed for this reason.
+  applicability: Applicability.default("relevant"),
   confidence: z.number().min(0).max(1).default(1),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -95,6 +99,7 @@ export function exportData(ctx: CtxContext): ExportBundle {
       polarity: p.polarity,
       scope: p.scope,
       status: p.status,
+      applicability: p.applicability,
       confidence: p.confidence,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
@@ -165,6 +170,7 @@ export function importData(ctx: CtxContext, raw: unknown): ImportSummary {
         polarity: p.polarity,
         scope: p.scope,
         status: p.status,
+        applicability: p.applicability,
         confidence: p.confidence,
         createdAt: p.createdAt,
         updatedAt: p.updatedAt,

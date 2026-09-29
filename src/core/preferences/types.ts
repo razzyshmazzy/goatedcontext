@@ -30,6 +30,20 @@ export type Status = z.infer<typeof Status>;
 export const Polarity = z.enum(["positive", "negative", "neutral"]);
 export type Polarity = z.infer<typeof Polarity>;
 
+/**
+ * Applicability decides HOW a preference reaches the agent:
+ *  - relevant: injected only when the retrieval engine judges it relevant to the
+ *    current task (the original behavior).
+ *  - always:   injected on every prompt, bypassing relevance scoring (but still
+ *    subject to status/scope/precedence/conflict filtering).
+ *
+ * The storage column is free TEXT, so `conditional` can be added in a later
+ * release (0.2.5) by extending this enum and adding a condition field/table —
+ * no destructive migration required. 0.2.4 accepts ONLY these two values.
+ */
+export const Applicability = z.enum(["relevant", "always"]);
+export type Applicability = z.infer<typeof Applicability>;
+
 /** An explicit domain must be one of the known domains (extensible list). */
 export const Domain = z
   .string()
@@ -48,6 +62,7 @@ export const Preference = z.object({
   scope: Scope,
   repoId: z.string().nullable(),
   status: Status,
+  applicability: Applicability,
   confidence: z.number().min(0).max(1),
   version: z.number().int().min(1),
   createdAt: z.string(),
@@ -103,6 +118,8 @@ export const RememberInputSchema = z.object({
   scope: Scope,
   repoId: z.string().nullable().optional(),
   status: Status.optional(),
+  /** Explicit applicability; when omitted, the service infers it from the rule. */
+  applicability: Applicability.optional(),
   source: z.string().optional(),
   evidence: z.string().optional(),
   agentId: z.string().optional(),
@@ -117,6 +134,8 @@ export const ProposeInputSchema = z.object({
   scope: Scope,
   repoId: z.string().nullable().optional(),
   evidence: NonEmptyText,
+  /** Explicit applicability; when omitted, the service infers it from the rule. */
+  applicability: Applicability.optional(),
   source: z.string().optional(),
   agentId: z.string().optional(),
   sessionId: z.string().optional(),

@@ -21,7 +21,7 @@ import { readStdin, readStdinLine, runChildInherit } from "../utils/runtime.ts";
 import { timeAgo } from "../utils/time.ts";
 import { toJson as statsToJson } from "../core/stats/stats.ts";
 import { VERSION } from "../version.ts";
-import type { Scope } from "../core/preferences/types.ts";
+import type { Applicability, Scope } from "../core/preferences/types.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
 
 /** Args after a `--`/`--exec` separator, captured by the entry point for `env run`. */
@@ -51,6 +51,23 @@ function resolveRepoOrThrow(ctx: CtxContext, cwd: string) {
 
 function provenance(opts: { agentId?: string; sessionId?: string }) {
   return { agentId: opts.agentId, sessionId: opts.sessionId };
+}
+
+/**
+ * Resolve the applicability from `--always` / `--applicability <v>`.
+ * `--always` is a convenience alias for `--applicability always`. Returns
+ * `undefined` when neither is given (the service then infers it from the rule).
+ * The value itself (e.g. rejecting `banana`) is validated downstream by the zod
+ * input schema, so an invalid value fails before any write.
+ */
+function resolveApplicability(opts: { always?: boolean; applicability?: string }): string | undefined {
+  if (opts.always && opts.applicability && opts.applicability !== "always") {
+    throw new CtxError(
+      `Conflicting flags: --always implies --applicability always, but --applicability ${opts.applicability} was given.`,
+    );
+  }
+  if (opts.always) return "always";
+  return opts.applicability;
 }
 
 export function buildProgram(deps: CliDeps): Command {
@@ -254,12 +271,15 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--domain <domain>", "Explicit decision domain (optional)")
     .option("--repo", "Shortcut for --scope repo")
     .option("--lock", "Create it as a locked preference (cannot be auto-changed)")
+    .option("--applicability <value>", "always | relevant (default: inferred from the rule)")
+    .option("--always", "Shortcut for --applicability always (inject on every prompt)")
     .option("--evidence <text>", "Optional supporting evidence")
     .option("--agent-id <id>", "Provenance: which agent recorded this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
+      const applicability = resolveApplicability(opts);
       withContext(deps, (ctx) => {
         const scope: Scope = opts.repo ? "repo" : (opts.scope as Scope);
         let repoId: string | null = null;
@@ -271,13 +291,14 @@ export function buildProgram(deps: CliDeps): Command {
           scope,
           repoId,
           status: opts.lock ? "locked" : "approved",
+          applicability: applicability as Applicability | undefined,
           evidence: opts.evidence,
           source: "explicit",
           ...provenance(opts),
         });
         if (opts.json) return printJson(pref);
         line(`Remembered [${pref.status}] (${shortId(pref.id)}): ${pref.rule}`);
-        line(`  scope=${pref.scope} category=${pref.category} domain=${pref.domain ?? "-"} polarity=${pref.polarity}`);
+        line(`  scope=${pref.scope} category=${pref.category} domain=${pref.domain ?? "-"} polarity=${pref.polarity} applicability=${pref.applicability}`);
       });
     });
 
@@ -291,12 +312,15 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--category <category>", "Preference category", "general")
     .option("--domain <domain>", "Explicit decision domain (optional)")
     .option("--repo", "Shortcut for --scope repo")
+    .option("--applicability <value>", "always | relevant (default: inferred from the rule)")
+    .option("--always", "Shortcut for --applicability always (inject on every prompt)")
     .option("--source <source>", "Origin of the observation", "agent")
     .option("--agent-id <id>", "Provenance: which agent proposed this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
+      const applicability = resolveApplicability(opts);
       withContext(deps, (ctx) => {
         const scope: Scope = opts.repo ? "repo" : (opts.scope as Scope);
         let repoId: string | null = null;
@@ -308,6 +332,7 @@ export function buildProgram(deps: CliDeps): Command {
           scope,
           repoId,
           evidence: opts.evidence,
+          applicability: applicability as Applicability | undefined,
           source: opts.source,
           ...provenance(opts),
         });
@@ -321,7 +346,7 @@ export function buildProgram(deps: CliDeps): Command {
           line(`Merged into existing proposal (${shortId(p.id)}); confidence=${p.confidence.toFixed(2)}, evidence=${c}.`);
         } else {
           line(`Proposed (${shortId(p.id)}): ${p.rule}`);
-          line(`  scope=${p.scope} category=${p.category} domain=${p.domain ?? "-"} polarity=${p.polarity} confidence=${p.confidence.toFixed(2)}`);
+          line(`  scope=${p.scope} category=${p.category} domain=${p.domain ?? "-"} polarity=${p.polarity} applicability=${p.applicability} confidence=${p.confidence.toFixed(2)}`);
         }
         line("Review with: ctx prefs pending");
       });
@@ -339,7 +364,7 @@ export function buildProgram(deps: CliDeps): Command {
         if (all.length === 0) return line('No preferences yet. Try: ctx remember "..."');
         for (const p of all) {
           line(
-            `${shortId(p.id)}  [${p.status}] (${p.scope}/${p.category}/${p.domain ?? "-"}) ${p.polarity} c=${p.confidence.toFixed(2)}  ${p.rule}`,
+            `${shortId(p.id)}  [${p.status}/${p.applicability}] (${p.scope}/${p.category}/${p.domain ?? "-"}) ${p.polarity} c=${p.confidence.toFixed(2)}  ${p.rule}`,
           );
         }
       });
@@ -361,6 +386,7 @@ export function buildProgram(deps: CliDeps): Command {
           domain: p.domain,
           polarity: p.polarity,
           scope: p.scope,
+          applicability: p.applicability,
           confidence: p.confidence,
           evidenceCount: ctx.preferences.evidenceCount(p.id),
           evidence: ctx.preferences.evidenceFor(p.id).map((e) => ({
@@ -374,7 +400,7 @@ export function buildProgram(deps: CliDeps): Command {
         if (enriched.length === 0) return line("Nothing pending review.");
         for (const p of enriched) {
           line("");
-          line(`${shortId(p.id)}  [proposed]  (${p.scope}/${p.category}/${p.domain ?? "-"})  ${p.polarity}  confidence=${p.confidence.toFixed(2)}  evidence=${p.evidenceCount}`);
+          line(`${shortId(p.id)}  [proposed/${p.applicability}]  (${p.scope}/${p.category}/${p.domain ?? "-"})  ${p.polarity}  confidence=${p.confidence.toFixed(2)}  evidence=${p.evidenceCount}`);
           line(`  rule: ${p.rule}`);
           for (const e of p.evidence) line(`  - (${e.source}${e.agentId ? `/${e.agentId}` : ""}) ${e.text}`);
           line(`  approve: ctx prefs approve ${shortId(p.id)}   reject: ctx prefs reject ${shortId(p.id)}`);
@@ -447,6 +473,7 @@ export function buildProgram(deps: CliDeps): Command {
         line(`  polarity:   ${pref.polarity}`);
         line(`  scope:      ${pref.scope}${repo ? ` (${repo.name})` : ""}`);
         line(`  status:     ${pref.status}`);
+        line(`  applicability: ${pref.applicability}`);
         line(`  confidence: ${pref.confidence.toFixed(2)}`);
         line(`  version:    ${pref.version}`);
         line(`  created:    ${pref.createdAt}`);
@@ -644,8 +671,9 @@ export function buildProgram(deps: CliDeps): Command {
         line(`Matched preferences (${result.preferences.length}):`);
         if (result.preferences.length === 0) line("  (none)");
         for (const p of result.preferences) {
-          const domain = p.domain ? `/${p.domain}` : "";
-          line(`  - [${p.scope}${domain}] ${p.rule}  (relevance=${p.relevance.toFixed(2)})`);
+          const domain = p.domain ? `[${p.domain}]` : "";
+          const suffix = p.applicability === "always" ? "" : `  (relevance=${p.relevance.toFixed(2)})`;
+          line(`  - [${p.scope}][${p.applicability}]${domain} ${p.rule}${suffix}`);
         }
         if (result.overridden.length > 0) {
           line("");

@@ -126,6 +126,17 @@ export const DOMAINS: Record<string, DomainDef> = {
       "terraform", "deploy", "infrastructure", "distributed", "memcached",
     ],
   },
+  // The natural language Claude should respond in — a single-choice decision, so
+  // "respond in Italian" and "respond in English" compete and precedence decides
+  // (e.g. a repo rule overrides a global one). Deliberately keyed on human-language
+  // NAMES only (not the word "language") to avoid matching "typed language" etc.
+  "response-language": {
+    exclusive: true,
+    keywords: [
+      "italian", "english", "spanish", "french", "german", "portuguese",
+      "japanese", "chinese", "korean", "russian", "dutch", "locale",
+    ],
+  },
 };
 
 /** Known domain names, exported for validation and help text. */
@@ -276,4 +287,33 @@ function countHits(def: DomainIndexEntry, tokens: Set<string>, phrase: string): 
 /** Whether a domain is single-choice (any two active prefs in it conflict). */
 export function isExclusiveDomain(domain: string | null): boolean {
   return domain != null && DOMAINS[domain]?.exclusive === true;
+}
+
+/**
+ * Leading universal-directive phrases that make a rule apply to EVERY prompt
+ * regardless of the task. Anchored at the start of the (trimmed, lowercased) rule
+ * so we never fire on the word merely appearing mid-sentence — that is what keeps
+ * "Prefer functions that never throw" or "Prefer an always-visible toolbar"
+ * classified as `relevant`. The `(?![-\w])` guards reject hyphenated compounds
+ * such as "always-on" / "never-ending".
+ */
+const ALWAYS_LEADERS: RegExp[] = [
+  /^always(?![-\w])/,
+  /^never(?![-\w])/,
+  /^every\s+time\b/,
+  /^for\s+(?:every|all|each)\s+tasks?\b/,
+  /^regardless\s+of\s+(?:the\s+)?(?:task|context)\b/,
+  /^whenever\s+you\b/,
+];
+
+/**
+ * Conservatively infer whether a rule is a universal directive (`always`) or a
+ * task-relevant memory (`relevant`). Deterministic and dependency-free; used only
+ * when the caller does not pass an explicit applicability. Biased hard toward
+ * `relevant`: it fires `always` only for an unmistakable leading directive, never
+ * on soft words like "prefer"/"should"/"usually"/"generally".
+ */
+export function inferApplicability(rule: string): "relevant" | "always" {
+  const t = rule.trim().toLowerCase();
+  return ALWAYS_LEADERS.some((re) => re.test(t)) ? "always" : "relevant";
 }

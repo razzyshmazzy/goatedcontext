@@ -145,4 +145,17 @@ export const migrations: Migration[] = [
       CREATE INDEX idx_events_pref ON events(preference_id);
     `,
   },
+  {
+    version: 4,
+    name: "preference_applicability",
+    sql: `
+      -- Applicability decides HOW a preference is retrieved:
+      --   'relevant' — injected only when relevant to the task (the prior behavior)
+      --   'always'   — injected on every prompt, bypassing relevance scoring
+      -- Stored as free TEXT (validated in the app layer) so a future release can add
+      -- 'conditional' without a destructive migration. Existing rows default to
+      -- 'relevant', preserving current behavior exactly.
+      ALTER TABLE preferences ADD COLUMN applicability TEXT NOT NULL DEFAULT 'relevant';
+    `,
+  },
 ];

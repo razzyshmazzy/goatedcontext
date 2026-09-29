@@ -104,6 +104,9 @@ Migration **v2** added the correctness/concurrency columns:
 - `evidence.agent_id`, `evidence.session_id` — provenance.
 - `evidence.text_hash` + a **partial unique index** — atomic evidence dedup.
 
+Migration **v4** added `preferences.applicability` (`relevant` | `always`,
+defaulting existing rows to `relevant`) — see [Applicability](#applicability-relevant-vs-always).
+
 Migrations are an ordered list in `src/storage/sqlite/migrations.ts`, tracked in a
 `schema_migrations` table and applied inside `IMMEDIATE` transactions that re-check
 the applied version — safe under concurrent first-run. Shipped migrations are never
@@ -141,6 +144,46 @@ adapter-agnostic entry point. Given `{ cwd, task, limit, includeProposed }` it:
 Steps 2–6 run inside a **read transaction** (`BEGIN DEFERRED`) so retrieval sees a
 single consistent snapshot, never a half-applied concurrent write. The result is
 plain JSON, so any adapter — CLI, MCP, or another agent — consumes the same output.
+
+## Applicability (`relevant` vs `always`)
+
+Every preference has an **`applicability`** (column added in migration 4):
+
+- **`relevant`** — the default and original behavior: injected only when it scores
+  above the relevance threshold for the current task (steps 3–4 above).
+- **`always`** — a universal behavioral directive (e.g. "Always respond in
+  Italian.", "Never use emojis."): injected on **every** prompt, bypassing relevance
+  scoring. This fixes the class of bug where a global always-on rule was filtered
+  out for an unrelated prompt like "hi".
+
+Applicability is set explicitly (`ctx remember --always …` / `--applicability
+always|relevant`) or, when omitted, inferred conservatively by
+`inferApplicability()` — it fires `always` only for an unmistakable **leading**
+universal directive ("always …", "never …", "every time …", "for all tasks …",
+"regardless of task …", "whenever you …") and never on soft words like
+"prefer"/"should"/"usually" or hyphenated compounds like "always-on".
+
+The retrieval pipeline splits candidates by applicability:
+
+```
+gather candidates (status + scope filtered)
+  → always pool  : included wholesale, bypassing relevance scoring
+  → relevant pool: scored against the task, dropped below threshold
+  → combine → resolve conflicts / precedence → cap each pool → return
+```
+
+`always` rules bypass **relevance** only — they are still subject to status
+filtering (a rejected always rule never appears), scope, precedence and conflict
+resolution. Each pool has its own cap so neither can starve the other: `always` is
+capped at **`MAX_ALWAYS = 20`** (chosen deterministically by precedence, then age,
+then id, so the same prompt always yields the same set) and `relevant` keeps the
+existing top-K limit (≤15, default 12).
+
+`applicability` is stored as free TEXT and validated in the app layer, so a future
+release can add **`conditional`** (a rule that applies when a structured condition
+matches) by extending the enum and adding a nullable condition field or a small
+side table — an additive, non-destructive migration. `conditional` is intentionally
+**reserved for a later release** and not implemented here.
 
 ## Precedence
 

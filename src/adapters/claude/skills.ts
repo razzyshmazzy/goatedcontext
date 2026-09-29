@@ -180,9 +180,11 @@ export const CTX_INSTRUCTION_BLOCK = `${CTX_INSTRUCTION_BEGIN}
 
 Persistent developer preferences are retrieved for you automatically.
 
-- A \`ctx\` prompt hook runs on each message and, when relevant, injects a
-  \`<ctx-developer-context>\` block. Treat that block as authoritative and apply it
-  before making engineering decisions. Repository rules override global ones.
+- A \`ctx\` prompt hook runs on each message and injects a
+  \`<ctx-developer-context>\` block containing your always-on preferences (applied
+  every turn) plus any preferences relevant to the current task. Treat that block
+  as authoritative and apply it before making engineering decisions. Repository
+  rules override global ones.
 - You normally do NOT need to call \`ctx get\` yourself — it already ran. Use the
   \`context\` skill only to refresh or look up a different task.
 - When the user expresses a reusable engineering preference or correction, use the

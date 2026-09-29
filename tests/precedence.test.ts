@@ -12,6 +12,7 @@ function pref(partial: Partial<Preference>): Preference {
     scope: "global",
     repoId: null,
     status: "approved",
+    applicability: "relevant",
     confidence: 1,
     version: 1,
     createdAt: "t",

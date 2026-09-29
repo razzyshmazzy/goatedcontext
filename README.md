@@ -33,7 +33,11 @@ ctx remember --scope global --category architecture "Prefer simple solutions ove
 
 Then open any repo and use Claude normally.
 
-Relevant preferences are injected automatically before Claude works. If nothing is relevant, nothing is injected.
+Relevant preferences are injected automatically before Claude works. If nothing is relevant, nothing is injected. Universal directives can be marked always-on so they apply to every prompt:
+
+```powershell
+ctx remember --always "Always respond in Italian."
+```
 
 In that sense, GoatedContext works similar to my [AquaAgent](https://github.com/razzyshmazzy/AquaAgent) but minus the semantic embedding.
 

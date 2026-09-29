@@ -10,11 +10,12 @@ import {
   type Scope,
   type Status,
   type Polarity,
+  type Applicability,
   RememberInputSchema,
   ProposeInputSchema,
 } from "./types.ts";
 import { JaccardSimilarity, type Similarity } from "./similarity.ts";
-import { inferPrimaryDomain, polarity as detectPolarity, subjectKey } from "./analysis.ts";
+import { inferApplicability, inferPrimaryDomain, polarity as detectPolarity, subjectKey } from "./analysis.ts";
 import { recordEvent, type EventType } from "../events/service.ts";
 
 interface PreferenceRow {
@@ -27,6 +28,7 @@ interface PreferenceRow {
   scope: string;
   repo_id: string | null;
   status: string;
+  applicability: string;
   confidence: number;
   version: number;
   created_at: string;
@@ -56,6 +58,7 @@ function rowToPref(r: PreferenceRow): Preference {
     scope: r.scope as Scope,
     repoId: r.repo_id,
     status: r.status as Status,
+    applicability: (r.applicability as Applicability) ?? "relevant",
     confidence: r.confidence,
     version: r.version,
     createdAt: r.created_at,
@@ -84,6 +87,7 @@ export interface RememberInput {
   scope: Scope;
   repoId?: string | null;
   status?: Status;
+  applicability?: Applicability;
   source?: string;
   evidence?: string;
   agentId?: string;
@@ -97,6 +101,7 @@ export interface ProposeInput {
   scope: Scope;
   repoId?: string | null;
   evidence: string;
+  applicability?: Applicability;
   source?: string;
   agentId?: string;
   sessionId?: string;
@@ -166,6 +171,7 @@ export class PreferenceService {
 
     const pol = detectPolarity(parsed.rule);
     const domain = parsed.domain ?? inferPrimaryDomain(parsed.rule, parsed.category);
+    const applicability: Applicability = parsed.applicability ?? inferApplicability(parsed.rule);
     const status: Status = parsed.status ?? "approved";
     const id = newId();
     const ts = nowIso();
@@ -175,8 +181,8 @@ export class PreferenceService {
         .query(
           `INSERT INTO preferences
              (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
-              confidence, version, created_at, updated_at, last_used_at, dedup_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
+              applicability, confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
         )
         .run(
           id,
@@ -188,6 +194,7 @@ export class PreferenceService {
           scope,
           repoId,
           status,
+          applicability,
           1.0,
           ts,
           ts,
@@ -206,7 +213,7 @@ export class PreferenceService {
         repoId,
         scope,
         summary: parsed.rule,
-        detail: { status, domain, polarity: pol },
+        detail: { status, domain, polarity: pol, applicability },
         agentId: parsed.agentId ?? null,
         sessionId: parsed.sessionId ?? null,
       });
@@ -232,6 +239,7 @@ export class PreferenceService {
 
     const pol = detectPolarity(parsed.rule);
     const domain = parsed.domain ?? inferPrimaryDomain(parsed.rule, parsed.category);
+    const applicability: Applicability = parsed.applicability ?? inferApplicability(parsed.rule);
     const key = dedupKey(scope, repoId, parsed.rule, pol);
 
     return withWriteTx(this.db, () => {
@@ -267,8 +275,8 @@ export class PreferenceService {
         .query(
           `INSERT INTO preferences
              (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
-              confidence, version, created_at, updated_at, last_used_at, dedup_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, 1, ?, ?, NULL, ?)`,
+              applicability, confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, 1, ?, ?, NULL, ?)`,
         )
         .run(
           id,
@@ -279,6 +287,7 @@ export class PreferenceService {
           pol,
           scope,
           repoId,
+          applicability,
           PROPOSE_START_CONFIDENCE,
           ts,
           ts,
@@ -297,7 +306,7 @@ export class PreferenceService {
         repoId,
         scope,
         summary: parsed.rule,
-        detail: { domain, polarity: pol },
+        detail: { domain, polarity: pol, applicability },
         agentId: parsed.agentId ?? null,
         sessionId: parsed.sessionId ?? null,
       });
@@ -361,6 +370,7 @@ export class PreferenceService {
       polarity: Polarity;
       scope: Scope;
       status: Status;
+      applicability?: Applicability;
       confidence: number;
       createdAt: string;
       updatedAt: string;
@@ -393,8 +403,8 @@ export class PreferenceService {
         .query(
           `INSERT INTO preferences
              (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
-              confidence, version, created_at, updated_at, last_used_at, dedup_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
+              applicability, confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
         )
         .run(
           id,
@@ -406,6 +416,7 @@ export class PreferenceService {
           rec.scope,
           repoId,
           rec.status,
+          rec.applicability ?? "relevant",
           rec.confidence,
           rec.createdAt,
           rec.updatedAt,

@@ -19,6 +19,20 @@ import { withReadTx } from "../../storage/sqlite/tx.ts";
 const RELEVANCE_THRESHOLD = 0.25;
 const MAX_RESULTS = 15;
 const DEFAULT_LIMIT = 12;
+/**
+ * Safety cap on how many `always`-on preferences a single prompt may inject,
+ * independent of the relevance top-K. This keeps a pathological number of
+ * always-on rules from flooding the context window. When more than this exist,
+ * they are chosen DETERMINISTICALLY by precedence, then age, then id — never at
+ * random — so the same prompt always yields the same set.
+ */
+const MAX_ALWAYS = 20;
+/**
+ * Nominal relevance assigned to `always`-on preferences. They bypass task scoring
+ * (they apply regardless of the task), so they sort ahead of scored `relevant`
+ * rules in the output block.
+ */
+const ALWAYS_RELEVANCE = 1;
 
 // Scoring weights.
 const W_DOMAIN = 0.5;
@@ -36,6 +50,7 @@ export interface RetrievedPreference {
   polarity: string;
   scope: string;
   status: string;
+  applicability: string;
   confidence: number;
   relevance: number;
 }
@@ -157,16 +172,45 @@ export class RetrievalEngine {
     // observed either fully-before or fully-after — never half-applied.
     const { top, overridden } = withReadTx(this.db, () => {
       const candidates = this.candidates(repo, opts.includeProposed ?? false);
-      const scored = this.rank(candidates, task);
-      const { winners, overridden } = resolveConflicts(scored.map((s) => s.pref));
+
+      // Applicability split. Both pools have already passed status + scope
+      // filtering in `candidates`, so a rejected `always` rule is never here.
+      const alwaysPool = candidates.filter((p) => p.applicability === "always");
+      const relevantPool = candidates.filter((p) => p.applicability !== "always");
+
+      // `relevant` rules keep their original behavior: score against the task and
+      // drop anything below the threshold. `always` rules bypass scoring entirely.
+      const scoredRelevant = this.rank(relevantPool, task);
+      const scoredAlways = alwaysPool.map((pref) => ({ pref, relevance: ALWAYS_RELEVANCE }));
+
+      // Resolve conflicts/precedence across the WHOLE set, so an always rule and a
+      // relevant rule competing for the same exclusive decision are reconciled and
+      // a repo rule can still override a global one.
+      const combined = [...scoredAlways, ...scoredRelevant];
+      const { winners, overridden } = resolveConflicts(combined.map((s) => s.pref));
       const winnerIds = new Set(winners.map((w) => w.id));
-      const kept = scored
+
+      // Cap each pool independently so the relevance top-K can never silently
+      // starve the always-on rules, and vice-versa.
+      const keptAlways = scoredAlways
+        .filter((s) => winnerIds.has(s.pref.id))
+        .sort(
+          (a, b) =>
+            precedenceRank(a.pref) - precedenceRank(b.pref) ||
+            a.pref.createdAt.localeCompare(b.pref.createdAt) ||
+            a.pref.id.localeCompare(b.pref.id),
+        )
+        .slice(0, MAX_ALWAYS);
+      const keptRelevant = scoredRelevant
         .filter((s) => winnerIds.has(s.pref.id))
         .sort(
           (a, b) => b.relevance - a.relevance || precedenceRank(a.pref) - precedenceRank(b.pref),
         )
         .slice(0, limit);
-      return { top: kept, overridden };
+
+      // Always-on rules lead the block (they apply unconditionally), then the
+      // task-relevant matches in relevance order.
+      return { top: [...keptAlways, ...keptRelevant], overridden };
     });
 
     // Best-effort write, outside the read snapshot. Skipped when track === false
@@ -184,6 +228,7 @@ export class RetrievalEngine {
         polarity: w.pref.polarity,
         scope: w.pref.scope,
         status: w.pref.status,
+        applicability: w.pref.applicability,
         confidence: round(w.pref.confidence),
         relevance: round(w.relevance),
       })),
