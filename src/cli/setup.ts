@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CtxContext } from "../core/context.ts";
 import { installClaude, type ClaudeInstallResult } from "../adapters/claude/installer.ts";
-import { captureChild, whichSync } from "../utils/runtime.ts";
+import { captureChild, persistentPath, whichSync } from "../utils/runtime.ts";
 
 /**
  * `ctx setup` / `goatedcontext setup` — one-command onboarding.
@@ -160,10 +160,18 @@ export function runSetup(opts: SetupOptions): SetupResult {
     return verify(p).version;
   };
 
+  // Resolve `ctx` against the PERSISTENT PATH — env.PATH with ephemeral entries
+  // stripped. This is critical when setup is launched via `npx goatedcontext setup`:
+  // npm prepends the npx cache's `node_modules/.bin` (holding a `ctx` shim for the
+  // just-downloaded package, at the running version) to this process's PATH. Reading
+  // the RAW PATH would resolve that ephemeral shim and wrongly conclude the user is
+  // "already current" while their real shell still runs the old global launcher.
+  const persistPath = persistentPath(env.PATH);
+
   // The version the persistent launcher reports BEFORE we touch it. Prefer the
-  // launcher the user's shell actually resolves (`ctx` on PATH); fall back to the
-  // npm global-prefix launcher. This is what makes "upgraded 0.2.3 → 0.2.5" honest.
-  const preOnPath = which("ctx", env.PATH);
+  // launcher the user's shell actually resolves (`ctx` on the persistent PATH); fall
+  // back to the npm global-prefix launcher. This makes "upgraded 0.2.3 → 0.2.6" honest.
+  const preOnPath = which("ctx", persistPath);
   const previousVersion = versionOf(preOnPath) ?? versionOf(globalLauncher);
 
   let globalInstall: GlobalInstallOutcome;
@@ -185,9 +193,10 @@ export function runSetup(opts: SetupOptions): SetupResult {
 
   // 3. VERIFY the persistent CLI in a fresh process — the real success signal.
   //    We deliberately do NOT trust this npx process's own version, nor npm's exit
-  //    code alone. We run the launcher the user's shell resolves (and the global
-  //    prefix launcher) and require the reported version to equal runningVersion.
-  const postOnPath = which("ctx", env.PATH);
+  //    code alone, nor an ephemeral npx shim on the raw PATH. We run the launcher the
+  //    user's shell resolves (persistent PATH) and the global prefix launcher, and
+  //    require the reported version to equal runningVersion.
+  const postOnPath = which("ctx", persistPath);
   const persistentCtx = postOnPath ?? (globalLauncher && existsSync(globalLauncher) ? globalLauncher : null);
   const ctxResolvesOnPath = Boolean(postOnPath);
 

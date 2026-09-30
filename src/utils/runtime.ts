@@ -86,6 +86,42 @@ export function whichSync(cmd: string, pathEnv: string | undefined = process.env
   return null;
 }
 
+/**
+ * True for bin directories that only exist for the lifetime of a single command
+ * and therefore must never be treated as the user's PERSISTENT `ctx` location.
+ *
+ * The motivating case: `npx goatedcontext setup` runs inside a process whose PATH
+ * npm has PREPENDED with the npx cache's package bin, e.g.
+ *   <cache>/_npx/<hash>/node_modules/.bin
+ * That directory holds a `ctx` shim for the just-downloaded package, so a naive
+ * `which("ctx")` resolves the EPHEMERAL npx copy — at the running version — instead
+ * of the user's installed launcher, tricking setup into "already current".
+ *
+ * A globally-installed CLI never lives in a `node_modules/.bin` (npm places global
+ * bins directly in the global prefix), so dropping these entries cannot hide a
+ * legitimate persistent launcher.
+ */
+function isEphemeralBinDir(dir: string): boolean {
+  const norm = dir.replace(/[\\/]+/g, "/").replace(/\/+$/, "").toLowerCase();
+  if (!norm) return true;
+  if (norm.split("/").includes("_npx")) return true; // npx (npm 7+) temp package
+  if (norm.endsWith("/node_modules/.bin")) return true; // project/temp package bin
+  return false;
+}
+
+/**
+ * A copy of PATH with ephemeral bin directories removed, so callers can resolve the
+ * launcher the user's PERSISTENT shell would resolve — never a temporary one npx (or
+ * a local `node_modules/.bin`) injected only for the current process. See
+ * {@link isEphemeralBinDir}.
+ */
+export function persistentPath(pathEnv: string | undefined = process.env.PATH): string {
+  return (pathEnv ?? "")
+    .split(delimiter)
+    .filter((dir) => dir && !isEphemeralBinDir(dir))
+    .join(delimiter);
+}
+
 export interface ChildOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;

@@ -1,9 +1,10 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { runSetup, renderSetup, type SetupOptions } from "../src/cli/setup.ts";
 import { detectPromptHook, getPromptHookCommand } from "../src/adapters/claude/hook.ts";
+import { persistentPath, whichSync } from "../src/utils/runtime.ts";
 
 // `runSetup` is pure orchestration, so every system-touching seam (npm global
 // install, PATH resolution, fresh-process verification) is injected here. That
@@ -194,6 +195,75 @@ test("a stale shim shadowing the updated launcher on PATH is diagnosed", () => {
       rmSync(staleDir, { recursive: true, force: true });
     }
   } finally {
+    h.cleanup();
+  }
+});
+
+test("persistentPath strips npx cache and node_modules/.bin, keeps the global prefix", () => {
+  const ephemeralNpx = join(tmpdir(), "npm-cache", "_npx", "abc123", "node_modules", ".bin");
+  const localBin = join("some", "project", "node_modules", ".bin");
+  const globalPrefix = join(tmpdir(), "roaming", "npm");
+  const raw = [ephemeralNpx, localBin, globalPrefix].join(delimiter);
+
+  const sanitized = persistentPath(raw).split(delimiter);
+  expect(sanitized).toContain(globalPrefix); // the persistent global bin survives
+  expect(sanitized).not.toContain(ephemeralNpx); // npx cache bin is dropped
+  expect(sanitized).not.toContain(localBin); // project bin is dropped
+});
+
+test("REGRESSION (0.2.5): an npx-mutated PATH must NOT make setup report 'already current'", () => {
+  // Exact reproduction of the reported public-path failure:
+  //   `npx goatedcontext setup` runs with npm having PREPENDED the npx cache's
+  //   node_modules/.bin — which holds a `ctx` shim at the RUNNING version — ahead of
+  //   the user's real (older) global launcher. The raw PATH therefore resolves the
+  //   ephemeral 9.9.9 shim, but the user's persistent shell still runs 0.2.3.
+  //
+  // Using the REAL whichSync (not a mock), setup must ignore the ephemeral shim,
+  // upgrade the persistent launcher, and verify against THAT — never report
+  // "present"/"already current" while the persistent ctx is still the old version.
+  const h = harness();
+  // An npx-style ephemeral bin dir holding a `ctx` shim (as npx would inject).
+  const npxBin = mkdtempSync(join(tmpdir(), "ctx-npx-"));
+  const ephemeralBin = join(npxBin, "_npx", "deadbeef", "node_modules", ".bin");
+  mkdirSync(ephemeralBin, { recursive: true });
+  writeFileSync(join(ephemeralBin, LAUNCHER), "echo ephemeral", "utf8");
+  // The user's persistent global launcher, currently at the OLD version.
+  writeFileSync(join(h.binDir, LAUNCHER), "echo old", "utf8");
+  try {
+    let installed = false;
+    // npx prepends its cache bin ahead of the real global bin — the reported ordering.
+    const rawPath = [ephemeralBin, h.binDir].join(delimiter);
+    const persistentLauncher = join(h.binDir, LAUNCHER);
+
+    const result = runSetup(
+      baseOptions(h, {
+        env: { CTX_HOME: h.ctxHome, CTX_SECRET_BACKEND: "file", PATH: rawPath },
+        which: whichSync, // REAL resolver — the bug lives in PATH resolution
+        installGlobal: () => {
+          installed = true; // simulate npm upgrading the persistent launcher on disk
+          return { ok: true, detail: "" };
+        },
+        // Ephemeral npx shim always reports the running version; the persistent
+        // launcher reports the OLD version until the (real) global install runs.
+        verify: (p: string) => {
+          if (p.startsWith(ephemeralBin)) return { ok: true, version: "9.9.9" };
+          if (p === persistentLauncher) return { ok: true, version: installed ? "9.9.9" : "0.2.3" };
+          return { ok: false, version: null };
+        },
+      }),
+    );
+
+    // The decisive assertions: setup was NOT fooled by the ephemeral 9.9.9 shim.
+    expect(result.globalInstall).not.toBe("present");
+    expect(result.globalInstall).toBe("upgraded");
+    expect(result.previousVersion).toBe("0.2.3"); // the PERSISTENT version, not the npx shim
+    expect(result.installedVersion).toBe("9.9.9");
+    expect(result.verified).toBe(true);
+    expect(result.ok).toBe(true);
+    // Sanity: the raw npx PATH really would have resolved the ephemeral shim first.
+    expect(whichSync("ctx", rawPath)?.startsWith(ephemeralBin)).toBe(true);
+  } finally {
+    rmSync(npxBin, { recursive: true, force: true });
     h.cleanup();
   }
 });

@@ -1,7 +1,9 @@
 import { test, expect } from "bun:test";
 import {
+  chmodSync,
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -13,7 +15,7 @@ import { runSetup } from "../src/cli/setup.ts";
 import { openDatabase } from "../src/storage/sqlite/db.ts";
 import { resolvePaths } from "../src/storage/paths.ts";
 import { PreferenceService } from "../src/core/preferences/service.ts";
-import { captureChild, whichSync } from "../src/utils/runtime.ts";
+import { captureChild, persistentPath, whichSync } from "../src/utils/runtime.ts";
 
 // Real, public-path upgrade tests: they drive the ACTUAL `runSetup` with the real
 // npm install + real fresh-process verification, isolated to a throwaway npm
@@ -54,6 +56,17 @@ function fakeOld(version: string): string {
 
 function binDirFor(prefix: string): string {
   return isWin ? prefix : join(prefix, "bin");
+}
+
+/** A real npx-style `ctx` shim that just prints a fixed version (like npm's shims). */
+function writeEphemeralCtx(binDir: string, version: string): void {
+  if (isWin) {
+    writeFileSync(join(binDir, "ctx.cmd"), `@echo off\r\necho ${version}\r\n`);
+  } else {
+    const p = join(binDir, "ctx");
+    writeFileSync(p, `#!/bin/sh\necho ${version}\n`);
+    chmodSync(p, 0o755);
+  }
 }
 
 /**
@@ -314,6 +327,60 @@ test(
       }
     } finally {
       s.cleanup();
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "G. npx-mutated PATH (ephemeral `ctx` at running version) → still UPGRADES the persistent CLI",
+  () => {
+    if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
+    const s = scratch();
+    const pub = publishedDir();
+    const old = fakeOld("0.2.3");
+    // A real npx-style ephemeral bin: `.../_npx/<hash>/node_modules/.bin/ctx` printing
+    // the RUNNING version — exactly what `npx goatedcontext setup` puts on PATH.
+    const npxRoot = mkdtempSync(join(tmpdir(), "ctx-npxcache-"));
+    const ephemeralBin = join(npxRoot, "_npx", "cafebabe", "node_modules", ".bin");
+    mkdirSync(ephemeralBin, { recursive: true });
+    writeEphemeralCtx(ephemeralBin, PKG_VERSION);
+    try {
+      const env = isoEnv(s.prefix, s.home);
+      // Seed the OLD persistent global install (the reported starting state).
+      expect(npmInstallGlobal(old, env)).toBe(0);
+      expect(installedVersion(s.prefix)).toBe("0.2.3");
+
+      // Simulate npx: PREPEND the ephemeral cache bin ahead of everything else.
+      const npxEnv = { ...env, PATH: [ephemeralBin, env.PATH].join(delimiter) };
+
+      // Trap sanity: the RAW npx PATH resolves the ephemeral shim first (0.2.3 bug
+      // source)... but the PERSISTENT PATH (what setup uses) resolves the real global.
+      expect(whichSync("ctx", npxEnv.PATH)?.startsWith(ephemeralBin)).toBe(true);
+      expect(whichSync("ctx", persistentPath(npxEnv.PATH))?.toLowerCase()).toContain(
+        binDirFor(s.prefix).toLowerCase(),
+      );
+
+      const result = runSetup({
+        env: npxEnv,
+        version: PKG_VERSION,
+        claudeHome: s.claudeHome,
+        packageRoot: pub,
+      });
+
+      // Must UPGRADE the persistent CLI — never fall for the ephemeral "already current".
+      expect(result.globalInstall).toBe("upgraded");
+      expect(result.previousVersion).toBe("0.2.3");
+      expect(result.installedVersion).toBe(PKG_VERSION);
+      expect(result.verified).toBe(true);
+      expect(result.ok).toBe(true);
+      // Independent proof: the persistent launcher ON DISK is now the running version.
+      expect(installedVersion(s.prefix)).toBe(PKG_VERSION);
+    } finally {
+      s.cleanup();
+      rmSync(pub, { recursive: true, force: true });
+      rmSync(old, { recursive: true, force: true });
+      rmSync(npxRoot, { recursive: true, force: true });
     }
   },
   TIMEOUT,
