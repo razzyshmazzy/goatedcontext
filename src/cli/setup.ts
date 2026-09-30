@@ -1,28 +1,49 @@
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { CtxContext } from "../core/context.ts";
 import { installClaude, type ClaudeInstallResult } from "../adapters/claude/installer.ts";
-import { captureChild, persistentPath, whichSync } from "../utils/runtime.ts";
+import {
+  captureChild,
+  persistentPath,
+  resolvesIntoEphemeralCache,
+  whichSync,
+} from "../utils/runtime.ts";
 
 /**
  * `ctx setup` / `goatedcontext setup` — one-command onboarding.
  *
  * Orchestrates the steps a new user would otherwise run by hand:
  *   1. initialize ~/.ctx (database, config, secret backend)
- *   2. make a persistent `ctx` available (global npm install) so it survives the
- *      temporary `npx` process that may have launched setup
+ *   2. make a persistent `ctx` available by installing the EXACT published version
+ *      from the npm registry (`goatedcontext@<version>`) so it survives the temporary
+ *      `npx` process that launched setup — and never LINKS back into the npx cache
  *   3. install the Claude Code adapter (skills, instruction block, prompt hook)
  *   4. verify a fresh process can actually run `ctx`
  *
  * It is pure orchestration over existing services — no new business logic — and is
  * idempotent: re-running repairs/verifies rather than duplicating anything.
  *
- * Every system-touching step (npm, PATH resolution, fresh-process verification) is
- * injectable so the whole flow can be unit-tested without mutating the machine.
+ * Every system-touching step (npm, PATH resolution, fresh-process verification, link
+ * inspection) is injectable so the whole flow can be unit-tested without mutating the
+ * machine.
+ *
+ * ── Why we install a registry spec, not a directory ──────────────────────────────
+ * `npx goatedcontext setup` runs from `.../npm-cache/_npx/<hash>/node_modules/
+ * goatedcontext`. Installing THAT directory (`npm install -g <dir>`) makes npm LINK
+ * the global package back into the ephemeral npx cache — so the "persistent" CLI
+ * depends on a directory npm may purge at any time (the real 0.2.3 breakage). Setup
+ * therefore installs `goatedcontext@<version>`, producing a normal, self-contained
+ * global package. Tests inject a `.tgz` spec to exercise the same install semantics
+ * without the registry.
  */
 
-export type GlobalInstallOutcome = "installed" | "upgraded" | "present" | "skipped" | "failed";
+export type GlobalInstallOutcome =
+  | "installed"
+  | "upgraded"
+  | "repaired"
+  | "present"
+  | "skipped"
+  | "failed";
 
 export interface SetupResult {
   ok: boolean;
@@ -35,6 +56,16 @@ export interface SetupResult {
   hookCommand: string;
   globalInstall: GlobalInstallOutcome;
   globalBinDir: string | null;
+  /** The global package directory inspected for a broken (linked) install. */
+  globalPackageDir: string | null;
+  /**
+   * Whether the PRE-EXISTING global package resolved into an ephemeral npm cache
+   * (a symlink/junction into `_npx`) — the deeper 0.2.3 breakage. When true, setup
+   * reinstalls from the registry even if the reported version already matched.
+   */
+  previousInstallLinked: boolean;
+  /** The install spec used (registry `goatedcontext@<v>` in production, `.tgz` in tests). */
+  installSpec: string;
   /** Absolute path of the persistent `ctx` launcher, if found. */
   ctxPath: string | null;
   /** Whether a brand-new shell would resolve `ctx` on PATH. */
@@ -63,14 +94,24 @@ export interface SetupOptions {
   /** Skip making `ctx` globally persistent (advanced/manual installs). */
   skipGlobalInstall?: boolean;
 
+  /**
+   * The npm spec to install globally. Production MUST leave this undefined so it
+   * defaults to the registry spec `goatedcontext@<version>` — never a directory,
+   * which is what created linked-into-`_npx` global installs. Tests may pass an
+   * absolute `.tgz` path to exercise real package-install semantics offline.
+   */
+  installSpec?: string;
+
   // ---- injectable seams (default to the real implementations) ----
   which?: (cmd: string, path?: string) => string | null;
   /** Directory holding global npm bins (default: derived from `npm prefix -g`). */
   globalBinDir?: string | null;
-  /** Package directory to install globally (default: this package's root). */
-  packageRoot?: string;
-  installGlobal?: (packageRoot: string) => { ok: boolean; detail: string };
+  /** The global package directory (`<prefix>/node_modules/goatedcontext`, etc.). */
+  globalPackageDir?: string | null;
+  installGlobal?: (spec: string) => { ok: boolean; detail: string };
   verify?: (ctxPath: string) => { ok: boolean; version: string | null };
+  /** Inspect the global package dir for a symlink/junction into an ephemeral cache. */
+  inspectLink?: (packageDir: string) => { linked: boolean; target: string | null };
   installAdapter?: (args: { claudeHome?: string; hookCommand: string }) => ClaudeInstallResult;
 }
 
@@ -78,43 +119,68 @@ function quoteCmd(p: string): string {
   return /\s/.test(p) ? `"${p}"` : p;
 }
 
-/** Walk up from a file to the nearest directory containing package.json. */
-function findPackageRoot(startFile: string): string | null {
-  let dir = dirname(startFile);
-  for (let i = 0; i < 8; i++) {
-    if (existsSync(join(dir, "package.json"))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
+interface GlobalPaths {
+  /** Directory holding the global `ctx` launcher shims. */
+  binDir: string;
+  /** Directory of the installed global package (for link inspection). */
+  packageDir: string;
 }
 
-function resolvePackageRoot(opts: SetupOptions): string {
-  if (opts.packageRoot) return opts.packageRoot;
-  const root = findPackageRoot(fileURLToPath(import.meta.url));
-  if (!root) throw new Error("Could not locate the goatedcontext package directory to install.");
-  return root;
-}
-
-/** Derive the global npm bin directory from `npm prefix -g`. */
-function detectGlobalBinDir(env: NodeJS.ProcessEnv): string | null {
+/**
+ * Derive the global npm bin AND package directories from `npm prefix -g`.
+ *   - Windows: bins live in `<prefix>`, packages in `<prefix>/node_modules/<pkg>`.
+ *   - POSIX:   bins live in `<prefix>/bin`, packages in `<prefix>/lib/node_modules/<pkg>`.
+ */
+function detectGlobalPaths(env: NodeJS.ProcessEnv): GlobalPaths | null {
   const res = captureChild("npm", ["prefix", "-g"], { env });
   if (res.code !== 0) return null;
   const prefix = res.stdout.trim();
   if (!prefix) return null;
-  // On Windows the shims live directly in the prefix; elsewhere in prefix/bin.
-  return process.platform === "win32" ? prefix : join(prefix, "bin");
+  return process.platform === "win32"
+    ? { binDir: prefix, packageDir: join(prefix, "node_modules", "goatedcontext") }
+    : { binDir: join(prefix, "bin"), packageDir: join(prefix, "lib", "node_modules", "goatedcontext") };
 }
 
-function installGlobalNpm(packageRoot: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
-  // Install the EXACT package this process is running from (a directory spec), so
-  // `npx goatedcontext@X setup` persists exactly version X — never an implicit
-  // `latest` or a bare package name. Surface npm's own stderr on failure rather
-  // than swallowing it, so a broken install produces actionable diagnostics.
-  const res = captureChild("npm", ["install", "-g", packageRoot], { env });
+/**
+ * The production install spec: the EXACT published version from the registry. Never a
+ * directory (which npm would link — see the file header) and never a bare name or an
+ * implicit `latest` (which would drift from the running version).
+ */
+function productionInstallSpec(version: string): string {
+  return `goatedcontext@${version}`;
+}
+
+function installGlobalNpm(spec: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
+  // `npm install -g goatedcontext@<version>` (or, in tests, an absolute .tgz path).
+  // Both produce a real, self-contained global package. Surface npm's own stderr on
+  // failure rather than swallowing it, so a broken install stays actionable.
+  const res = captureChild("npm", ["install", "-g", spec], { env });
   const detail = (res.stderr.trim() || res.stdout.trim()).slice(0, 2000);
   return { ok: res.code === 0, detail };
+}
+
+/**
+ * Inspect the global package directory for a BROKEN linked install: a symlink/junction
+ * (npm links local-dir installs this way) or a real path that resolves into an
+ * ephemeral npm cache (`_npx`). Robust across platforms — junctions are reported as
+ * symlinks by `lstat` on Windows, and the realpath check catches anything lstat misses.
+ * Never throws; an uninspectable path is simply "not linked".
+ */
+function inspectGlobalLink(packageDir: string): { linked: boolean; target: string | null } {
+  try {
+    if (!existsSync(packageDir)) return { linked: false, target: null };
+    const isLink = lstatSync(packageDir).isSymbolicLink();
+    let target: string | null = null;
+    try {
+      target = realpathSync(packageDir);
+    } catch {
+      target = null;
+    }
+    const escapes = target !== null && resolvesIntoEphemeralCache(target);
+    return { linked: isLink || escapes, target };
+  } catch {
+    return { linked: false, target: null };
+  }
 }
 
 function verifyCtx(ctxPath: string, env: NodeJS.ProcessEnv): { ok: boolean; version: string | null } {
@@ -146,13 +212,20 @@ export function runSetup(opts: SetupOptions): SetupResult {
   const secret = ctx.secrets.describe();
   ctx.close();
 
-  // 2. Ensure a persistent global `ctx` at the EXACT running version.
+  // 2. Ensure a persistent global `ctx` at the EXACT running version, installed as a
+  //    real registry package (never linked into the npx cache).
   const runningVersion = opts.version;
-  const globalBinDir = opts.globalBinDir === undefined ? detectGlobalBinDir(env) : opts.globalBinDir;
+  const needsDetect = opts.globalBinDir === undefined || opts.globalPackageDir === undefined;
+  const detected = needsDetect ? detectGlobalPaths(env) : null;
+  const globalBinDir = opts.globalBinDir === undefined ? (detected?.binDir ?? null) : opts.globalBinDir;
+  const globalPackageDir =
+    opts.globalPackageDir === undefined ? (detected?.packageDir ?? null) : opts.globalPackageDir;
   const launcherName = isWin ? "ctx.cmd" : "ctx";
   const globalLauncher = globalBinDir ? join(globalBinDir, launcherName) : null;
   const verify = opts.verify ?? ((p: string) => verifyCtx(p, env));
-  const doInstall = opts.installGlobal ?? ((root: string) => installGlobalNpm(root, env));
+  const doInstall = opts.installGlobal ?? ((spec: string) => installGlobalNpm(spec, env));
+  const inspectLink = opts.inspectLink ?? inspectGlobalLink;
+  const installSpec = opts.installSpec ?? productionInstallSpec(runningVersion);
 
   /** Version reported by a launcher path, or null if absent/unrunnable. */
   const versionOf = (p: string | null): string | null => {
@@ -174,14 +247,30 @@ export function runSetup(opts: SetupOptions): SetupResult {
   const preOnPath = which("ctx", persistPath);
   const previousVersion = versionOf(preOnPath) ?? versionOf(globalLauncher);
 
+  // Detect the deeper 0.2.3 breakage: a global package that is a symlink/junction into
+  // the ephemeral npx cache. Such an install is BROKEN even if `ctx --version` happens
+  // to match, so we must reinstall it as a real package regardless of version.
+  const preLink = globalPackageDir ? inspectLink(globalPackageDir) : { linked: false, target: null };
+  const previousInstallLinked = preLink.linked;
+
   let globalInstall: GlobalInstallOutcome;
   let installFailed = false;
   if (opts.skipGlobalInstall) {
     globalInstall = "skipped";
+  } else if (previousInstallLinked) {
+    // Broken linked install → reinstall as a real registry package (repair).
+    const res = doInstall(installSpec);
+    if (!res.ok) {
+      installFailed = true;
+      globalInstall = "failed";
+      warnings.push(`npm global install failed:\n${res.detail || "unknown error"}`);
+    } else {
+      globalInstall = "repaired";
+    }
   } else if (previousVersion === runningVersion) {
-    globalInstall = "present"; // already persistent at the exact running version
+    globalInstall = "present"; // already a real package at the exact running version
   } else {
-    const res = doInstall(resolvePackageRoot(opts));
+    const res = doInstall(installSpec);
     if (!res.ok) {
       installFailed = true;
       globalInstall = "failed";
@@ -204,13 +293,27 @@ export function runSetup(opts: SetupOptions): SetupResult {
   const prefixVersion = versionOf(globalLauncher);
   const installedVersion = pathVersion ?? prefixVersion;
 
+  // Re-inspect after install: a correct repair must leave a REAL package directory —
+  // never still a link into the npx cache.
+  const postLink = globalPackageDir ? inspectLink(globalPackageDir) : { linked: false, target: null };
+
   let verified = false;
   if (opts.skipGlobalInstall) {
     verified = true; // advanced/manual path: nothing for us to verify
   } else if (!installFailed) {
-    verified = installedVersion === runningVersion;
+    verified = installedVersion === runningVersion && !postLink.linked;
     if (!verified) {
-      if (!persistentCtx) {
+      if (postLink.linked) {
+        // npm reported success but the global package still resolves into an ephemeral
+        // cache — the install must be a real package, not a link.
+        warnings.push(
+          `The global \`goatedcontext\` still resolves into an ephemeral npm cache:\n` +
+            `  package: ${globalPackageDir}\n` +
+            `  resolves to: ${postLink.target ?? "(unknown)"}\n` +
+            `  A persistent CLI must not depend on an \`_npx\` cache. Reinstall with:\n` +
+            `    npm install -g goatedcontext@${runningVersion}`,
+        );
+      } else if (!persistentCtx) {
         warnings.push(
           `Could not locate a persistent \`ctx\` after install.\n` +
             (globalBinDir
@@ -275,6 +378,9 @@ export function runSetup(opts: SetupOptions): SetupResult {
     hookCommand,
     globalInstall,
     globalBinDir: globalBinDir ?? null,
+    globalPackageDir: globalPackageDir ?? null,
+    previousInstallLinked,
+    installSpec,
     ctxPath,
     ctxResolvesOnPath,
     verified,
@@ -293,6 +399,12 @@ function globalLine(result: SetupResult): string {
       return `✓ installed ctx ${v}`;
     case "upgraded":
       return `✓ upgraded ctx ${result.previousVersion ?? "?"} → ${v}`;
+    case "repaired": {
+      const prev = result.previousVersion;
+      return prev && prev !== v
+        ? `✓ repaired linked install and upgraded ctx ${prev} → ${v}`
+        : `✓ repaired linked install (ctx ${v})`;
+    }
     case "present":
       return `✓ ctx already current (${v})`;
     case "skipped":
@@ -321,7 +433,8 @@ export function renderSetup(result: SetupResult): string[] {
     );
     out.push("");
     out.push("Restart Claude Code.");
-    if (result.globalInstall === "upgraded") out.push("goat upgraded.");
+    if (result.globalInstall === "upgraded" || result.globalInstall === "repaired")
+      out.push("goat upgraded.");
     else if (result.globalInstall === "present") out.push("goat already current.");
     else out.push("goat acquired.");
     return out;

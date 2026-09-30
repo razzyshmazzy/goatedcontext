@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { runSetup, renderSetup, type SetupOptions } from "../src/cli/setup.ts";
 import { detectPromptHook, getPromptHookCommand } from "../src/adapters/claude/hook.ts";
-import { persistentPath, whichSync } from "../src/utils/runtime.ts";
+import { persistentPath, resolvesIntoEphemeralCache, whichSync } from "../src/utils/runtime.ts";
 
 // `runSetup` is pure orchestration, so every system-touching seam (npm global
 // install, PATH resolution, fresh-process verification) is injected here. That
@@ -40,15 +40,18 @@ function baseOptions(h: Harness, overrides: Partial<SetupOptions> = {}): SetupOp
     version: "9.9.9",
     claudeHome: h.claudeHome,
     globalBinDir: h.binDir,
-    packageRoot: "/fake/package/root",
+    // A real (never-linked) package location so link detection stays off the machine's
+    // actual global; the default inspectLink below reports "not linked" regardless.
+    globalPackageDir: join(h.binDir, "node_modules", "goatedcontext"),
     // Default seams: nothing on PATH, install succeeds by creating the launcher,
-    // verification succeeds and reports the current version.
+    // verification succeeds and reports the current version, no broken link.
     which: () => null,
-    installGlobal: (root: string) => {
-      writeFileSync(join(h.binDir, LAUNCHER), `echo ${root}`, "utf8");
+    installGlobal: (spec: string) => {
+      writeFileSync(join(h.binDir, LAUNCHER), `echo ${spec}`, "utf8");
       return { ok: true, detail: "" };
     },
     verify: () => ({ ok: true, version: "9.9.9" }),
+    inspectLink: () => ({ linked: false, target: null }),
     ...overrides,
   };
 }
@@ -264,6 +267,140 @@ test("REGRESSION (0.2.5): an npx-mutated PATH must NOT make setup report 'alread
     expect(whichSync("ctx", rawPath)?.startsWith(ephemeralBin)).toBe(true);
   } finally {
     rmSync(npxBin, { recursive: true, force: true });
+    h.cleanup();
+  }
+});
+
+test("resolvesIntoEphemeralCache flags _npx cache paths, not ordinary global installs", () => {
+  // Broken: resolves into the npx cache or a project bin.
+  expect(
+    resolvesIntoEphemeralCache(
+      "C:\\Users\\a\\AppData\\Local\\npm-cache\\_npx\\abc\\node_modules\\goatedcontext",
+    ),
+  ).toBe(true);
+  expect(resolvesIntoEphemeralCache("/home/u/.npm/_npx/abc/node_modules/goatedcontext")).toBe(true);
+  expect(resolvesIntoEphemeralCache("/some/proj/node_modules/.bin")).toBe(true);
+  // Fine: ordinary npm-managed global installs must NOT be flagged.
+  expect(
+    resolvesIntoEphemeralCache("C:\\Users\\a\\AppData\\Roaming\\npm\\node_modules\\goatedcontext"),
+  ).toBe(false);
+  expect(resolvesIntoEphemeralCache("/usr/local/lib/node_modules/goatedcontext")).toBe(false);
+});
+
+test("production install spec is the exact registry version, never a directory", () => {
+  const h = harness();
+  try {
+    let seenSpec = "";
+    const result = runSetup(
+      baseOptions(h, {
+        installGlobal: (spec: string) => {
+          seenSpec = spec;
+          writeFileSync(join(h.binDir, LAUNCHER), "echo installed", "utf8");
+          return { ok: true, detail: "" };
+        },
+      }),
+    );
+    // The single-source version is turned into a registry spec — not a packageRoot dir.
+    expect(seenSpec).toBe("goatedcontext@9.9.9");
+    expect(result.installSpec).toBe("goatedcontext@9.9.9");
+    expect(seenSpec).not.toContain("_npx");
+    expect(seenSpec).not.toContain("/");
+    expect(seenSpec).not.toContain("\\");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("D/E: a broken linked install (junction into _npx) is repaired to a real package", () => {
+  // The deeper 0.2.3 bug: <prefix>/node_modules/goatedcontext is a link into the npx
+  // cache. Setup must REPAIR it (reinstall as a real package), then verify it is no
+  // longer linked and reports the running version.
+  const h = harness();
+  try {
+    writeFileSync(join(h.binDir, LAUNCHER), "echo old", "utf8");
+    let installed = false;
+    const npxTarget =
+      "C:\\Users\\x\\AppData\\Local\\npm-cache\\_npx\\deadbeef\\node_modules\\goatedcontext";
+    const result = runSetup(
+      baseOptions(h, {
+        which: () => join(h.binDir, LAUNCHER),
+        // Before repair the linked package reports 0.2.3; after, the real one is 9.9.9.
+        verify: () => ({ ok: true, version: installed ? "9.9.9" : "0.2.3" }),
+        inspectLink: () =>
+          installed
+            ? { linked: false, target: join(h.binDir, "node_modules", "goatedcontext") }
+            : { linked: true, target: npxTarget },
+        installGlobal: () => {
+          installed = true;
+          return { ok: true, detail: "" };
+        },
+      }),
+    );
+    expect(result.previousInstallLinked).toBe(true);
+    expect(result.globalInstall).toBe("repaired");
+    expect(result.previousVersion).toBe("0.2.3");
+    expect(result.installedVersion).toBe("9.9.9");
+    expect(result.verified).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.installSpec).toBe("goatedcontext@9.9.9");
+    const text = renderSetup(result).join("\n");
+    expect(text).toContain("repaired linked install and upgraded ctx 0.2.3 → 9.9.9");
+    expect(text).toContain("goat upgraded.");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("F: a SAME-version global that is linked into _npx is STILL repaired (not 'present')", () => {
+  const h = harness();
+  try {
+    writeFileSync(join(h.binDir, LAUNCHER), "echo cur", "utf8");
+    let installed = false;
+    const result = runSetup(
+      baseOptions(h, {
+        which: () => join(h.binDir, LAUNCHER),
+        verify: () => ({ ok: true, version: "9.9.9" }), // version matches before AND after
+        inspectLink: () =>
+          installed
+            ? { linked: false, target: "real-package-dir" }
+            : { linked: true, target: "/home/u/.npm/_npx/hash/node_modules/goatedcontext" },
+        installGlobal: () => {
+          installed = true;
+          return { ok: true, detail: "" };
+        },
+      }),
+    );
+    expect(result.previousInstallLinked).toBe(true);
+    expect(result.globalInstall).toBe("repaired"); // NOT "present" despite matching version
+    expect(result.verified).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(renderSetup(result).join("\n")).toContain("repaired linked install (ctx 9.9.9)");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a global that REMAINS linked after install fails loudly (no false success)", () => {
+  const h = harness();
+  try {
+    writeFileSync(join(h.binDir, LAUNCHER), "echo x", "utf8");
+    const npxTarget = "/home/u/.npm/_npx/hash/node_modules/goatedcontext";
+    const result = runSetup(
+      baseOptions(h, {
+        which: () => join(h.binDir, LAUNCHER),
+        verify: () => ({ ok: true, version: "9.9.9" }),
+        inspectLink: () => ({ linked: true, target: npxTarget }), // never actually repaired
+        installGlobal: () => ({ ok: true, detail: "" }),
+      }),
+    );
+    expect(result.globalInstall).toBe("repaired"); // we attempted the repair
+    expect(result.verified).toBe(false); // still linked → not verified
+    expect(result.ok).toBe(false);
+    const msg = result.warnings.join("\n");
+    expect(msg).toContain("_npx");
+    expect(msg).toContain("npm install -g goatedcontext@9.9.9");
+    expect(renderSetup(result).join("\n")).not.toContain("goat upgraded");
+  } finally {
     h.cleanup();
   }
 });

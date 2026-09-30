@@ -122,6 +122,22 @@ export function persistentPath(pathEnv: string | undefined = process.env.PATH): 
     .join(delimiter);
 }
 
+/**
+ * True when a resolved filesystem path lives inside an EPHEMERAL npm cache — most
+ * importantly the npx cache (`.../_npx/<hash>/...`). A persistent global package must
+ * NEVER resolve into such a directory: `npm install -g <local-dir>` pointed at an npx
+ * cache package will LINK the global install back into that cache, and the cache is
+ * transient. Detecting this lets setup treat such an install as broken and reinstall
+ * from the registry. Kept path-only (no fs access) so it is trivially unit-testable.
+ */
+export function resolvesIntoEphemeralCache(p: string): boolean {
+  const norm = p.replace(/[\\/]+/g, "/").replace(/\/+$/, "").toLowerCase();
+  if (!norm) return false;
+  if (norm.split("/").includes("_npx")) return true; // npx (npm 7+) temp package cache
+  if (norm.includes("/node_modules/.bin")) return true; // never where a package lives
+  return false;
+}
+
 export interface ChildOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;

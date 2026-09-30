@@ -1,12 +1,15 @@
 import { test, expect } from "bun:test";
 import {
   chmodSync,
-  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,8 +22,13 @@ import { captureChild, persistentPath, whichSync } from "../src/utils/runtime.ts
 
 // Real, public-path upgrade tests: they drive the ACTUAL `runSetup` with the real
 // npm install + real fresh-process verification, isolated to a throwaway npm
-// global prefix (never the machine's real global). The decisive assertion is that
-// after setup the PERSISTENT `ctx` reports exactly the running package version.
+// global prefix (never the machine's real global). The decisive assertions are that
+// after setup the PERSISTENT `ctx` reports exactly the running package version AND the
+// global package is a REAL directory — never a symlink/junction into the npx cache.
+//
+// Installs go through an actual `.tgz` (via `npm pack`), NOT a source directory:
+// installing a directory is exactly what made npm LINK the global package back into
+// the ephemeral `_npx` cache (the deeper 0.2.3 breakage this release fixes).
 
 const ROOT = join(import.meta.dir, "..");
 const DIST = join(ROOT, "dist", "index.js");
@@ -32,16 +40,6 @@ const PKG_VERSION = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"))
 const TIMEOUT = 180_000;
 
 const ready = Boolean(NPM && NODE && existsSync(DIST));
-
-/** A "published" package dir (package.json + built dist + docs), like the npx cache. */
-function publishedDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "ctx-pub-"));
-  cpSync(join(ROOT, "dist"), join(dir, "dist"), { recursive: true });
-  cpSync(join(ROOT, "package.json"), join(dir, "package.json"));
-  cpSync(join(ROOT, "README.md"), join(dir, "README.md"));
-  cpSync(join(ROOT, "LICENSE"), join(dir, "LICENSE"));
-  return dir;
-}
 
 /** A minimal older `goatedcontext` whose `ctx` just prints an old version. */
 function fakeOld(version: string): string {
@@ -58,6 +56,13 @@ function binDirFor(prefix: string): string {
   return isWin ? prefix : join(prefix, "bin");
 }
 
+/** Where npm installs the global PACKAGE (not its bin) under a given prefix. */
+function globalPackageDirFor(prefix: string): string {
+  return isWin
+    ? join(prefix, "node_modules", "goatedcontext")
+    : join(prefix, "lib", "node_modules", "goatedcontext");
+}
+
 /** A real npx-style `ctx` shim that just prints a fixed version (like npm's shims). */
 function writeEphemeralCtx(binDir: string, version: string): void {
   if (isWin) {
@@ -67,6 +72,50 @@ function writeEphemeralCtx(binDir: string, version: string): void {
     writeFileSync(p, `#!/bin/sh\necho ${version}\n`);
     chmodSync(p, 0o755);
   }
+}
+
+/**
+ * `npm pack` a package DIRECTORY into a `.tgz` and return its absolute path (plus the
+ * temp dir to clean up). `--ignore-scripts` avoids re-running the repo's prepack build.
+ * Installing this tarball exercises the SAME package-copy semantics as a registry
+ * install — and, unlike a directory install, cannot produce a link back into a cache.
+ */
+function packTarball(pkgDir: string, env: NodeJS.ProcessEnv): { tarball: string; dir: string } {
+  const dir = mkdtempSync(join(tmpdir(), "ctx-tgz-"));
+  const res = captureChild("npm", ["pack", pkgDir, "--pack-destination", dir, "--ignore-scripts"], {
+    env,
+  });
+  if (res.code !== 0) {
+    console.error(`npm pack failed (code ${res.code}):\n${res.stderr || res.stdout}`);
+    throw new Error("npm pack failed");
+  }
+  const tgz = readdirSync(dir).find((f) => f.endsWith(".tgz"));
+  if (!tgz) throw new Error(`npm pack produced no .tgz in ${dir}`);
+  return { tarball: join(dir, tgz), dir };
+}
+
+/**
+ * A real goatedcontext-shaped package living inside an npx-style cache path
+ * (`.../_npx/<hash>/node_modules/goatedcontext`). Used to reproduce the broken linked
+ * install: a global package symlinked/junctioned into this ephemeral directory.
+ */
+function makeNpxCachePackage(version: string): { pkgDir: string; root: string } {
+  const root = mkdtempSync(join(tmpdir(), "ctx-npxcache-"));
+  const pkgDir = join(root, "_npx", "deadbeef", "node_modules", "goatedcontext");
+  mkdirSync(join(pkgDir, "dist"), { recursive: true });
+  writeFileSync(
+    join(pkgDir, "package.json"),
+    JSON.stringify({
+      name: "goatedcontext",
+      version,
+      bin: { ctx: "dist/index.js", goatedcontext: "dist/index.js" },
+    }),
+  );
+  writeFileSync(
+    join(pkgDir, "dist", "index.js"),
+    `#!/usr/bin/env node\nconsole.log(${JSON.stringify(version)});\n`,
+  );
+  return { pkgDir, root };
 }
 
 /**
@@ -226,105 +275,135 @@ test(
 );
 
 test(
-  "A. no global installation → fresh install reports the running version",
+  "A. no global installation → fresh .tgz install is a REAL package at the running version",
   () => {
     if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
     const s = scratch();
-    const pub = publishedDir();
+    const env = isoEnv(s.prefix, s.home);
+    const main = packTarball(ROOT, env);
     try {
-      const env = isoEnv(s.prefix, s.home);
-      const result = runSetup({ env, version: PKG_VERSION, claudeHome: s.claudeHome, packageRoot: pub });
+      const result = runSetup({
+        env,
+        version: PKG_VERSION,
+        claudeHome: s.claudeHome,
+        installSpec: main.tarball,
+      });
       expect(result.globalInstall).toBe("installed");
       expect(result.previousVersion).toBeNull();
+      expect(result.previousInstallLinked).toBe(false);
       expect(result.verified).toBe(true);
       expect(result.ok).toBe(true);
-      // Independent proof: the persistent launcher reports the running version.
+      // Independent proof: the persistent launcher reports the running version...
       expect(installedVersion(s.prefix)).toBe(PKG_VERSION);
+      // ...and the global package is a REAL directory, not a link into any cache.
+      const gpkg = globalPackageDirFor(s.prefix);
+      expect(lstatSync(gpkg).isSymbolicLink()).toBe(false);
+      expect(realpathSync(gpkg).toLowerCase()).not.toContain("_npx");
     } finally {
       s.cleanup();
-      rmSync(pub, { recursive: true, force: true });
+      rmSync(main.dir, { recursive: true, force: true });
     }
   },
   TIMEOUT,
 );
 
 test(
-  "D. older global installation → setup UPGRADES the persistent CLI to the running version",
+  "B. older normal global install → setup UPGRADES the persistent CLI to the running version",
   () => {
     if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
     const s = scratch();
-    const pub = publishedDir();
-    const old = fakeOld("0.2.3");
+    const env = isoEnv(s.prefix, s.home);
+    const main = packTarball(ROOT, env);
+    const oldPkg = fakeOld("0.2.3");
+    const oldTgz = packTarball(oldPkg, env);
     try {
-      const env = isoEnv(s.prefix, s.home);
-      // Seed an OLD persistent install (the reported starting state).
-      expect(npmInstallGlobal(old, env)).toBe(0);
+      // Seed an OLD, NORMAL persistent install (from a real tarball).
+      expect(npmInstallGlobal(oldTgz.tarball, env)).toBe(0);
       expect(installedVersion(s.prefix)).toBe("0.2.3");
 
-      const result = runSetup({ env, version: PKG_VERSION, claudeHome: s.claudeHome, packageRoot: pub });
+      const result = runSetup({
+        env,
+        version: PKG_VERSION,
+        claudeHome: s.claudeHome,
+        installSpec: main.tarball,
+      });
       expect(result.globalInstall).toBe("upgraded");
       expect(result.previousVersion).toBe("0.2.3");
+      expect(result.previousInstallLinked).toBe(false);
       expect(result.installedVersion).toBe(PKG_VERSION);
       expect(result.verified).toBe(true);
       expect(result.ok).toBe(true);
-      // The persistent version ACTUALLY changed on disk.
       expect(installedVersion(s.prefix)).toBe(PKG_VERSION);
     } finally {
       s.cleanup();
-      rmSync(pub, { recursive: true, force: true });
-      rmSync(old, { recursive: true, force: true });
+      rmSync(main.dir, { recursive: true, force: true });
+      rmSync(oldTgz.dir, { recursive: true, force: true });
+      rmSync(oldPkg, { recursive: true, force: true });
     }
   },
   TIMEOUT,
 );
 
 test(
-  "C. same-version installation → present, idempotent (no reinstall), stays correct",
+  "C. same-version normal install → present, idempotent (no reinstall), integration re-wires",
   () => {
     if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
     const s = scratch();
-    const pub = publishedDir();
+    const env = isoEnv(s.prefix, s.home);
+    const main = packTarball(ROOT, env);
     try {
-      const env = isoEnv(s.prefix, s.home);
-      expect(npmInstallGlobal(pub, env)).toBe(0);
+      expect(npmInstallGlobal(main.tarball, env)).toBe(0);
       expect(installedVersion(s.prefix)).toBe(PKG_VERSION);
 
-      const result = runSetup({ env, version: PKG_VERSION, claudeHome: s.claudeHome, packageRoot: pub });
-      expect(result.globalInstall).toBe("present"); // already current → not reinstalled
+      const result = runSetup({
+        env,
+        version: PKG_VERSION,
+        claudeHome: s.claudeHome,
+        installSpec: main.tarball,
+      });
+      expect(result.globalInstall).toBe("present"); // real package, current → not reinstalled
+      expect(result.previousInstallLinked).toBe(false);
       expect(result.verified).toBe(true);
       expect(result.ok).toBe(true);
       expect(installedVersion(s.prefix)).toBe(PKG_VERSION);
 
-      // Second run is safe and reports current again.
-      const again = runSetup({ env, version: PKG_VERSION, claudeHome: s.claudeHome, packageRoot: pub });
+      // Second run is safe and idempotent (matrix item J: integration refresh).
+      const again = runSetup({
+        env,
+        version: PKG_VERSION,
+        claudeHome: s.claudeHome,
+        installSpec: main.tarball,
+      });
       expect(again.globalInstall).toBe("present");
       expect(again.ok).toBe(true);
     } finally {
       s.cleanup();
-      rmSync(pub, { recursive: true, force: true });
+      rmSync(main.dir, { recursive: true, force: true });
     }
   },
   TIMEOUT,
 );
 
 test(
-  "E. failed global installation → nonzero, no false success, npm stderr surfaced",
+  "H. failed registry/tarball install → nonzero, no false success, npm stderr surfaced",
   () => {
     if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
     const s = scratch();
     try {
       const env = isoEnv(s.prefix, s.home);
-      // packageRoot points at a directory with no package.json → npm install fails.
-      const bogus = mkdtempSync(join(tmpdir(), "ctx-bogus-"));
-      try {
-        const result = runSetup({ env, version: PKG_VERSION, claudeHome: s.claudeHome, packageRoot: bogus });
-        expect(result.globalInstall).toBe("failed");
-        expect(result.ok).toBe(false);
-        expect(result.warnings.join("\n").toLowerCase()).toContain("npm");
-        expect(installedVersion(s.prefix)).toBeNull(); // nothing persisted
-      } finally {
-        rmSync(bogus, { recursive: true, force: true });
-      }
+      // A nonexistent local tarball → npm install fails WITHOUT touching the network,
+      // and we must NOT fall back to linking anything.
+      const missingTgz = join(tmpdir(), "goatedcontext-0.0.0-does-not-exist.tgz");
+      const result = runSetup({
+        env,
+        version: PKG_VERSION,
+        claudeHome: s.claudeHome,
+        installSpec: missingTgz,
+      });
+      expect(result.globalInstall).toBe("failed");
+      expect(result.ok).toBe(false);
+      expect(result.warnings.join("\n").toLowerCase()).toContain("npm");
+      expect(installedVersion(s.prefix)).toBeNull(); // nothing persisted
     } finally {
       s.cleanup();
     }
@@ -333,29 +412,26 @@ test(
 );
 
 test(
-  "G. npx-mutated PATH (ephemeral `ctx` at running version) → still UPGRADES the persistent CLI",
+  "npx-mutated PATH over a normal old install → UPGRADES (ignores the ephemeral shim)",
   () => {
     if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
     const s = scratch();
-    const pub = publishedDir();
-    const old = fakeOld("0.2.3");
+    const env = isoEnv(s.prefix, s.home);
+    const main = packTarball(ROOT, env);
+    const oldPkg = fakeOld("0.2.3");
+    const oldTgz = packTarball(oldPkg, env);
     // A real npx-style ephemeral bin: `.../_npx/<hash>/node_modules/.bin/ctx` printing
     // the RUNNING version — exactly what `npx goatedcontext setup` puts on PATH.
-    const npxRoot = mkdtempSync(join(tmpdir(), "ctx-npxcache-"));
+    const npxRoot = mkdtempSync(join(tmpdir(), "ctx-npxbin-"));
     const ephemeralBin = join(npxRoot, "_npx", "cafebabe", "node_modules", ".bin");
     mkdirSync(ephemeralBin, { recursive: true });
     writeEphemeralCtx(ephemeralBin, PKG_VERSION);
     try {
-      const env = isoEnv(s.prefix, s.home);
-      // Seed the OLD persistent global install (the reported starting state).
-      expect(npmInstallGlobal(old, env)).toBe(0);
+      expect(npmInstallGlobal(oldTgz.tarball, env)).toBe(0);
       expect(installedVersion(s.prefix)).toBe("0.2.3");
 
-      // Simulate npx: PREPEND the ephemeral cache bin ahead of everything else.
       const npxEnv = { ...env, PATH: [ephemeralBin, env.PATH].join(delimiter) };
-
-      // Trap sanity: the RAW npx PATH resolves the ephemeral shim first (0.2.3 bug
-      // source)... but the PERSISTENT PATH (what setup uses) resolves the real global.
+      // Trap sanity: raw PATH resolves the ephemeral shim; persistent PATH resolves the global.
       expect(whichSync("ctx", npxEnv.PATH)?.startsWith(ephemeralBin)).toBe(true);
       expect(whichSync("ctx", persistentPath(npxEnv.PATH))?.toLowerCase()).toContain(
         binDirFor(s.prefix).toLowerCase(),
@@ -365,21 +441,19 @@ test(
         env: npxEnv,
         version: PKG_VERSION,
         claudeHome: s.claudeHome,
-        packageRoot: pub,
+        installSpec: main.tarball,
       });
-
-      // Must UPGRADE the persistent CLI — never fall for the ephemeral "already current".
       expect(result.globalInstall).toBe("upgraded");
       expect(result.previousVersion).toBe("0.2.3");
       expect(result.installedVersion).toBe(PKG_VERSION);
       expect(result.verified).toBe(true);
       expect(result.ok).toBe(true);
-      // Independent proof: the persistent launcher ON DISK is now the running version.
       expect(installedVersion(s.prefix)).toBe(PKG_VERSION);
     } finally {
       s.cleanup();
-      rmSync(pub, { recursive: true, force: true });
-      rmSync(old, { recursive: true, force: true });
+      rmSync(main.dir, { recursive: true, force: true });
+      rmSync(oldTgz.dir, { recursive: true, force: true });
+      rmSync(oldPkg, { recursive: true, force: true });
       rmSync(npxRoot, { recursive: true, force: true });
     }
   },
@@ -387,14 +461,95 @@ test(
 );
 
 test(
-  "F. an existing user database survives the upgrade (data preserved + migrated)",
+  "E+G+I. broken linked install (junction into _npx) + npx PATH → repaired to a REAL package, data preserved",
   () => {
     if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
     const s = scratch();
-    const pub = publishedDir();
-    const old = fakeOld("0.2.3");
+    const env = isoEnv(s.prefix, s.home);
+    const main = packTarball(ROOT, env);
+    const npx = makeNpxCachePackage("0.2.3");
+    // The ephemeral npx bin (npx PATH mutation), at the running version.
+    const ephemeralBin = join(npx.root, "_npx", "cafebabe", "node_modules", ".bin");
+    mkdirSync(ephemeralBin, { recursive: true });
+    writeEphemeralCtx(ephemeralBin, PKG_VERSION);
+
+    // Exactly the user's state: <prefix>/node_modules/goatedcontext is a link into _npx.
+    const gpkg = globalPackageDirFor(s.prefix);
+    mkdirSync(dirname(gpkg), { recursive: true });
+    let linkable = true;
     try {
-      const env = isoEnv(s.prefix, s.home);
+      symlinkSync(npx.pkgDir, gpkg, isWin ? "junction" : "dir");
+    } catch {
+      linkable = false;
+    }
+    if (!linkable) {
+      console.warn("[setup-packed] skipped linked-repair: no symlink/junction privilege here.");
+      s.cleanup();
+      rmSync(main.dir, { recursive: true, force: true });
+      rmSync(npx.root, { recursive: true, force: true });
+      return;
+    }
+    try {
+      // Pre-existing user data must survive the repair (matrix item I).
+      const db = openDatabase(resolvePaths({ CTX_HOME: s.home }));
+      try {
+        new PreferenceService(db).remember({ rule: "Always respond in Italian.", scope: "global" });
+      } finally {
+        db.close();
+      }
+
+      // Smoking gun reproduced: the global package resolves INTO the _npx cache.
+      expect(realpathSync(gpkg).toLowerCase()).toContain("_npx");
+
+      // Simulate npx: prepend the ephemeral cache bin ahead of the real global bin.
+      const npxEnv = { ...env, PATH: [ephemeralBin, env.PATH].join(delimiter) };
+      expect(whichSync("ctx", npxEnv.PATH)?.startsWith(ephemeralBin)).toBe(true);
+
+      const result = runSetup({
+        env: npxEnv,
+        version: PKG_VERSION,
+        claudeHome: s.claudeHome,
+        installSpec: main.tarball,
+      });
+
+      expect(result.previousInstallLinked).toBe(true);
+      expect(result.globalInstall).toBe("repaired");
+      expect(result.verified).toBe(true);
+      expect(result.ok).toBe(true);
+      expect(installedVersion(s.prefix)).toBe(PKG_VERSION);
+
+      // The global package is now a REAL directory — no longer linked into _npx.
+      expect(lstatSync(gpkg).isSymbolicLink()).toBe(false);
+      expect(realpathSync(gpkg).toLowerCase()).not.toContain("_npx");
+
+      // User data preserved through the repair.
+      const db2 = openDatabase(resolvePaths({ CTX_HOME: s.home }));
+      try {
+        const prefs = new PreferenceService(db2).list();
+        expect(prefs).toHaveLength(1);
+        expect(prefs[0]!.rule).toBe("Always respond in Italian.");
+      } finally {
+        db2.close();
+      }
+    } finally {
+      s.cleanup();
+      rmSync(main.dir, { recursive: true, force: true });
+      rmSync(npx.root, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "F. an existing user database survives a normal upgrade (data preserved + migrated)",
+  () => {
+    if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
+    const s = scratch();
+    const env = isoEnv(s.prefix, s.home);
+    const main = packTarball(ROOT, env);
+    const oldPkg = fakeOld("0.2.3");
+    const oldTgz = packTarball(oldPkg, env);
+    try {
       // Pre-existing user data in CTX_HOME.
       const db = openDatabase(resolvePaths({ CTX_HOME: s.home }));
       try {
@@ -406,8 +561,13 @@ test(
         db.close();
       }
 
-      npmInstallGlobal(old, env);
-      const result = runSetup({ env, version: PKG_VERSION, claudeHome: s.claudeHome, packageRoot: pub });
+      npmInstallGlobal(oldTgz.tarball, env);
+      const result = runSetup({
+        env,
+        version: PKG_VERSION,
+        claudeHome: s.claudeHome,
+        installSpec: main.tarball,
+      });
       expect(result.ok).toBe(true);
       expect(result.globalInstall).toBe("upgraded");
 
@@ -423,8 +583,9 @@ test(
       }
     } finally {
       s.cleanup();
-      rmSync(pub, { recursive: true, force: true });
-      rmSync(old, { recursive: true, force: true });
+      rmSync(main.dir, { recursive: true, force: true });
+      rmSync(oldTgz.dir, { recursive: true, force: true });
+      rmSync(oldPkg, { recursive: true, force: true });
     }
   },
   TIMEOUT,
