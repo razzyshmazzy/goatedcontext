@@ -70,6 +70,27 @@ ctx why <id>
 
 `ctx test-hook --task "..."` dry-runs the proactive-retrieval hook for a task without launching Claude, so you can see exactly which preferences would be injected. Add `--json` for scripts.
 
+## Other agents (Codex, Cursor)
+
+goatedcontext isn't Claude-only. The same store reaches other coding agents through
+their native integration points:
+
+```powershell
+ctx agents           # show which agents are installed + their capabilities
+ctx install codex    # a UserPromptSubmit hook (runtime) + this repo's AGENTS.md
+ctx install cursor   # this repo's AGENTS.md (Cursor is static-only)
+ctx sync             # (re)write THIS repo's AGENTS.md for any AGENTS.md-aware agent
+```
+
+Claude and Codex get **runtime** retrieval (task-relevant + conditional) via a
+prompt hook. Your repo's standing rules — only the repo-scoped, approved/locked,
+always-on ones — are projected **statically** into a managed block in `AGENTS.md`,
+read by Codex, Cursor, and any AGENTS.md-aware agent. Cursor has no reliable
+prompt-time injection hook, so Cursor gets exactly that static set (nothing is
+faked or broadened). `AGENTS.md` never contains your global or task-specific
+preferences. Commit `AGENTS.md` to share repo context with your team. See
+[ARCHITECTURE.md](./ARCHITECTURE.md) for the full model.
+
 ## Secrets & environments
 
 Reusable environment-variable bundles.

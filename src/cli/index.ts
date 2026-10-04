@@ -7,9 +7,14 @@ import { CtxContext } from "../core/context.ts";
 import { CtxError, ValidationError } from "../utils/errors.ts";
 import { shortId } from "../utils/id.ts";
 import { installClaude, repairClaude, uninstallClaude } from "../adapters/claude/installer.ts";
+import { installCodex, uninstallCodex } from "../adapters/codex/installer.ts";
+import { syncProject, unsyncProject } from "../core/project/sync.ts";
+import { planDelivery } from "../core/agents/delivery.ts";
+import { capabilitiesFor, type AgentId } from "../core/agents/capabilities.ts";
+import { agentStatuses } from "../core/agents/registry.ts";
 import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
 import { detectPromptHook, formatHookContext } from "../adapters/claude/hook.ts";
-import { simulateHook } from "../adapters/claude/test-hook.ts";
+import { simulateAgent } from "../adapters/test-hook.ts";
 import { findConflicts } from "../core/preferences/conflicts.ts";
 import { exportData, importData } from "../core/transfer/transfer.ts";
 import { writeFileSync } from "node:fs";
@@ -215,8 +220,10 @@ export function buildProgram(deps: CliDeps): Command {
   // ---- setup --------------------------------------------------------------
   program
     .command("setup")
-    .description("One command to install everything: initialize ctx, install the Claude Code adapter, and make `ctx` persistent.")
+    .description("One command: initialize ctx, make it persistent, and auto-configure whichever supported agents (Claude/Codex/Cursor) are installed.")
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--cwd <dir>", "Working directory used to resolve the repo for Codex/Cursor projection", process.cwd())
     .option("--skip-global", "Don't install a persistent global `ctx` (advanced/manual installs)")
     .option("--json", "Output JSON")
     .action((opts) => {
@@ -224,6 +231,9 @@ export function buildProgram(deps: CliDeps): Command {
         env: deps.env ?? process.env,
         version: VERSION,
         claudeHome: opts.claudeHome,
+        codexHome: opts.codexHome,
+        cwd: opts.cwd,
+        autoDetectAgents: true,
         skipGlobalInstall: Boolean(opts.skipGlobal),
       });
       if (opts.json) printJson(result);
@@ -760,33 +770,52 @@ export function buildProgram(deps: CliDeps): Command {
       });
     });
 
-  // ---- hook (internal: called by Claude Code UserPromptSubmit) -------------
+  // ---- hook (internal: called by an agent's prompt hook) ------------------
+  // Shared by Claude Code and OpenAI Codex: both run a UserPromptSubmit-style hook,
+  // pass `{cwd, prompt}` JSON on stdin, and inject plain stdout into the model's
+  // context. The SAME core retrieval + `renderContextBlock` serve both — the only
+  // difference is the accepted event name and a couple of tolerant field aliases.
   program
     .command("hook")
-    .description("Internal: proactive-retrieval hook invoked by Claude Code. Reads hook JSON on stdin.")
-    .argument("<event>", "Hook event (claude-prompt)")
+    .description("Internal: proactive-retrieval hook invoked by an agent. Reads hook JSON on stdin.")
+    .argument("<event>", "Hook event (claude-prompt | codex-prompt)")
     .option("--debug", "Write diagnostics to <ctx home>/hook.log")
     .action(async (event, opts) => {
-      // Fail OPEN: this must never make Claude unusable. Any error → no output,
-      // exit 0, so Claude proceeds with the user's original prompt untouched.
+      // Fail OPEN: this must never make the agent unusable. Any error → no output,
+      // exit 0, so the agent proceeds with the user's original prompt untouched.
       const debug = opts.debug || (deps.env ?? process.env).CTX_HOOK_DEBUG;
       try {
-        if (event !== "claude-prompt") return;
+        if (event !== "claude-prompt" && event !== "codex-prompt") return;
         const raw = await readStdin();
         if (!raw.trim()) return;
-        const payload = JSON.parse(raw) as { cwd?: string; prompt?: string };
-        const prompt = (payload.prompt ?? "").toString();
+        // Tolerant parse: Codex/Claude both send `cwd`; the user prompt is `prompt`
+        // (with a couple of defensive aliases in case a Codex version differs).
+        const payload = JSON.parse(raw) as {
+          cwd?: string;
+          prompt?: string;
+          user_prompt?: string;
+          message?: string;
+        };
+        const prompt = (payload.prompt ?? payload.user_prompt ?? payload.message ?? "").toString();
         if (!prompt.trim()) return;
         const cwd = payload.cwd && payload.cwd.trim().length > 0 ? payload.cwd : process.cwd();
+        const agent = event === "codex-prompt" ? "codex" : "claude";
         withContext(deps, (ctx) => {
           const result = ctx.retrieval.retrieve({ cwd, task: prompt, track: false });
-          const block = formatHookContext(result);
+          // Capability-driven static/runtime dedup: whatever the delivery planner
+          // routes to STATIC for this agent (repo approved/locked always → AGENTS.md
+          // for AGENTS-aware agents like Codex) is excluded from the runtime block,
+          // so it reaches the agent exactly once. For Claude the static bucket is
+          // empty, so this is a no-op and behavior is unchanged.
+          const staticIds = new Set(planDelivery(capabilitiesFor(agent), result.preferences).static);
+          const runtimePrefs = result.preferences.filter((p) => !staticIds.has(p.id));
+          const block = formatHookContext({ ...result, preferences: runtimePrefs });
           // Emit the injected block BEFORE touching stats, so a stats write can
-          // never affect what Claude receives. Stats recording is itself fail-open.
+          // never affect what the agent receives. Stats recording is itself fail-open.
           if (block) process.stdout.write(block + "\n");
-          if (block) ctx.stats.recordHookInjection(result.preferences.length);
-          else ctx.stats.recordHookNoMatch();
-          if (debug) hookDebug(deps, `fired injected=${block ? "yes" : "no"} n=${result.preferences.length} cwd=${cwd}`);
+          if (block) ctx.stats.recordHookInjection(runtimePrefs.length, agent);
+          else ctx.stats.recordHookNoMatch(agent);
+          if (debug) hookDebug(deps, `[${event}] injected=${block ? "yes" : "no"} n=${runtimePrefs.length} static=${staticIds.size} cwd=${cwd}`);
         });
       } catch (err) {
         if (debug) hookDebug(deps, `error: ${(err as Error).message}`);
@@ -794,11 +823,12 @@ export function buildProgram(deps: CliDeps): Command {
       }
     });
 
-  // ---- test-hook (debug the prompt-retrieval hook without launching Claude) --
+  // ---- test-hook (debug delivery for any agent without launching it) ------
   program
     .command("test-hook")
-    .description("Dry-run the Claude prompt-retrieval hook for a task, without launching Claude.")
+    .description("Dry-run how an agent would receive context for a task (--agent claude|codex|cursor).")
     .requiredOption("--task <text>", "The task/prompt to simulate")
+    .option("--agent <id>", "Agent to simulate: claude | codex | cursor", "claude")
     .option(
       "--file <path>",
       "Simulate an active file (enables file/language conditions). Repeatable.",
@@ -810,8 +840,13 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((opts) => {
+      const agent = opts.agent as string;
+      if (agent !== "claude" && agent !== "codex" && agent !== "cursor") {
+        throw new CtxError(`Unknown --agent "${agent}". Supported: claude, codex, cursor.`);
+      }
       withContext(deps, (ctx) => {
-        const result = simulateHook(ctx, {
+        const result = simulateAgent(ctx, {
+          agent: agent as AgentId,
           cwd: opts.cwd,
           task: opts.task,
           files: opts.file,
@@ -821,10 +856,9 @@ export function buildProgram(deps: CliDeps): Command {
         if (opts.json) return printJson(result);
 
         const rc = result.runtimeContext;
-        // Map a conditional preference id → its evaluation reason, for annotation.
         const reasonById = new Map(result.conditionalEvaluations.map((e) => [e.id, e.reason]));
 
-        line(`Task: ${result.task.trim() ? result.task : "(empty)"}`);
+        line(`Agent: ${result.agent}    Task: ${result.task.trim() ? result.task : "(empty)"}`);
         line("");
         line("Runtime context");
         line(`  repo:      ${rc.repo ? `${rc.repo.name} (${rc.repo.identity})` : "(none / not a git repo)"}`);
@@ -832,27 +866,37 @@ export function buildProgram(deps: CliDeps): Command {
         line(`  languages: ${rc.languages.length ? rc.languages.join(", ") : "(none)"}`);
         line(`  domain:    ${rc.domain ?? "(none)"}`);
         line("");
+        line("Delivery plan (this repo's active preferences)");
+        const planLine = (label: string, entries: typeof result.plan.static) => {
+          line(`  ${label} (${entries.length}):`);
+          if (entries.length === 0) line("    (none)");
+          for (const e of entries) line(`    - [${e.scope}][${e.applicability}] ${e.rule}`);
+        };
+        planLine("static → AGENTS.md", result.plan.static);
+        planLine("runtime → hook", result.plan.runtime);
+        planLine("unsupported", result.plan.unsupported);
+        line("");
+
+        if (!result.runtimeSupported) {
+          line(`Runtime injection: UNSUPPORTED for ${result.agent} — static delivery (AGENTS.md) only.`);
+          line("No hook result is fabricated. The 'static' set above is what reaches this agent.");
+          return;
+        }
+
         line(`Would inject context: ${result.wouldInject ? "yes" : "no"}`);
         line("");
-        line(`Matched preferences (${result.preferences.length}):`);
+        line(`Runtime-injected preferences (${result.preferences.length}):`);
         if (result.preferences.length === 0) line("  (none)");
         for (const p of result.preferences) {
           const domain = p.domain ? `[${p.domain}]` : "";
           line(`  - [${p.scope}][${p.applicability}]${domain} ${p.rule}`);
-          if (p.applicability === "conditional") {
-            line(`      matched: ${reasonById.get(p.id) ?? "condition matched"}`);
-          } else if (p.applicability !== "always") {
-            line(`      relevance=${p.relevance.toFixed(2)}`);
-          }
+          if (p.applicability === "conditional") line(`      matched: ${reasonById.get(p.id) ?? "condition matched"}`);
         }
         const notMatched = result.conditionalEvaluations.filter((e) => !e.matched);
         if (notMatched.length > 0) {
           line("");
           line(`Not matched — conditionals whose condition was false (${notMatched.length}):`);
-          for (const e of notMatched) {
-            line(`  - [${e.scope}][conditional] ${e.rule}`);
-            line(`      failed: ${e.reason}`);
-          }
+          for (const e of notMatched) line(`  - [${e.scope}][conditional] ${e.rule}  (failed: ${e.reason})`);
         }
         if (result.overridden.length > 0) {
           line("");
@@ -863,12 +907,12 @@ export function buildProgram(deps: CliDeps): Command {
         }
         line("");
         if (result.block) {
-          line("Injected context block:");
+          line("Native runtime output:");
           line("----------------------------------------");
           line(result.block);
           line("----------------------------------------");
         } else {
-          line("Injected context block: (nothing would be injected)");
+          line("Native runtime output: (nothing would be injected)");
         }
       });
     });
@@ -1140,17 +1184,23 @@ export function buildProgram(deps: CliDeps): Command {
   // ---- install ------------------------------------------------------------
   program
     .command("install")
-    .description("Install an agent adapter. Supported targets: claude")
-    .argument("<target>", "Adapter target (claude)")
+    .description("Install an agent adapter. Supported targets: claude | codex | cursor")
+    .argument("<target>", "Adapter target (claude | codex | cursor)")
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
-    .option("--hook-command <cmd>", "Command Claude runs for the prompt hook", "ctx hook claude-prompt")
+    .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--cwd <dir>", "Working directory used to resolve the repo (codex/cursor projection)", process.cwd())
+    .option("--hook-command <cmd>", "Command the agent runs for the prompt hook")
     .option("--disable-hook", "Remove the proactive-retrieval hook (keeps skills & preferences)")
+    .option("--no-sync", "codex: skip projecting the current repo's AGENTS.md / .cursor rules")
     .option("--repair", "Rewrite any missing/corrupt ctx files and restore the hook")
     .option("--json", "Output JSON")
     .action((target, opts) => {
+      if (target === "codex") return installCodexTarget(deps, opts);
+      if (target === "cursor") return installCursorTarget(deps, opts);
       if (target !== "claude") {
-        throw new CtxError(`Unknown install target "${target}". Supported: claude`);
+        throw new CtxError(`Unknown install target "${target}". Supported: claude, codex, cursor`);
       }
+      const hookCommand = opts.hookCommand ?? "ctx hook claude-prompt";
       const hookLabelOf = (a: string) =>
         a === "error"
           ? "NOT configured (existing settings.json is not valid JSON — left untouched)"
@@ -1159,7 +1209,7 @@ export function buildProgram(deps: CliDeps): Command {
       if (opts.repair) {
         const result = repairClaude({
           claudeHome: opts.claudeHome,
-          hookCommand: opts.hookCommand,
+          hookCommand,
           disableHook: Boolean(opts.disableHook),
         });
         if (opts.json) return printJson(result);
@@ -1173,7 +1223,7 @@ export function buildProgram(deps: CliDeps): Command {
 
       const result = installClaude({
         claudeHome: opts.claudeHome,
-        hookCommand: opts.hookCommand,
+        hookCommand,
         disableHook: Boolean(opts.disableHook),
       });
       if (opts.json) return printJson(result);
@@ -1187,13 +1237,17 @@ export function buildProgram(deps: CliDeps): Command {
   // ---- uninstall ----------------------------------------------------------
   program
     .command("uninstall")
-    .description("Remove a ctx agent adapter (skills, instruction block, hook). Keeps your preferences & environments.")
-    .argument("<target>", "Adapter target (claude)")
+    .description("Remove a ctx agent adapter. Keeps your preferences & environments. Targets: claude | codex | cursor")
+    .argument("<target>", "Adapter target (claude | codex | cursor)")
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--cwd <dir>", "Working directory used to resolve the repo (cursor projection)", process.cwd())
     .option("--json", "Output JSON")
     .action((target, opts) => {
+      if (target === "codex") return uninstallCodexTarget(deps, opts);
+      if (target === "cursor") return uninstallCursorTarget(deps, opts);
       if (target !== "claude") {
-        throw new CtxError(`Unknown uninstall target "${target}". Supported: claude`);
+        throw new CtxError(`Unknown uninstall target "${target}". Supported: claude, codex, cursor`);
       }
       const result = uninstallClaude({ claudeHome: opts.claudeHome });
       if (opts.json) return printJson(result);
@@ -1205,7 +1259,128 @@ export function buildProgram(deps: CliDeps): Command {
       line(`  prompt hook:   ${result.settingsFile} (${result.hookAction})`);
     });
 
+  // ---- sync (static interoperability projection for the current repo) ------
+  program
+    .command("sync")
+    .description("Project this repo's standing preferences into AGENTS.md (read by Codex, Cursor, and other AGENTS.md-aware agents).")
+    .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
+    .option("--remove", "Remove the goatedcontext projection from this repo instead")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        if (opts.remove) {
+          const r = unsyncProject(ctx, opts.cwd);
+          if (opts.json) return printJson(r);
+          line(`Removed goatedcontext projection from ${r.repo.name}.`);
+          line(`  AGENTS.md:   ${r.agentsFile} (${r.agentsAction})`);
+          return;
+        }
+        const r = syncProject(ctx, opts.cwd);
+        if (opts.json) return printJson(r);
+        line(`Synced ${r.ruleCount} repo preference(s) for ${r.repo.name}.`);
+        line(`  AGENTS.md:   ${r.agentsFile} (${r.agentsAction})`);
+        line("");
+        line("AGENTS.md holds only this repo's approved/locked always-on rules. Codex and Cursor both read it. Commit it to share the context with your team.");
+      });
+    });
+
+  // ---- agents (show supported agents + capabilities) ----------------------
+  program
+    .command("agents")
+    .description("Show the supported coding agents, whether each is installed, and its capabilities.")
+    .option("--cwd <dir>", "Working directory (Cursor/AGENTS.md projection is repo-scoped)", process.cwd())
+    .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      const statuses = agentStatuses({
+        env: deps.env ?? process.env,
+        cwd: opts.cwd,
+        claudeHome: opts.claudeHome,
+        codexHome: opts.codexHome,
+      });
+      if (opts.json) return printJson(statuses);
+      for (const s of statuses) {
+        const parts: string[] = [];
+        parts.push(s.installed ? "installed" : s.detected ? "detected" : "not installed");
+        if (s.capabilities.runtimePromptInjection) parts.push(s.installed ? "runtime ✓" : "runtime available");
+        else parts.push("runtime unavailable");
+        if (s.capabilities.staticAgentsMd) parts.push(s.staticPresent ? "AGENTS.md ✓" : "AGENTS.md available");
+        line(`${s.label.padEnd(13)} ${parts.join("   ")}`);
+      }
+      line("");
+      line("Missing agents are normal. Configure one with: ctx install <claude|codex|cursor>");
+    });
+
   return program;
+}
+
+/**
+ * `ctx install codex` (also `--repair`): the RUNTIME channel (a `UserPromptSubmit`
+ * hook in `~/.codex/hooks.json`) plus the repo's static AGENTS.md via `ctx sync`
+ * (unless `--no-sync`). No global `~/.codex/AGENTS.md` — global rules are runtime.
+ */
+function installCodexTarget(deps: CliDeps, opts: Record<string, unknown>): void {
+  withContext(deps, (ctx) => {
+    const result = installCodex({
+      home: opts.codexHome as string | undefined,
+      env: deps.env ?? process.env,
+      hookCommand: opts.hookCommand as string | undefined,
+      disableHook: Boolean(opts.disableHook),
+    });
+    let synced: ReturnType<typeof syncProject> | null = null;
+    if (opts.sync !== false) {
+      try {
+        synced = syncProject(ctx, (opts.cwd as string) ?? process.cwd());
+      } catch {
+        /* not in a repo — the runtime hook still installed fine */
+      }
+    }
+    if (opts.json) return printJson({ codex: result, repoSync: synced });
+    line(opts.repair ? "Repaired Codex adapter." : "Installed Codex adapter.");
+    line(`  home:          ${result.home}`);
+    line(
+      result.hookAction === "error"
+        ? "  prompt hook:   NOT configured (existing hooks.json is not valid JSON — left untouched)"
+        : `  prompt hook:   ${result.hooksFile} (${result.hookAction})`,
+    );
+    if (synced) line(`  repo AGENTS:   ${synced.agentsFile} (${synced.agentsAction}, ${synced.ruleCount} rule(s))`);
+    line("");
+    line("Codex hooks are a new surface; if the prompt hook doesn't fire, verify hooks.json against your Codex version — repo AGENTS.md still applies statically.");
+  });
+}
+
+/** `ctx install cursor` (also `--repair`): Cursor is static-only — project the repo's AGENTS.md. */
+function installCursorTarget(deps: CliDeps, opts: Record<string, unknown>): void {
+  withContext(deps, (ctx) => {
+    const r = syncProject(ctx, (opts.cwd as string) ?? process.cwd());
+    if (opts.json) return printJson(r);
+    line(opts.repair ? `Repaired Cursor adapter for ${r.repo.name}.` : `Installed Cursor adapter for ${r.repo.name}.`);
+    line(`  AGENTS.md:     ${r.agentsFile} (${r.agentsAction}, ${r.ruleCount} repo rule(s))`);
+    line("");
+    line("Cursor has no reliable prompt-time injection hook, so goatedcontext serves Cursor via AGENTS.md only (always-on). Commit it to share with your team.");
+  });
+}
+
+function uninstallCodexTarget(deps: CliDeps, opts: Record<string, unknown>): void {
+  const result = uninstallCodex({
+    home: opts.codexHome as string | undefined,
+    env: deps.env ?? process.env,
+  });
+  if (opts.json) return printJson(result);
+  line("Removed the ctx Codex adapter. Your preferences and environments are untouched.");
+  line(`  prompt hook:   ${result.hooksFile} (${result.hookAction})`);
+  line("");
+  line("The repo's AGENTS.md is shared with Cursor/other agents — remove it with `ctx sync --remove` in the repo.");
+}
+
+function uninstallCursorTarget(deps: CliDeps, opts: Record<string, unknown>): void {
+  withContext(deps, (ctx) => {
+    const r = unsyncProject(ctx, (opts.cwd as string) ?? process.cwd());
+    if (opts.json) return printJson(r);
+    line(`Removed the ctx Cursor adapter for ${r.repo.name}.`);
+    line(`  AGENTS.md:     ${r.agentsFile} (${r.agentsAction})`);
+  });
 }
 
 /**

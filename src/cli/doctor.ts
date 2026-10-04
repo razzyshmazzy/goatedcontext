@@ -20,6 +20,7 @@ import {
   HOOK_COMMAND_DEFAULT,
 } from "../adapters/claude/hook.ts";
 import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
+import { agentStatuses } from "../core/agents/registry.ts";
 
 const LATEST_MIGRATION = migrations.reduce((m, x) => Math.max(m, x.version), 0);
 
@@ -402,6 +403,29 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
         ? undefined
         : "Run `npx goatedcontext setup`, or add the npm global bin directory to PATH.",
     });
+
+    // Codex + Cursor adapters, diagnosed INDEPENDENTLY (one broken adapter never
+    // suppresses the others). Absent agents are normal, so these never `fail` — a
+    // detected-but-unconfigured agent is a `warn` with an actionable fix.
+    const statuses = agentStatuses({ env, cwd: deps.cwd, claudeHome: deps.claudeHome });
+    for (const s of statuses) {
+      if (s.id === "claude") continue; // covered by the detailed checks above
+      let status: CheckStatus;
+      let detail: string;
+      let fix: string | undefined;
+      if (s.healthy) {
+        status = "ok";
+        detail = "configured";
+      } else if (s.detected) {
+        status = "warn";
+        detail = "installed but not configured for ctx";
+        fix = `Run \`ctx install ${s.id}\`.`;
+      } else {
+        status = "ok";
+        detail = "not installed (optional)";
+      }
+      add({ section: s.label, id: `${s.id}-adapter`, label: "ctx integration", status, detail, fix });
+    }
   }
 
   const ok = !checks.some((c) => c.status === "fail");

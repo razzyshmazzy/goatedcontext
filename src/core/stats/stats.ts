@@ -43,6 +43,10 @@ export interface Stats {
   proposalsCreated: number;
   /** ISO timestamp of the most recent successful injection, or null if none yet. */
   lastInjectionAt: string | null;
+  /** Per-agent hook runs (runtime-capable adapters only), e.g. { claude: 5, codex: 2 }. */
+  hookRunsByAgent: Record<string, number>;
+  /** Per-agent useful injections, same shape. */
+  contextInjectionsByAgent: Record<string, number>;
 }
 
 /** Stable, machine-readable snake_case shape used for the on-disk file and `--json`. */
@@ -53,6 +57,8 @@ export interface StatsJson {
   preferences_injected: number;
   proposals_created: number;
   last_injection_at: string | null;
+  hook_runs_by_agent: Record<string, number>;
+  context_injections_by_agent: Record<string, number>;
 }
 
 const STORE_VERSION = 1;
@@ -65,12 +71,28 @@ export function zeroStats(): Stats {
     preferencesInjected: 0,
     proposalsCreated: 0,
     lastInjectionAt: null,
+    hookRunsByAgent: {},
+    contextInjectionsByAgent: {},
   };
 }
 
 /** Coerce one field to a finite, non-negative integer; anything else → 0. */
 function counter(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
+}
+
+/** Coerce an arbitrary value into a {agentName: count} map, dropping anything invalid. */
+function counterMap(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof k === "string" && k.length > 0 && k.length <= 32) {
+        const n = counter(val);
+        if (n > 0) out[k] = n;
+      }
+    }
+  }
+  return out;
 }
 
 /**
@@ -88,6 +110,9 @@ function sanitize(raw: unknown): Stats {
     preferencesInjected: counter(o.preferences_injected),
     proposalsCreated: counter(o.proposals_created),
     lastInjectionAt: typeof last === "string" && last.length > 0 ? last : null,
+    // Backward-compatible: older stats files have no per-agent maps → {}.
+    hookRunsByAgent: counterMap(o.hook_runs_by_agent),
+    contextInjectionsByAgent: counterMap(o.context_injections_by_agent),
   };
 }
 
@@ -99,6 +124,8 @@ export function toJson(s: Stats): StatsJson {
     preferences_injected: s.preferencesInjected,
     proposals_created: s.proposalsCreated,
     last_injection_at: s.lastInjectionAt,
+    hook_runs_by_agent: s.hookRunsByAgent,
+    context_injections_by_agent: s.contextInjectionsByAgent,
   };
 }
 
@@ -161,21 +188,26 @@ export class StatsStore {
    * Record a hook run that injected at least one preference. Increments hook_runs
    * and context_injections, adds the injected count, and stamps last_injection_at.
    */
-  recordHookInjection(preferenceCount: number): boolean {
+  recordHookInjection(preferenceCount: number, agent?: string): boolean {
     const n = counter(preferenceCount);
     return this.update((s) => {
       s.hookRuns += 1;
       s.contextInjections += 1;
       s.preferencesInjected += n;
       s.lastInjectionAt = nowIso();
+      if (agent) {
+        s.hookRunsByAgent[agent] = (s.hookRunsByAgent[agent] ?? 0) + 1;
+        s.contextInjectionsByAgent[agent] = (s.contextInjectionsByAgent[agent] ?? 0) + 1;
+      }
     });
   }
 
   /** Record a hook run that matched nothing. Increments hook_runs and no_match. */
-  recordHookNoMatch(): boolean {
+  recordHookNoMatch(agent?: string): boolean {
     return this.update((s) => {
       s.hookRuns += 1;
       s.noMatch += 1;
+      if (agent) s.hookRunsByAgent[agent] = (s.hookRunsByAgent[agent] ?? 0) + 1;
     });
   }
 
@@ -196,6 +228,8 @@ export class StatsStore {
       s.preferencesInjected = z.preferencesInjected;
       s.proposalsCreated = z.proposalsCreated;
       s.lastInjectionAt = z.lastInjectionAt;
+      s.hookRunsByAgent = z.hookRunsByAgent;
+      s.contextInjectionsByAgent = z.contextInjectionsByAgent;
     });
   }
 }

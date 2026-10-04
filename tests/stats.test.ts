@@ -67,7 +67,9 @@ test("JSON shape is stable snake_case with a raw ISO timestamp", () => {
   expect(Object.keys(j).sort()).toEqual(
     [
       "context_injections",
+      "context_injections_by_agent",
       "hook_runs",
+      "hook_runs_by_agent",
       "last_injection_at",
       "no_match",
       "preferences_injected",
@@ -128,12 +130,19 @@ test("privacy: only aggregate counters and one timestamp are ever persisted", ()
     "preferences_injected",
     "proposals_created",
     "last_injection_at",
+    "hook_runs_by_agent",
+    "context_injections_by_agent",
   ]);
+  const agentMaps = new Set(["hook_runs_by_agent", "context_injections_by_agent"]);
   for (const key of Object.keys(raw)) expect(allowed.has(key)).toBe(true);
-  // Every value is a number, or the single ISO timestamp string, or null.
+  // Every value is a number, the single ISO timestamp (or null), or — for the
+  // per-agent maps — an object whose keys are agent names and values are numbers.
   for (const [key, val] of Object.entries(raw)) {
     if (key === "last_injection_at") {
       expect(val === null || typeof val === "string").toBe(true);
+    } else if (agentMaps.has(key)) {
+      expect(typeof val).toBe("object");
+      for (const v of Object.values(val as Record<string, unknown>)) expect(typeof v).toBe("number");
     } else {
       expect(typeof val).toBe("number");
     }

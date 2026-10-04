@@ -459,5 +459,104 @@ during a live Claude hook (the hook exposes no active file). A future adapter th
 *can* report the active file, language, or workspace will populate the same
 `RuntimeContext` fields and get identical, deterministic evaluation for free.
 
-Explicitly **out of scope for 0.2.8**: building those other adapters, and any
-`AGENTS.md` generation/syncing. The seam is in place; the adapters are not.
+Explicitly out of scope for 0.2.8 (and delivered in 0.2.9 below): building those
+other adapters and any `AGENTS.md` generation/syncing.
+
+## Multi-agent adapters (0.2.9)
+
+0.2.9 turns the seam above into working adapters for **Claude Code**, **OpenAI
+Codex**, and **Cursor** — one shared core, thin agent-specific adapters. No adapter
+has its own preference store, re-implements retrieval, or independently decides
+precedence. The canonical result flows one way:
+
+```
+ctx store → normalized RuntimeContext → applicability (always/conditional/relevant)
+          → retrieval + conflicts + precedence → canonical result
+          → adapter { Claude | Codex | Cursor }
+```
+
+### Capabilities + the delivery planner (one policy, by ID)
+
+Routing is NOT scattered through `if (agent === …)` checks. Each agent is described
+by an explicit **capability set** (`src/core/agents/capabilities.ts`:
+`runtimePromptInjection`, `staticAgentsMd`, `cwdAvailable`, `promptAvailable`,
+`fileContextAvailable`, …), and one **pure planner** (`src/core/agents/delivery.ts`,
+`planDelivery(capabilities, preferences)`) partitions preference **IDs** into
+`static` / `runtime` / `unsupported` by a single policy:
+
+```
+repo + (approved|locked) + always   → static   (if the agent reads AGENTS.md)
+                                      → runtime  (else, if it injects at runtime)
+                                      → unsupported (else)
+global always | any relevant | any conditional
+                                      → runtime  (if it injects at runtime)
+                                      → unsupported (else)   ← NEVER broadened to static
+proposed | observed | rejected        → excluded from every bucket
+```
+
+An ID lands in exactly one bucket, so a preference is never delivered both ways to
+one agent. The static materializer, the runtime-hook dedup, `ctx agents`, and
+`ctx test-hook` all consume this one function, so policy can't drift between them.
+
+Two delivery layers, each agent using what it natively supports:
+
+- **A. Static interoperability layer** — `src/core/project/`. `AGENTS.md` is a
+  static REPO projection, so it materializes **ONLY** the `static` bucket:
+  `scope = repo`, `status ∈ {approved, locked}`, `applicability = always`. It
+  deliberately does **not** contain global preferences (a personal always-rule must
+  not land in a shared repo), `relevant` rules (writing them to a file must not make
+  them unconditional), `conditional` rules (runtime-only), or
+  proposed/rejected/evidence/secrets. It is a single marker-delimited managed block
+  in the repo-root `AGENTS.md`, written by `ctx sync` (candidates are scoped to the
+  repo first, so one repo's file can never contain another's rules).
+- **B. Runtime injection layer** — the adapter hooks. The agent-neutral
+  `renderContextBlock` (`src/core/render/context-block.ts`) is the single source of
+  the `<ctx-developer-context>` block; Claude's and Codex's `UserPromptSubmit` hooks
+  (`ctx hook claude-prompt` / `ctx hook codex-prompt`) both emit it byte-for-byte,
+  giving task-relevant + conditional retrieval per prompt. The hook asks the planner
+  for this agent's `static` IDs and **excludes them from the injected block**, so a
+  rule Codex already gets from AGENTS.md is never injected twice.
+
+### Compatibility matrix (verified against current docs)
+
+| Agent | Static (A) | Runtime injection (B) |
+| --- | --- | --- |
+| **Claude Code** | — (delivered at runtime; its `CLAUDE.md` block is meta-instructions, not a preference projection) | ✅ `UserPromptSubmit` → `ctx hook claude-prompt` |
+| **OpenAI Codex** | ✅ repo `AGENTS.md` (via `ctx sync`) — read into the first turn; `AGENTS.override.md` wins; 32 KiB `project_doc_max_bytes` | ✅ `UserPromptSubmit` via `~/.codex/hooks.json`; plain-stdout block |
+| **Cursor** | ✅ repo `AGENTS.md` only | ❌ none reliable — `beforeSubmitPrompt` is block-only; `sessionStart.additional_context` is bugged |
+
+**One canonical static path.** AGENTS.md alone gives Cursor the always-on baseline
+(Cursor reads repo-root `AGENTS.md`), so 0.2.9 does **not** also write
+`.cursor/rules/*.mdc` — that file would only add glob/`description`-scoped or
+agent-requested targeting, which our always-on projection never uses, and
+duplicating the same rules across two files is pure drift risk. A single AGENTS.md
+block is the canonical static delivery for every AGENTS.md-aware agent.
+
+**Codex is NOT double-served.** Codex reads AGENTS.md *and* runs a hook, so repo
+approved/locked always rules go to AGENTS.md and are excluded from the Codex hook's
+runtime block (planner `static` set); global always, relevant, and matching
+conditional rules reach Codex at runtime. There is no global `~/.codex/AGENTS.md` —
+global preferences are runtime, never materialized into a static file.
+
+**Cursor parity is honest.** Cursor's hooks cannot inject model context today
+(`beforeSubmitPrompt` returns only `{continue, user_message}`; `sessionStart`'s
+`additional_context` is a staff-confirmed bug). goatedcontext serves Cursor through
+the **static layer only**; `ctx agents` reports `runtime unavailable` and
+`ctx test-hook --agent cursor` shows the static plan with no fabricated hook result.
+Cursor therefore receives exactly the repo approved/locked always rules — global,
+relevant, and conditional preferences remain **absent** rather than broadened into
+always-on rules. If Cursor ships reliable `sessionStart` injection, a runtime Cursor
+adapter can be added by flipping one capability, without touching core.
+
+**Codex hooks caveat.** Codex lifecycle hooks are a new, fast-moving surface; the
+docs describe the stdin/stdout contract but pin the `hooks.json` shape loosely
+("mirrors Claude Code"). We use the Claude-shaped structure, keep the write additive
++ idempotent + reversible, and `ctx install codex` prints a note to verify against
+the installed Codex version — while the static `AGENTS.md` channel applies regardless.
+
+The condition evaluator, retrieval, conflicts, precedence, the context renderer, and
+the delivery planner all remain in **core** with no agent-specific assumptions;
+adapters translate native input → `RuntimeContext` and canonical plan → native
+delivery, nothing more. `ctx agents` lists each adapter's capabilities and health;
+`ctx doctor` diagnoses each independently; stats carry backward-compatible per-agent
+counters (`hook_runs_by_agent`, `context_injections_by_agent`).

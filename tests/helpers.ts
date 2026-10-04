@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openMemoryDatabase } from "../src/storage/sqlite/db.ts";
@@ -33,4 +34,21 @@ export function makeTestContext(): TestEnv {
       rmSync(dir, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * Create a throwaway git repository with a deterministic `origin` remote (so it has
+ * a stable `remote:…` identity), returning its root path and a cleanup fn. Used by
+ * projection/sync tests that need a real repo to resolve and to write AGENTS.md /
+ * .cursor rules into.
+ */
+export function makeGitRepo(remote = "https://github.com/acme/widgets.git"): {
+  root: string;
+  cleanup: () => void;
+} {
+  const root = mkdtempSync(join(tmpdir(), "ctx-repo-"));
+  const run = (args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+  run(["init", "-q"]);
+  run(["remote", "add", "origin", remote]);
+  return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }

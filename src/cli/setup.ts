@@ -2,6 +2,10 @@ import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { CtxContext } from "../core/context.ts";
 import { installClaude, type ClaudeInstallResult } from "../adapters/claude/installer.ts";
+import { installCodex } from "../adapters/codex/installer.ts";
+import { syncProject } from "../core/project/sync.ts";
+import { agentStatuses } from "../core/agents/registry.ts";
+import type { AgentId } from "../core/agents/capabilities.ts";
 import {
   captureChild,
   persistentPath,
@@ -84,6 +88,10 @@ export interface SetupResult {
   /** Version the persistent launcher reports AFTER install (null if unresolved). */
   installedVersion: string | null;
   warnings: string[];
+  /** Agents detected and configured/repaired this run (0.2.9 auto-detection). */
+  agentsConfigured: AgentId[];
+  /** Per-configured-agent one-line outcome, for concise rendering. */
+  agentLines: string[];
 }
 
 export interface SetupOptions {
@@ -91,6 +99,16 @@ export interface SetupOptions {
   /** The running CLI version (used to decide whether a global upgrade is needed). */
   version: string;
   claudeHome?: string;
+  /** Override the Codex config dir ($CODEX_HOME or ~/.codex). */
+  codexHome?: string;
+  /** Working directory used to resolve the repo for Codex/Cursor static projection. */
+  cwd?: string;
+  /**
+   * Detect which supported agents (Claude/Codex/Cursor) are present and
+   * configure/repair each. Off by default so unit tests exercise the global-install
+   * + Claude path in isolation; the production `ctx setup` CLI turns it on.
+   */
+  autoDetectAgents?: boolean;
   /** Skip making `ctx` globally persistent (advanced/manual installs). */
   skipGlobalInstall?: boolean;
 
@@ -349,9 +367,76 @@ export function runSetup(opts: SetupOptions): SetupResult {
   const hookCommand =
     ctxResolvesOnPath || !ctxPath ? "ctx hook claude-prompt" : `${quoteCmd(ctxPath)} hook claude-prompt`;
 
-  // 5. Install/refresh the Claude adapter (idempotent — skills, instruction block, hook).
+  // 5. Configure the detected agent integrations (idempotent). Without
+  //    auto-detection (unit tests / explicit flows) Claude is always configured, as
+  //    before. With auto-detection (production `ctx setup`) we touch ONLY agents
+  //    actually present — an absent agent is never configured and never an error.
+  const cwd = opts.cwd ?? process.cwd();
+  const auto = Boolean(opts.autoDetectAgents);
+  const detectedAgents = new Set<AgentId>(
+    auto
+      ? agentStatuses({ env, cwd, claudeHome: opts.claudeHome, codexHome: opts.codexHome })
+          .filter((s) => s.detected)
+          .map((s) => s.id)
+      : [],
+  );
+  const agentsConfigured: AgentId[] = [];
+  const agentLines: string[] = [];
+
   const installAdapter = opts.installAdapter ?? installClaude;
-  const install = installAdapter({ claudeHome: opts.claudeHome, hookCommand });
+  const configureClaude = !auto || detectedAgents.has("claude");
+  let install: ClaudeInstallResult | null = null;
+  if (configureClaude) {
+    install = installAdapter({ claudeHome: opts.claudeHome, hookCommand });
+    agentsConfigured.push("claude");
+    agentLines.push(
+      install.hookAction === "error"
+        ? "✗ Claude settings.json is not valid JSON — hook left untouched"
+        : "✓ Claude integration",
+    );
+  }
+
+  // Codex + Cursor: only in auto-detect mode, only when present. Both share the
+  // repo's static AGENTS.md (written once via a short-lived ctx).
+  const syncRepoSafe = (): boolean => {
+    try {
+      const c = CtxContext.open(env);
+      try {
+        syncProject(c, cwd);
+        return true;
+      } finally {
+        c.close();
+      }
+    } catch {
+      return false; // not in a repo (or transient) — never fatal
+    }
+  };
+
+  if (auto && detectedAgents.has("codex")) {
+    const codexHookCommand =
+      ctxResolvesOnPath || !ctxPath ? "ctx hook codex-prompt" : `${quoteCmd(ctxPath)} hook codex-prompt`;
+    try {
+      const r = installCodex({ home: opts.codexHome, env, hookCommand: codexHookCommand });
+      agentsConfigured.push("codex");
+      agentLines.push(
+        r.hookAction === "error"
+          ? "✗ Codex hooks.json is not valid JSON — hook left untouched"
+          : "✓ Codex integration",
+      );
+      syncRepoSafe();
+    } catch {
+      warnings.push("Could not configure the Codex adapter (left untouched).");
+    }
+  }
+  if (auto && detectedAgents.has("cursor")) {
+    const synced = syncRepoSafe();
+    agentsConfigured.push("cursor");
+    agentLines.push(
+      synced
+        ? "✓ Cursor integration"
+        : "· Cursor detected — run `ctx sync` inside a repo to project its AGENTS.md",
+    );
+  }
 
   // 6. Will a brand-new shell find `ctx`? (Only a hint; not a failure on its own
   //    when we verified the launcher by absolute path — e.g. a first install
@@ -365,16 +450,17 @@ export function runSetup(opts: SetupOptions): SetupResult {
     );
   }
 
-  const ok = install.hookAction !== "error" && globalInstall !== "failed" && verified;
+  const claudeHookError = install?.hookAction === "error";
+  const ok = !claudeHookError && globalInstall !== "failed" && verified;
 
   return {
     ok,
     home,
     secretBackend: secret.backend,
     secretSecure: secret.secure,
-    skills: install.installedSkills,
-    instructionsAction: install.instructionsAction,
-    hookAction: install.hookAction,
+    skills: install?.installedSkills ?? [],
+    instructionsAction: install?.instructionsAction ?? "unchanged",
+    hookAction: install?.hookAction ?? "absent",
     hookCommand,
     globalInstall,
     globalBinDir: globalBinDir ?? null,
@@ -388,6 +474,8 @@ export function runSetup(opts: SetupOptions): SetupResult {
     previousVersion,
     installedVersion,
     warnings,
+    agentsConfigured,
+    agentLines,
   };
 }
 
@@ -422,17 +510,28 @@ export function renderSetup(result: SetupResult): string[] {
   const out: string[] = [];
   out.push("goatedcontext");
 
+  const claudeConfigured = result.agentsConfigured.includes("claude");
+  // Lines for configured agents OTHER than Claude (Claude keeps its historical wording).
+  const extraAgentLines = result.agentsConfigured
+    .map((id, i) => ({ id, line: result.agentLines[i] }))
+    .filter((x) => x.id !== "claude" && x.line)
+    .map((x) => x.line as string);
+
   if (result.ok && result.warnings.length === 0) {
     const firstInstall = result.globalInstall === "installed";
     out.push(globalLine(result));
     out.push(firstInstall ? "✓ initialized local context" : "✓ preserved local context");
-    out.push(
-      result.globalInstall === "installed"
-        ? "✓ installed Claude integration"
-        : "✓ refreshed Claude integration",
-    );
+    if (claudeConfigured) {
+      out.push(
+        result.globalInstall === "installed"
+          ? "✓ installed Claude integration"
+          : "✓ refreshed Claude integration",
+      );
+    }
+    for (const l of extraAgentLines) out.push(l);
     out.push("");
-    out.push("Restart Claude Code.");
+    // Only tell the user to restart Claude when Claude was actually configured.
+    if (claudeConfigured) out.push("Restart Claude Code.");
     if (result.globalInstall === "upgraded" || result.globalInstall === "repaired")
       out.push("goat upgraded.");
     else if (result.globalInstall === "present") out.push("goat already current.");

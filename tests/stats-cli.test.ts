@@ -56,7 +56,7 @@ function hook(home: string, prompt: string): Promise<RunResult> {
   return run(["hook", "claude-prompt"], home, JSON.stringify({ cwd: home, prompt }));
 }
 
-async function readStats(home: string): Promise<Record<string, number | string | null>> {
+async function readStats(home: string): Promise<Record<string, number | string | null | Record<string, number>>> {
   const r = await run(["stats", "--json"], home);
   expect(r.code).toBe(0);
   return JSON.parse(r.stdout);
@@ -84,6 +84,8 @@ test(
       preferences_injected: 0,
       proposals_created: 0,
       last_injection_at: null,
+      hook_runs_by_agent: {},
+      context_injections_by_agent: {},
     });
     // Human output shows the never state.
     const human = await run(["stats"], home);
