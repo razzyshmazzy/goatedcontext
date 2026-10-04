@@ -1338,6 +1338,9 @@ export function buildProgram(deps: CliDeps): Command {
         if (s.capabilities.runtimePromptInjection) parts.push(s.installed ? "runtime ✓" : "runtime available");
         else parts.push("runtime unavailable");
         if (s.capabilities.staticAgentsMd) parts.push(s.staticPresent ? "AGENTS.md ✓" : "AGENTS.md available");
+        // Sandbox writable root (Codex only): shown when the agent is configured.
+        if (s.writableRootConfigured !== null && s.installed)
+          parts.push(s.writableRootConfigured ? "writable root ✓" : "writable root (missing)");
         // Memory-WRITE skill health.
         parts.push(
           s.memorySkill.health === "current"
@@ -1386,7 +1389,18 @@ function installCodexTarget(deps: CliDeps, opts: Record<string, unknown>): void 
     );
     if (synced) line(`  repo AGENTS:   ${synced.agentsFile} (${synced.agentsAction}, ${synced.ruleCount} rule(s))`);
     line(`  memory skill:  ${result.skillFile} (${result.skillAction})`);
+    line(
+      result.writableRootAction === "error"
+        ? "  writable root: NOT configured (config.toml could not be safely merged — left untouched; add it by hand)"
+        : `  writable root: ${result.ctxHome} (${result.writableRootAction})`,
+    );
     line("");
+    if (result.writableRootAction === "error") {
+      line(`Add this to ${result.configFile} so sandboxed memory writes can reach ctx:`);
+      line("  [sandbox_workspace_write]");
+      line(`  writable_roots = ["${result.ctxHome.replace(/\\/g, "/")}"]`);
+      line("");
+    }
     line("Codex hooks are a new surface; if the prompt hook doesn't fire, verify hooks.json against your Codex version — repo AGENTS.md still applies statically.");
   });
 }

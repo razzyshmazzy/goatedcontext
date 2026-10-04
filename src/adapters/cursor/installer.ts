@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withFileLock } from "../../utils/fs.ts";
-import { CTX_MEMORY_SKILL_NAME, renderMemorySkill } from "../../core/assets/memory-protocol.ts";
+import { CTX_MEMORY_SKILL_NAME, ctxCommand, renderMemorySkill } from "../../core/assets/memory-protocol.ts";
 import {
   upsertSkill,
   removeSkill,
@@ -34,6 +34,8 @@ import {
 export interface CursorInstallOptions {
   /** Root of the Cursor config dir. Defaults to `~/.cursor` (override for tests). */
   home?: string;
+  /** Override the host platform (for deterministic tests). */
+  platform?: NodeJS.Platform;
 }
 
 export interface CursorSkillResult {
@@ -54,10 +56,12 @@ export function cursorHome(opts: CursorInstallOptions = {}): string {
 
 export function installCursorSkill(opts: CursorInstallOptions = {}): CursorSkillResult {
   const home = cursorHome(opts);
+  const platform = opts.platform ?? process.platform;
   mkdirSync(home, { recursive: true });
   const lockFile = join(home, ".ctx-install.lock");
   return withFileLock(lockFile, () => {
-    const skillAction = upsertSkill(home, CTX_MEMORY_SKILL_NAME, renderMemorySkill());
+    const content = renderMemorySkill({ command: ctxCommand(platform) });
+    const skillAction = upsertSkill(home, CTX_MEMORY_SKILL_NAME, content);
     return { home, skillFile: skillFile(home, CTX_MEMORY_SKILL_NAME), skillAction };
   });
 }
@@ -76,7 +80,8 @@ export function uninstallCursorSkill(opts: CursorInstallOptions = {}): CursorUni
   });
 }
 
-/** Health of the installed Cursor memory skill versus the current protocol. */
+/** Health of the installed Cursor memory skill versus the current protocol (platform-aware). */
 export function cursorSkillHealth(opts: CursorInstallOptions = {}): SkillHealth {
-  return skillHealth(cursorHome(opts), CTX_MEMORY_SKILL_NAME, renderMemorySkill());
+  const platform = opts.platform ?? process.platform;
+  return skillHealth(cursorHome(opts), CTX_MEMORY_SKILL_NAME, renderMemorySkill({ command: ctxCommand(platform) }));
 }

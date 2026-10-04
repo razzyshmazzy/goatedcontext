@@ -140,13 +140,68 @@ ${MEMORY_PROTOCOL_MARKER}`;
 export const MEMORY_PROTOCOL_DESCRIPTION =
   "Persist, update, and retract the developer's durable coding preferences in goatedcontext (ctx). Use whenever the developer states, changes, or revokes a lasting preference or project convention (e.g. \"always use Bun in this repo\", \"from now on use tabs\", \"forget that I prefer Postgres\") so it follows them across repos and reaches every agent — without them running ctx by hand.";
 
+/** The POSIX ctx launcher name. */
+export const CTX_COMMAND_POSIX = "ctx";
+/**
+ * The Windows ctx launcher name. On Windows, bare `ctx` resolves to npm's generated
+ * PowerShell shim (`ctx.ps1`), which PowerShell refuses to run under the default
+ * execution policy. The `.cmd` shim always runs (PowerShell, cmd, and Git Bash), so
+ * agents on Windows must invoke `ctx.cmd` — without the user weakening their policy.
+ */
+export const CTX_COMMAND_WINDOWS = "ctx.cmd";
+
+/**
+ * The ctx launcher name an agent should invoke on a given platform. Only the command
+ * SPELLING differs by platform — the semantic memory policy is identical everywhere.
+ */
+export function ctxCommand(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? CTX_COMMAND_WINDOWS : CTX_COMMAND_POSIX;
+}
+
+/**
+ * A small, platform-specific invocation note inserted just above the policy body
+ * when the command is not the default `ctx` (i.e. on Windows). The canonical policy
+ * below still reads `ctx …`; this note tells the agent how to actually invoke it on
+ * this host. Returns "" for the default `ctx`, so POSIX renders are byte-identical to
+ * the platform-blind canonical body (keeping cross-agent parity exact).
+ */
+function platformInvocationSection(command: string): string {
+  if (command === CTX_COMMAND_POSIX) return "";
+  return `## Invocation on this platform (Windows)
+
+This machine is Windows. Invoke ctx as \`${command}\` for **every** command below —
+plain \`ctx\` resolves to the npm-generated \`ctx.ps1\` shim, which PowerShell blocks
+under its default execution policy. Use \`${command} remember …\`, \`${command} propose …\`,
+\`${command} prefs …\`, \`${command} why …\`, and \`${command} forget …\`. Do not ask the
+developer to change their PowerShell execution policy. (On macOS/Linux the command is
+plain \`ctx\`.)
+
+`;
+}
+
+/** The canonical body with the platform invocation note applied for `command`. */
+export function renderProtocolBody(command: string = CTX_COMMAND_POSIX): string {
+  const section = platformInvocationSection(command);
+  if (!section) return MEMORY_PROTOCOL_BODY;
+  // Insert the note just before section 1, so it's the first thing read after the
+  // intro. The canonical policy text itself is never rewritten.
+  const marker = "## 1. Durable preference";
+  const idx = MEMORY_PROTOCOL_BODY.indexOf(marker);
+  if (idx === -1) return section + MEMORY_PROTOCOL_BODY; // defensive: never seen
+  return MEMORY_PROTOCOL_BODY.slice(0, idx) + section + MEMORY_PROTOCOL_BODY.slice(idx);
+}
+
 /**
  * Render a SKILL.md-style artifact (YAML frontmatter + the canonical body). Used by
  * the Claude and Codex adapters (same format); Cursor supplies its own wrapper.
+ *
+ * `command` selects the ctx launcher spelling the guidance should use (default
+ * `ctx`; pass `ctx.cmd` on Windows). The semantic policy is identical regardless.
  */
-export function renderSkillMd(opts: { name: string; description?: string }): string {
+export function renderSkillMd(opts: { name: string; description?: string; command?: string }): string {
   const description = (opts.description ?? MEMORY_PROTOCOL_DESCRIPTION).trim();
-  return `---\nname: ${opts.name}\ndescription: >-\n  ${description}\n---\n\n${MEMORY_PROTOCOL_BODY}\n`;
+  const body = renderProtocolBody(opts.command ?? CTX_COMMAND_POSIX);
+  return `---\nname: ${opts.name}\ndescription: >-\n  ${description}\n---\n\n${body}\n`;
 }
 
 /** Extract the canonical body from a rendered artifact (strips any leading frontmatter). */
@@ -164,7 +219,10 @@ export function extractProtocolBody(rendered: string): string {
  */
 export const CTX_MEMORY_SKILL_NAME = "goatedcontext";
 
-/** The rendered SKILL.md shared by the Codex and Cursor memory-skill installers. */
-export function renderMemorySkill(): string {
-  return renderSkillMd({ name: CTX_MEMORY_SKILL_NAME });
+/**
+ * The rendered SKILL.md shared by the Codex and Cursor memory-skill installers.
+ * `command` selects the ctx launcher spelling (default `ctx`; `ctx.cmd` on Windows).
+ */
+export function renderMemorySkill(opts: { command?: string } = {}): string {
+  return renderSkillMd({ name: CTX_MEMORY_SKILL_NAME, command: opts.command });
 }

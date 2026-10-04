@@ -11,6 +11,8 @@ import { detectPromptHook } from "../../adapters/claude/hook.ts";
 import { CTX_INSTRUCTION_BEGIN, CLAUDE_SKILLS } from "../../adapters/claude/skills.ts";
 import { codexHome, codexHooksFile, detectCodexHook } from "../../adapters/codex/hook.ts";
 import { codexSkillHealth } from "../../adapters/codex/installer.ts";
+import { codexConfigFile, codexWritableRootConfigured } from "../../adapters/codex/config.ts";
+import { resolvePaths } from "../../storage/paths.ts";
 import { cursorSkillHealth } from "../../adapters/cursor/installer.ts";
 import { AGENTS_BEGIN, AGENTS_END } from "../project/projection.ts";
 import { skillHealth, type SkillHealth } from "../assets/skill-install.ts";
@@ -56,6 +58,12 @@ export interface AgentStatus {
   configPath: string;
   /** The ctx memory-WRITE skill/guidance for this agent (teaches remember/propose/forget). */
   memorySkill: { installed: boolean; health: SkillHealth };
+  /**
+   * For sandboxed agents (Codex): whether the effective ctx home is configured as a
+   * sandbox writable root, so a sandboxed memory write can reach the ctx database.
+   * `null` for agents where this does not apply.
+   */
+  writableRootConfigured: boolean | null;
   /** Agent version when cheaply available; otherwise null (we never spawn to find out). */
   version: string | null;
   /** Short, human-readable notes (missing pieces, honest limitations). */
@@ -127,6 +135,7 @@ function claudeStatus(opts: AgentStatusOptions): AgentStatus {
     staticPresent: false, // Claude is delivered at runtime; we don't project AGENTS.md for it
     configPath: home,
     memorySkill,
+    writableRootConfigured: null, // Claude is not sandboxed by a writable-roots allowlist
     version: null,
     notes,
   };
@@ -152,12 +161,22 @@ function codexStatus(opts: AgentStatusOptions): AgentStatus {
   })();
   const memHealth = codexSkillHealth(home);
   const memorySkill = { installed: memHealth !== "missing", health: memHealth };
+  const ctxHome = resolvePaths(env).home;
+  const writableRootConfigured = (() => {
+    try {
+      return codexWritableRootConfigured(codexConfigFile(home), ctxHome);
+    } catch {
+      return false;
+    }
+  })();
   const anyInstalled = installed || memorySkill.installed;
   const notes: string[] = [];
   if (!anyInstalled && (existsSync(home) || onPath)) notes.push("not configured (run: ctx install codex)");
   if (anyInstalled && !installed) notes.push("prompt hook missing (repair: ctx repair codex)");
   if (anyInstalled && memHealth === "stale") notes.push("memory skill stale (repair: ctx repair codex)");
   if (anyInstalled && memHealth === "missing") notes.push("memory skill missing (repair: ctx repair codex)");
+  if (anyInstalled && !writableRootConfigured)
+    notes.push("ctx writable root missing (repair: ctx repair codex)");
   return {
     id: "codex",
     label: LABELS.codex,
@@ -168,6 +187,7 @@ function codexStatus(opts: AgentStatusOptions): AgentStatus {
     staticPresent: repoAgentsBlockPresent(opts.cwd ?? process.cwd()),
     configPath: home,
     memorySkill,
+    writableRootConfigured,
     version: null,
     notes,
   };
@@ -206,6 +226,7 @@ function cursorStatus(opts: AgentStatusOptions): AgentStatus {
     staticPresent,
     configPath: repoRoot ? join(repoRoot, "AGENTS.md") : globalDir,
     memorySkill,
+    writableRootConfigured: null, // Cursor is not sandboxed by a writable-roots allowlist
     version: null,
     notes,
   };

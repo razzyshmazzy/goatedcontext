@@ -10,12 +10,15 @@ import {
   cursorSkillHealth,
 } from "../src/adapters/cursor/installer.ts";
 import { installClaude } from "../src/adapters/claude/installer.ts";
-import { renderMemorySkill } from "../src/core/assets/memory-protocol.ts";
+import { renderMemorySkill, ctxCommand } from "../src/core/assets/memory-protocol.ts";
 
 function dir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 const skillPath = (home: string) => join(home, "skills", "goatedcontext", "SKILL.md");
+// Installers render the skill for the HOST platform (ctx on POSIX, ctx.cmd on Windows);
+// compare against the same platform-aware render.
+const hostSkill = () => renderMemorySkill({ command: ctxCommand() });
 
 // ---- Codex memory skill ------------------------------------------------------
 
@@ -25,7 +28,7 @@ test("Codex: install writes a valid SKILL.md; repair is idempotent; uninstall re
     const r = installCodex({ home });
     expect(r.skillAction).toBe("created");
     expect(existsSync(skillPath(home))).toBe(true);
-    expect(readFileSync(skillPath(home), "utf8")).toBe(renderMemorySkill());
+    expect(readFileSync(skillPath(home), "utf8")).toBe(hostSkill());
     expect(codexSkillHealth(home)).toBe("current");
 
     // Repair converges with no churn.
@@ -85,7 +88,7 @@ test("Cursor: install writes ~/.cursor/skills/goatedcontext/SKILL.md; repair ide
   try {
     const r = installCursorSkill({ home });
     expect(r.skillAction).toBe("created");
-    expect(readFileSync(skillPath(home), "utf8")).toBe(renderMemorySkill());
+    expect(readFileSync(skillPath(home), "utf8")).toBe(hostSkill());
     expect(cursorSkillHealth({ home })).toBe("current");
     expect(repairCursorSkill({ home }).skillAction).toBe("unchanged");
 

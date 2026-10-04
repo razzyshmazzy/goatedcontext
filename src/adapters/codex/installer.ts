@@ -1,8 +1,10 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { withFileLock } from "../../utils/fs.ts";
+import { resolvePaths } from "../../storage/paths.ts";
 import {
   CTX_MEMORY_SKILL_NAME,
+  ctxCommand,
   renderMemorySkill,
 } from "../../core/assets/memory-protocol.ts";
 import {
@@ -23,6 +25,11 @@ import {
   CODEX_HOOK_COMMAND_DEFAULT,
   type HookAction,
 } from "./hook.ts";
+import {
+  codexConfigFile,
+  ensureCodexWritableRoot,
+  type WritableRootAction,
+} from "./config.ts";
 
 /**
  * Install the goatedcontext Codex adapter. Two native channels:
@@ -48,6 +55,10 @@ export interface CodexInstallOptions {
   hookCommand?: string;
   /** Remove (instead of install) the runtime hook — e.g. static-only setups. */
   disableHook?: boolean;
+  /** Override the effective ctx home (defaults to the shared CTX_HOME resolver). */
+  ctxHome?: string;
+  /** Override the host platform (for deterministic tests). */
+  platform?: NodeJS.Platform;
 }
 
 export interface CodexInstallResult {
@@ -56,14 +67,27 @@ export interface CodexInstallResult {
   hookAction: HookAction;
   skillFile: string;
   skillAction: SkillAction;
+  /** The Codex config file whose writable_roots were converged. */
+  configFile: string;
+  /** Outcome of ensuring the effective ctx home is a sandbox writable root. */
+  writableRootAction: WritableRootAction;
+  /** The effective ctx home granted as a writable root. */
+  ctxHome: string;
 }
 
 function resolveHome(opts: CodexInstallOptions): string {
   return opts.home ?? codexHome(opts.env ?? process.env);
 }
 
+/** The effective ctx home, via the SAME resolver ctx itself uses at runtime. */
+function resolveCtxHome(opts: CodexInstallOptions): string {
+  return opts.ctxHome ?? resolvePaths(opts.env ?? process.env).home;
+}
+
 export function installCodex(opts: CodexInstallOptions = {}): CodexInstallResult {
   const home = resolveHome(opts);
+  const platform = opts.platform ?? process.platform;
+  const ctxHome = resolveCtxHome(opts);
   mkdirSync(home, { recursive: true });
   const lockFile = join(home, ".ctx-install.lock");
   return withFileLock(lockFile, () => {
@@ -71,8 +95,24 @@ export function installCodex(opts: CodexInstallOptions = {}): CodexInstallResult
     const hookAction = opts.disableHook
       ? removeCodexHook(hooksFile)
       : upsertCodexHook(hooksFile, opts.hookCommand ?? CODEX_HOOK_COMMAND_DEFAULT);
-    const skillAction = upsertSkill(home, CTX_MEMORY_SKILL_NAME, renderMemorySkill());
-    return { home, hooksFile, hookAction, skillFile: skillFile(home, CTX_MEMORY_SKILL_NAME), skillAction };
+    const content = renderMemorySkill({ command: ctxCommand(platform) });
+    const skillAction = upsertSkill(home, CTX_MEMORY_SKILL_NAME, content);
+    // Grant the ctx home as a sandbox writable root so a sandboxed Codex child can
+    // persist preferences (the ctx DB lives outside the repo). Least-privilege: ONLY
+    // the ctx home, never a broader directory. A malformed/unmergeable config is left
+    // untouched and reported — ctx itself still installs fine.
+    const configFile = codexConfigFile(home);
+    const { action: writableRootAction } = ensureCodexWritableRoot(configFile, ctxHome, platform);
+    return {
+      home,
+      hooksFile,
+      hookAction,
+      skillFile: skillFile(home, CTX_MEMORY_SKILL_NAME),
+      skillAction,
+      configFile,
+      writableRootAction,
+      ctxHome,
+    };
   });
 }
 
@@ -86,7 +126,16 @@ export interface CodexUninstallResult {
   skillAction: SkillRemoveAction;
 }
 
-/** Remove the goatedcontext Codex hook + memory skill. Repo AGENTS.md is left to `ctx sync --remove`. */
+/**
+ * Remove the goatedcontext Codex hook + memory skill. Repo AGENTS.md is left to
+ * `ctx sync --remove`.
+ *
+ * Ownership decision (spec §15): we deliberately DO NOT strip the ctx writable root
+ * from `config.toml` on uninstall. A `writable_roots` entry equal to the ctx home
+ * could just as plausibly be one the user added themselves; removing it on path
+ * equality alone risks revoking a permission they wanted. We prefer safety over
+ * perfect cleanup and leave the (inert, least-privilege) entry in place.
+ */
 export function uninstallCodex(opts: CodexInstallOptions = {}): CodexUninstallResult {
   const home = resolveHome(opts);
   const hooksFile = codexHooksFile(home);
@@ -99,9 +148,9 @@ export function uninstallCodex(opts: CodexInstallOptions = {}): CodexUninstallRe
   });
 }
 
-/** Health of the installed Codex memory skill versus the current protocol. */
-export function codexSkillHealth(home: string): SkillHealth {
-  return skillHealth(home, CTX_MEMORY_SKILL_NAME, renderMemorySkill());
+/** Health of the installed Codex memory skill versus the current protocol (platform-aware). */
+export function codexSkillHealth(home: string, platform: NodeJS.Platform = process.platform): SkillHealth {
+  return skillHealth(home, CTX_MEMORY_SKILL_NAME, renderMemorySkill({ command: ctxCommand(platform) }));
 }
 
 export { detectCodexHook };

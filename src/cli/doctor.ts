@@ -440,6 +440,36 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
           fix: mh === "current" ? undefined : `Run \`${repairHint(s.id)}\`.`,
         });
       }
+
+      // Codex sandbox writable root: the ctx DB lives outside the repo, so a sandboxed
+      // Codex child can only persist preferences if the effective ctx home is listed
+      // as a writable root. We report on config PRESENCE — we can't prove the kernel
+      // honored it without a real sandboxed write — so the wording stays honest.
+      if (s.id === "codex" && s.detected && s.writableRootConfigured !== null) {
+        add({
+          section: s.label,
+          id: "codex-writable-root",
+          label: "ctx writable root",
+          status: s.writableRootConfigured ? "ok" : "warn",
+          detail: s.writableRootConfigured ? paths.home : `${paths.home} not in writable_roots`,
+          fix: s.writableRootConfigured ? undefined : "Run `ctx repair codex`.",
+        });
+      }
+    }
+
+    // Windows ctx command: agents must invoke `ctx.cmd` (not the `ctx.ps1` shim that
+    // PowerShell blocks). Verify the runnable launcher resolves on PATH.
+    if (process.platform === "win32") {
+      const cmd = "ctx.cmd";
+      const resolvedCmd = which(cmd, env.PATH);
+      add({
+        section: "Codex",
+        id: "windows-ctx-command",
+        label: `Windows ctx command (${cmd})`,
+        status: resolvedCmd ? "ok" : "warn",
+        detail: resolvedCmd ?? "not found on PATH",
+        fix: resolvedCmd ? undefined : "Run `npx goatedcontext setup`, or add the npm global bin directory to PATH.",
+      });
     }
   }
 

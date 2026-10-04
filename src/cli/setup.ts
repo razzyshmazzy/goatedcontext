@@ -426,6 +426,18 @@ export function runSetup(opts: SetupOptions): SetupResult {
           ? "✗ Codex hooks.json is not valid JSON — hook left untouched"
           : "✓ Codex integration",
       );
+      // The sandbox writable root is what lets a sandboxed Codex child persist
+      // preferences. If its config.toml couldn't be safely merged, ctx still
+      // installed — surface the exact manual fix instead of corrupting the file.
+      if (r.writableRootAction === "error") {
+        warnings.push(
+          `Codex config.toml could not be safely updated — left untouched.\n` +
+            `  Add this so sandboxed memory writes can reach ctx:\n` +
+            `    [sandbox_workspace_write]\n` +
+            `    writable_roots = ["${r.ctxHome.replace(/\\/g, "/")}"]\n` +
+            `  in ${r.configFile}`,
+        );
+      }
       syncRepoSafe();
     } catch {
       warnings.push("Could not configure the Codex adapter (left untouched).");
