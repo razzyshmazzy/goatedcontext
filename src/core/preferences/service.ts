@@ -16,6 +16,13 @@ import {
 } from "./types.ts";
 import { JaccardSimilarity, type Similarity } from "./similarity.ts";
 import { inferApplicability, inferPrimaryDomain, polarity as detectPolarity, subjectKey } from "./analysis.ts";
+import {
+  type Condition,
+  conditionFromJson,
+  conditionToCanonicalJson,
+  compactCondition,
+  enforceConditionInvariant,
+} from "./conditions.ts";
 import { recordEvent, type EventType } from "../events/service.ts";
 
 interface PreferenceRow {
@@ -29,6 +36,7 @@ interface PreferenceRow {
   repo_id: string | null;
   status: string;
   applicability: string;
+  condition_json: string | null;
   confidence: number;
   version: number;
   created_at: string;
@@ -59,6 +67,7 @@ function rowToPref(r: PreferenceRow): Preference {
     repoId: r.repo_id,
     status: r.status as Status,
     applicability: (r.applicability as Applicability) ?? "relevant",
+    condition: conditionFromJson(r.condition_json),
     confidence: r.confidence,
     version: r.version,
     createdAt: r.created_at,
@@ -88,6 +97,7 @@ export interface RememberInput {
   repoId?: string | null;
   status?: Status;
   applicability?: Applicability;
+  condition?: Condition | null;
   source?: string;
   evidence?: string;
   agentId?: string;
@@ -102,6 +112,7 @@ export interface ProposeInput {
   repoId?: string | null;
   evidence: string;
   applicability?: Applicability;
+  condition?: Condition | null;
   source?: string;
   agentId?: string;
   sessionId?: string;
@@ -131,8 +142,22 @@ function hashText(text: string): string {
   return createHash("sha256").update(canonical).digest("hex");
 }
 
-function dedupKey(scope: Scope, repoId: string | null, rule: string, pol: Polarity): string {
-  return `${scope}|${repoId ?? ""}|${subjectKey(rule)}|${pol}`;
+/**
+ * Canonical dedup key. For `relevant`/`always` rules the format is byte-for-byte
+ * the historical `scope|repo|subject|polarity`, so existing data and re-imported
+ * old bundles dedup EXACTLY as before. A conditional rule appends its canonical
+ * condition, so two conditionals that differ only by condition are distinct, while
+ * logically-equal conditions (any key/member ordering) collapse to one key.
+ */
+function dedupKey(
+  scope: Scope,
+  repoId: string | null,
+  rule: string,
+  pol: Polarity,
+  condition: Condition | null,
+): string {
+  const base = `${scope}|${repoId ?? ""}|${subjectKey(rule)}|${pol}`;
+  return condition ? `${base}|${conditionToCanonicalJson(condition)}` : base;
 }
 
 /** Friendly audit event for a status transition (distinguishes unlock from approve). */
@@ -171,7 +196,11 @@ export class PreferenceService {
 
     const pol = detectPolarity(parsed.rule);
     const domain = parsed.domain ?? inferPrimaryDomain(parsed.rule, parsed.category);
-    const applicability: Applicability = parsed.applicability ?? inferApplicability(parsed.rule);
+    // A condition (without an explicit applicability) implies `conditional`;
+    // otherwise fall back to the existing relevant/always inference.
+    const applicability: Applicability =
+      parsed.applicability ?? (parsed.condition ? "conditional" : inferApplicability(parsed.rule));
+    const condition = enforceConditionInvariant(applicability, parsed.condition ?? null);
     const status: Status = parsed.status ?? "approved";
     const id = newId();
     const ts = nowIso();
@@ -181,8 +210,8 @@ export class PreferenceService {
         .query(
           `INSERT INTO preferences
              (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
-              applicability, confidence, version, created_at, updated_at, last_used_at, dedup_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
+              applicability, condition_json, confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
         )
         .run(
           id,
@@ -195,10 +224,11 @@ export class PreferenceService {
           repoId,
           status,
           applicability,
+          condition ? conditionToCanonicalJson(condition) : null,
           1.0,
           ts,
           ts,
-          dedupKey(scope, repoId, parsed.rule, pol),
+          dedupKey(scope, repoId, parsed.rule, pol, condition),
         );
       this.insertEvidence(id, {
         source: parsed.source ?? "explicit",
@@ -213,7 +243,13 @@ export class PreferenceService {
         repoId,
         scope,
         summary: parsed.rule,
-        detail: { status, domain, polarity: pol, applicability },
+        detail: {
+          status,
+          domain,
+          polarity: pol,
+          applicability,
+          ...(condition ? { condition: compactCondition(condition) } : {}),
+        },
         agentId: parsed.agentId ?? null,
         sessionId: parsed.sessionId ?? null,
       });
@@ -239,11 +275,13 @@ export class PreferenceService {
 
     const pol = detectPolarity(parsed.rule);
     const domain = parsed.domain ?? inferPrimaryDomain(parsed.rule, parsed.category);
-    const applicability: Applicability = parsed.applicability ?? inferApplicability(parsed.rule);
-    const key = dedupKey(scope, repoId, parsed.rule, pol);
+    const applicability: Applicability =
+      parsed.applicability ?? (parsed.condition ? "conditional" : inferApplicability(parsed.rule));
+    const condition = enforceConditionInvariant(applicability, parsed.condition ?? null);
+    const key = dedupKey(scope, repoId, parsed.rule, pol, condition);
 
     return withWriteTx(this.db, () => {
-      const existing = this.findSimilarProposal(parsed.rule, scope, repoId, pol, key);
+      const existing = this.findSimilarProposal(parsed.rule, scope, repoId, pol, key, condition);
       if (existing) {
         this.insertEvidence(existing.id, {
           source: parsed.source ?? "agent",
@@ -275,8 +313,8 @@ export class PreferenceService {
         .query(
           `INSERT INTO preferences
              (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
-              applicability, confidence, version, created_at, updated_at, last_used_at, dedup_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, 1, ?, ?, NULL, ?)`,
+              applicability, condition_json, confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, 1, ?, ?, NULL, ?)`,
         )
         .run(
           id,
@@ -288,6 +326,7 @@ export class PreferenceService {
           scope,
           repoId,
           applicability,
+          condition ? conditionToCanonicalJson(condition) : null,
           PROPOSE_START_CONFIDENCE,
           ts,
           ts,
@@ -306,7 +345,12 @@ export class PreferenceService {
         repoId,
         scope,
         summary: parsed.rule,
-        detail: { domain, polarity: pol, applicability },
+        detail: {
+          domain,
+          polarity: pol,
+          applicability,
+          ...(condition ? { condition: compactCondition(condition) } : {}),
+        },
         agentId: parsed.agentId ?? null,
         sessionId: parsed.sessionId ?? null,
       });
@@ -320,6 +364,7 @@ export class PreferenceService {
     repoId: string | null,
     pol: Polarity,
     key: string,
+    condition: Condition | null,
   ): Preference | null {
     // Fast path: exact canonical key (also what the unique index enforces).
     const exact = this.db
@@ -332,7 +377,10 @@ export class PreferenceService {
 
     // Fallback: near-duplicate subject with the SAME polarity (covers legacy
     // rows without a dedup_key and slight phrasing differences). Opposite
-    // polarity is never merged.
+    // polarity is never merged. For conditionals, the condition must also be
+    // identical (canonical) — two rules that differ by condition are distinct,
+    // and a conditional never merges into a relevant/always rule.
+    const condCanonical = condition ? conditionToCanonicalJson(condition) : null;
     const candidates = this.db
       .query<PreferenceRow, [string, string]>(
         `SELECT * FROM preferences
@@ -340,7 +388,8 @@ export class PreferenceService {
       )
       .all(scope, pol)
       .filter((r) => (r.repo_id ?? null) === repoId)
-      .map(rowToPref);
+      .map(rowToPref)
+      .filter((c) => (c.condition ? conditionToCanonicalJson(c.condition) : null) === condCanonical);
 
     let best: Preference | null = null;
     let bestScore = 0;
@@ -371,6 +420,7 @@ export class PreferenceService {
       scope: Scope;
       status: Status;
       applicability?: Applicability;
+      condition?: Condition | null;
       confidence: number;
       createdAt: string;
       updatedAt: string;
@@ -379,7 +429,9 @@ export class PreferenceService {
     repoId: string | null,
   ): { id: string; created: boolean } {
     this.validateScope(rec.scope, repoId);
-    const key = dedupKey(rec.scope, repoId, rec.rule, rec.polarity);
+    const applicability: Applicability = rec.applicability ?? "relevant";
+    const condition = enforceConditionInvariant(applicability, rec.condition ?? null);
+    const key = dedupKey(rec.scope, repoId, rec.rule, rec.polarity, condition);
 
     return withWriteTx(this.db, () => {
       const existing = this.db
@@ -403,8 +455,8 @@ export class PreferenceService {
         .query(
           `INSERT INTO preferences
              (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
-              applicability, confidence, version, created_at, updated_at, last_used_at, dedup_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
+              applicability, condition_json, confidence, version, created_at, updated_at, last_used_at, dedup_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
         )
         .run(
           id,
@@ -416,7 +468,8 @@ export class PreferenceService {
           rec.scope,
           repoId,
           rec.status,
-          rec.applicability ?? "relevant",
+          applicability,
+          condition ? conditionToCanonicalJson(condition) : null,
           rec.confidence,
           rec.createdAt,
           rec.updatedAt,

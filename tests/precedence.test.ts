@@ -13,6 +13,7 @@ function pref(partial: Partial<Preference>): Preference {
     repoId: null,
     status: "approved",
     applicability: "relevant",
+    condition: null,
     confidence: 1,
     version: 1,
     createdAt: "t",

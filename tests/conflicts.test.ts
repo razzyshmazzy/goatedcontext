@@ -31,6 +31,7 @@ function pref(p: {
     repoId: p.scope === "repo" ? "repo-1" : null,
     status: p.status,
     applicability: "relevant",
+    condition: null,
     confidence: 1,
     version: 1,
     createdAt: "t",

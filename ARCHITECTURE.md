@@ -107,6 +107,12 @@ Migration **v2** added the correctness/concurrency columns:
 Migration **v4** added `preferences.applicability` (`relevant` | `always`,
 defaulting existing rows to `relevant`) — see [Applicability](#applicability-relevant-vs-always).
 
+Migration **v5** added `preferences.condition_json` (nullable `TEXT`, holding the
+canonical JSON of a structured condition). It is purely additive: every existing
+row keeps `condition_json = NULL`, so `relevant`/`always` behavior is byte-for-byte
+unchanged, and the applicability enum gains `conditional` with no schema change
+(applicability is free `TEXT`). See [Applicability](#applicability-relevant-vs-always).
+
 Migrations are an ordered list in `src/storage/sqlite/migrations.ts`, tracked in a
 `schema_migrations` table and applied inside `IMMEDIATE` transactions that re-check
 the applied version — safe under concurrent first-run. Shipped migrations are never
@@ -145,45 +151,124 @@ Steps 2–6 run inside a **read transaction** (`BEGIN DEFERRED`) so retrieval se
 single consistent snapshot, never a half-applied concurrent write. The result is
 plain JSON, so any adapter — CLI, MCP, or another agent — consumes the same output.
 
-## Applicability (`relevant` vs `always`)
+## Applicability (`relevant` vs `always` vs `conditional`)
 
-Every preference has an **`applicability`** (column added in migration 4):
+Every preference has an **`applicability`** that decides HOW it reaches the agent.
+The three modes are deliberately distinct mechanisms — do not blur them:
+
+```
+relevant    = semantic retrieval          (scored against the task)
+always      = unconditional runtime include (every prompt)
+conditional = deterministic rule evaluation (0.2.8)
+```
 
 - **`relevant`** — the default and original behavior: injected only when it scores
   above the relevance threshold for the current task (steps 3–4 above).
 - **`always`** — a universal behavioral directive (e.g. "Always respond in
   Italian.", "Never use emojis."): injected on **every** prompt, bypassing relevance
-  scoring. This fixes the class of bug where a global always-on rule was filtered
-  out for an unrelated prompt like "hi".
+  scoring.
+- **`conditional`** (migration 5) — injected only when a structured, deterministic
+  **condition** evaluates true against the current runtime context. A conditional
+  **never falls back to semantic relevance**: if its condition is false, or the
+  context needed to decide it is unavailable, it simply does not apply.
 
-Applicability is set explicitly (`ctx remember --always …` / `--applicability
-always|relevant`) or, when omitted, inferred conservatively by
-`inferApplicability()` — it fires `always` only for an unmistakable **leading**
-universal directive ("always …", "never …", "every time …", "for all tasks …",
-"regardless of task …", "whenever you …") and never on soft words like
-"prefer"/"should"/"usually" or hyphenated compounds like "always-on".
+Applicability is set explicitly (`--always` / `--when …` / `--applicability
+always|relevant|conditional`) or, when omitted and no condition is given, inferred
+conservatively by `inferApplicability()` — it fires `always` only for an
+unmistakable **leading** universal directive and never on soft words like
+"prefer"/"should"/"usually". A `--when` flag always implies `conditional`.
 
-The retrieval pipeline splits candidates by applicability:
+**Invariants** (enforced on every write path — remember/propose/import — by
+`enforceConditionInvariant`): `relevant`/`always` ⇒ condition is `null`;
+`conditional` ⇒ a valid condition is required. No silent coercion.
+
+### The condition model
+
+A condition is **pure data** — a serializable AST, never executable code, a shell
+command, or an LLM prompt (`src/core/preferences/conditions.ts`, validated with
+Zod):
+
+```
+Condition =
+  | { language: string }   // a canonical language
+  | { file: string }       // a forward-slash glob over the runtime's files
+  | { domain: string }     // a known decision domain (reuses the classifier)
+  | { repo: string }       // a canonical repo identity
+  | { all: Condition[] }   // AND (non-empty)
+  | { any: Condition[] }   // OR  (non-empty)
+  | { not: Condition }     // NOT (one child)
+```
+
+Conditions serialize to **canonical JSON**: `all`/`any` members are sorted and leaf
+values normalized, so two logically-equal conditions are byte-identical (no
+duplicate on re-import merely from key/member ordering). `--when key=value` parses
+one leaf (`language`/`file`/`domain`/`repo`); repeated `--when` flags AND together.
+Values are never interpreted as expressions (`language=ts && domain=x` is a literal
+value that fails validation, not a compound).
+
+Supported leaves and their determinism rules:
+
+- **language** — canonical set (typescript, javascript, python, rust, go, java, c,
+  cpp, csharp, ruby, php, swift, kotlin, html, css, sql) with aliases (`ts`→
+  typescript, `c++`→cpp, …). Inferred **only from file extensions**, never from
+  task text ("add a type annotation" does not imply TypeScript).
+- **file** — a glob (`**`, `*`, `?`) over repo-relative, forward-slash paths
+  (Windows `\` normalized). A tiny built-in matcher (`src/utils/glob.ts`) — no new
+  dependency.
+- **domain** — reuses the existing deterministic domain classifier; the condition
+  value must be a known domain.
+- **repo** — compared against the existing canonical repo **identity** (not a raw
+  path); friendly names are resolved to an identity at write time, failing rather
+  than storing an ambiguous reference.
+
+### Missing runtime context ⇒ no match
+
+This is the central rule: **if the context required to decide a condition is
+unavailable, the condition does not match.** No file known ⇒ file/language
+conditions are false. No confident domain ⇒ domain conditions are false. Not in a
+repo ⇒ repo conditions are false. The evaluator never guesses and never reaches out
+to discover state — it reads only the adapter-constructed `RuntimeContext`.
+
+### Runtime context + the evaluator
+
+```
+RuntimeContext { cwd, repo, task, files, languages, domain }
+evaluate(condition, runtimeContext) -> { matched, reason, children? }
+```
+
+`buildRuntimeContext()` (the adapter's job) normalizes raw signals into this shape;
+`evaluateCondition()` (`src/core/retrieval/evaluate.ts`) is a **pure, total
+function** of `(condition, context)` with no I/O. Keeping construction and
+evaluation separate is what lets different agent adapters feed the same evaluator
+(see [universal-agent note](#note-preparing-for-universal-agent-support)).
+
+### Retrieval pipeline with three pools
 
 ```
 gather candidates (status + scope filtered)
-  → always pool  : included wholesale, bypassing relevance scoring
-  → relevant pool: scored against the task, dropped below threshold
+  → always pool      : included wholesale, bypassing relevance
+  → conditional pool : evaluate each condition; keep only matches
+  → relevant pool    : scored against the task, dropped below threshold
   → combine → resolve conflicts / precedence → cap each pool → return
 ```
 
-`always` rules bypass **relevance** only — they are still subject to status
-filtering (a rejected always rule never appears), scope, precedence and conflict
-resolution. Each pool has its own cap so neither can starve the other: `always` is
-capped at **`MAX_ALWAYS = 20`** (chosen deterministically by precedence, then age,
-then id, so the same prompt always yields the same set) and `relevant` keeps the
-existing top-K limit (≤15, default 12).
+Matched conditionals are **not special-cased** in precedence or conflict
+resolution — once a condition matches, the preference competes exactly like any
+other (repo beats global, exclusive domains admit one winner, polarity/subject
+conflicts resolve as usual). They remain subject to status (a rejected conditional
+never appears; a proposed one only with `--include-proposed`), scope and locking.
 
-`applicability` is stored as free TEXT and validated in the app layer, so a future
-release can add **`conditional`** (a rule that applies when a structured condition
-matches) by extending the enum and adding a nullable condition field or a small
-side table — an additive, non-destructive migration. `conditional` is intentionally
-**reserved for a later release** and not implemented here.
+Each pool has an **independent, deterministic cap** so none starves another:
+`always` and matched `conditional` are each capped at **20** (`MAX_ALWAYS` /
+`MAX_CONDITIONAL`, chosen by precedence, then age, then id), and `relevant` keeps
+its top-K (≤15, default 12). Output order is always-on, then matched conditionals,
+then task-relevant.
+
+`ctx test-hook` is the debugging surface: it builds a (optionally explicit — `--file`,
+`--language`, `--domain`) runtime context, lists matched preferences with the
+reason each conditional matched, lists conditionals that did **not** match with
+their failure reason, and (`--json`) emits the normalized runtime context plus the
+full per-conditional evaluation trace.
 
 ## Precedence
 
@@ -345,3 +430,34 @@ Making any single agent the center of the architecture would be a trap:
 So Claude Code is served *first* and served *well* — via the `context`,
 `context-learn`, and `context-env` skills and a global-instructions block — but
 it plugs into the engine from the outside, exactly like every future adapter will.
+
+## Note: preparing for universal-agent support
+
+The conditional engine added in 0.2.8 is built with the next major stage —
+**universal agent support** — in mind, without implementing any of it yet. The
+layering is deliberately:
+
+```
+agent adapter            (Claude prompt hook today; Codex/Cursor/MCP later)
+    ↓  constructs
+normalized RuntimeContext { cwd, repo, task, files, languages, domain }
+    ↓  fed into
+conditional evaluator    (pure, agent-agnostic; src/core/retrieval/evaluate.ts)
+    ↓
+retrieval / conflicts / precedence
+    ↓
+formatted context
+    ↓
+adapter injection
+```
+
+The evaluator and condition AST live in **core** and contain **no Claude-specific
+assumptions**. Claude is merely the adapter that happens to construct the
+`RuntimeContext` today — and it does so from only what its hook payload provides
+(`cwd` + prompt), which is why file/language conditions legitimately don't match
+during a live Claude hook (the hook exposes no active file). A future adapter that
+*can* report the active file, language, or workspace will populate the same
+`RuntimeContext` fields and get identical, deterministic evaluation for free.
+
+Explicitly **out of scope for 0.2.8**: building those other adapters, and any
+`AGENTS.md` generation/syncing. The seam is in place; the adapters are not.

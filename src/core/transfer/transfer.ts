@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { nowIso } from "../../utils/time.ts";
 import { Applicability, Polarity, Scope, Status } from "../preferences/types.ts";
+import { ConditionSchema, canonicalizeCondition } from "../preferences/conditions.ts";
 import type { CtxContext } from "../context.ts";
 
 /**
@@ -35,24 +36,49 @@ const ExportRepo = z.object({
   rootPath: z.string().default(""),
 });
 
-const ExportPreference = z.object({
-  rule: z.string().min(1),
-  category: z.string().min(1),
-  domain: z.string().nullable().default(null),
-  polarity: Polarity,
-  scope: Scope,
-  status: Status,
-  // Additive + default-safe: bundles from ≤0.2.3 have no applicability field and
-  // import as `relevant`, preserving their original behavior. No schema-version
-  // bump is needed for this reason.
-  applicability: Applicability.default("relevant"),
-  confidence: z.number().min(0).max(1).default(1),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  /** Links to `repos[].identity`; required for repo-scoped prefs, null for global. */
-  repoIdentity: z.string().nullable().default(null),
-  evidence: z.array(ExportEvidence).default([]),
-});
+const ExportPreference = z
+  .object({
+    rule: z.string().min(1),
+    category: z.string().min(1),
+    domain: z.string().nullable().default(null),
+    polarity: Polarity,
+    scope: Scope,
+    status: Status,
+    // Additive + default-safe: bundles from ≤0.2.3 have no applicability field and
+    // import as `relevant`, preserving their original behavior. No schema-version
+    // bump is needed for this reason.
+    applicability: Applicability.default("relevant"),
+    // Additive + default-safe: bundles from ≤0.2.7 have no condition field and
+    // import as `null` (correct for every relevant/always row they contain). The
+    // structured condition is validated by the SAME schema used everywhere, so a
+    // malformed condition fails the import. No schema-version bump is needed.
+    condition: ConditionSchema.nullable().default(null),
+    confidence: z.number().min(0).max(1).default(1),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    /** Links to `repos[].identity`; required for repo-scoped prefs, null for global. */
+    repoIdentity: z.string().nullable().default(null),
+    evidence: z.array(ExportEvidence).default([]),
+  })
+  // Enforce the applicability/condition invariant at the boundary: a conditional
+  // row without a condition, or a relevant/always row carrying one, is rejected —
+  // never silently coerced.
+  .superRefine((p, ctx) => {
+    if (p.applicability === "conditional" && !p.condition) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["condition"],
+        message: "a conditional preference requires a condition",
+      });
+    }
+    if (p.applicability !== "conditional" && p.condition) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["condition"],
+        message: `a ${p.applicability} preference must not carry a condition`,
+      });
+    }
+  });
 
 export const ExportBundleSchema = z.object({
   schema: z.literal(EXPORT_SCHEMA),
@@ -100,6 +126,9 @@ export function exportData(ctx: CtxContext): ExportBundle {
       scope: p.scope,
       status: p.status,
       applicability: p.applicability,
+      // Emit the CANONICAL condition so JSON key/member ordering never produces a
+      // spurious diff or a duplicate on re-import.
+      condition: p.condition ? canonicalizeCondition(p.condition) : null,
       confidence: p.confidence,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
@@ -171,6 +200,7 @@ export function importData(ctx: CtxContext, raw: unknown): ImportSummary {
         scope: p.scope,
         status: p.status,
         applicability: p.applicability,
+        condition: p.condition,
         confidence: p.confidence,
         createdAt: p.createdAt,
         updatedAt: p.updatedAt,

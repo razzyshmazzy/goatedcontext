@@ -22,6 +22,17 @@ import { timeAgo } from "../utils/time.ts";
 import { toJson as statsToJson } from "../core/stats/stats.ts";
 import { VERSION } from "../version.ts";
 import type { Applicability, Scope } from "../core/preferences/types.ts";
+import {
+  type Condition,
+  type RepoResolver,
+  buildWhenCondition,
+  canonicalizeCondition,
+  compactCondition,
+  parseCondition,
+  renderConditionLines,
+  resolveRepoLeaves,
+} from "../core/preferences/conditions.ts";
+import { detectRepoIdentity } from "../core/repos/repo.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
 
 /** Args after a `--`/`--exec` separator, captured by the entry point for `env run`. */
@@ -68,6 +79,108 @@ function resolveApplicability(opts: { always?: boolean; applicability?: string }
   }
   if (opts.always) return "always";
   return opts.applicability;
+}
+
+/** Commander collector for a repeatable string option (e.g. multiple `--when`). */
+function collect(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+/**
+ * Resolve a friendly repo value to a canonical identity deterministically. Accepts
+ * an already-canonical identity (`remote:…`/`path:…`), the current repo by name, or
+ * a uniquely-named known repo. Anything ambiguous or unknown fails — we never store
+ * an ambiguous repo condition.
+ */
+function makeRepoResolver(ctx: CtxContext, cwd: string): RepoResolver {
+  return (value: string) => {
+    const v = value.trim();
+    if (v.length === 0) throw new CtxError("repo condition must not be empty.");
+    if (v.startsWith("remote:") || v.startsWith("path:")) return v;
+
+    const detected = detectRepoIdentity(cwd);
+    if (detected && detected.name === v) {
+      // Register (or fetch) the current repo so the stored identity matches its row.
+      const r = ctx.repos.resolve(cwd);
+      return r?.identity ?? detected.identity;
+    }
+
+    const known = ctx.repos.list();
+    const exactIdentity = known.find((r) => r.identity === v);
+    if (exactIdentity) return exactIdentity.identity;
+
+    const byName = known.filter((r) => r.name === v);
+    if (byName.length === 1) return byName[0]!.identity;
+    if (byName.length > 1) {
+      throw new CtxError(
+        `Repo "${v}" is ambiguous — ${byName.length} known repositories share that name. Use the full identity (e.g. remote:github.com/owner/${v}).`,
+      );
+    }
+    throw new CtxError(
+      `Cannot resolve repo "${v}" to a known repository. Run inside that repo, or pass a full identity like remote:github.com/owner/${v}.`,
+    );
+  };
+}
+
+interface ConditionFlags {
+  always?: boolean;
+  applicability?: string;
+  when?: string[];
+  whenJson?: string;
+}
+
+/**
+ * Resolve the effective applicability and (optional) condition from the write-path
+ * flags, enforcing every documented flag conflict BEFORE any write:
+ *   - `--when` (repeatable) and `--when-json` imply `conditional`;
+ *   - `--always` + `--when` is rejected;
+ *   - `--applicability relevant|always` + `--when` is rejected;
+ *   - `--applicability conditional` with no `--when`/`--when-json` is rejected.
+ * Returns `condition = null` for the non-conditional paths.
+ */
+function resolveApplicabilityAndCondition(
+  opts: ConditionFlags,
+  repoResolver: RepoResolver,
+): { applicability: string | undefined; condition: Condition | null } {
+  const when = opts.when ?? [];
+  const hasWhen = when.length > 0 || Boolean(opts.whenJson);
+
+  if (!hasWhen) {
+    if (opts.applicability === "conditional") {
+      throw new CtxError(
+        "--applicability conditional requires at least one --when key=value (or --when-json '<json>').",
+      );
+    }
+    return { applicability: resolveApplicability(opts), condition: null };
+  }
+
+  if (opts.always) {
+    throw new CtxError(
+      "Conflicting flags: --always and --when cannot be combined (a preference is either always-on or conditional).",
+    );
+  }
+  if (opts.applicability && opts.applicability !== "conditional") {
+    throw new CtxError(
+      `Conflicting flags: --when implies --applicability conditional, but --applicability ${opts.applicability} was given.`,
+    );
+  }
+  if (when.length > 0 && opts.whenJson) {
+    throw new CtxError("Use either --when flags or --when-json, not both.");
+  }
+
+  let condition: Condition;
+  if (opts.whenJson) {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(opts.whenJson);
+    } catch {
+      throw new CtxError("--when-json must be a valid JSON condition.");
+    }
+    condition = canonicalizeCondition(resolveRepoLeaves(parseCondition(raw), repoResolver));
+  } else {
+    condition = buildWhenCondition(when, repoResolver);
+  }
+  return { applicability: "conditional", condition };
 }
 
 export function buildProgram(deps: CliDeps): Command {
@@ -271,16 +384,26 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--domain <domain>", "Explicit decision domain (optional)")
     .option("--repo", "Shortcut for --scope repo")
     .option("--lock", "Create it as a locked preference (cannot be auto-changed)")
-    .option("--applicability <value>", "always | relevant (default: inferred from the rule)")
+    .option("--applicability <value>", "always | relevant | conditional (default: inferred from the rule)")
     .option("--always", "Shortcut for --applicability always (inject on every prompt)")
+    .option(
+      "--when <key=value>",
+      "Conditional rule: inject only when the condition matches (language=, file=, domain=, repo=). Repeatable (AND).",
+      collect,
+      [],
+    )
+    .option("--when-json <json>", "Advanced: a structured condition as JSON (all/any/not)")
     .option("--evidence <text>", "Optional supporting evidence")
     .option("--agent-id <id>", "Provenance: which agent recorded this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
-      const applicability = resolveApplicability(opts);
       withContext(deps, (ctx) => {
+        const { applicability, condition } = resolveApplicabilityAndCondition(
+          opts,
+          makeRepoResolver(ctx, opts.cwd),
+        );
         const scope: Scope = opts.repo ? "repo" : (opts.scope as Scope);
         let repoId: string | null = null;
         if (scope === "repo") repoId = resolveRepoOrThrow(ctx, opts.cwd).id;
@@ -292,13 +415,15 @@ export function buildProgram(deps: CliDeps): Command {
           repoId,
           status: opts.lock ? "locked" : "approved",
           applicability: applicability as Applicability | undefined,
+          condition,
           evidence: opts.evidence,
           source: "explicit",
           ...provenance(opts),
         });
         if (opts.json) return printJson(pref);
         line(`Remembered [${pref.status}] (${shortId(pref.id)}): ${pref.rule}`);
-        line(`  scope=${pref.scope} category=${pref.category} domain=${pref.domain ?? "-"} polarity=${pref.polarity} applicability=${pref.applicability}`);
+        const condStr = pref.condition ? ` condition=[${compactCondition(pref.condition)}]` : "";
+        line(`  scope=${pref.scope} category=${pref.category} domain=${pref.domain ?? "-"} polarity=${pref.polarity} applicability=${pref.applicability}${condStr}`);
       });
     });
 
@@ -312,16 +437,26 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--category <category>", "Preference category", "general")
     .option("--domain <domain>", "Explicit decision domain (optional)")
     .option("--repo", "Shortcut for --scope repo")
-    .option("--applicability <value>", "always | relevant (default: inferred from the rule)")
+    .option("--applicability <value>", "always | relevant | conditional (default: inferred from the rule)")
     .option("--always", "Shortcut for --applicability always (inject on every prompt)")
+    .option(
+      "--when <key=value>",
+      "Conditional rule: inject only when the condition matches (language=, file=, domain=, repo=). Repeatable (AND).",
+      collect,
+      [],
+    )
+    .option("--when-json <json>", "Advanced: a structured condition as JSON (all/any/not)")
     .option("--source <source>", "Origin of the observation", "agent")
     .option("--agent-id <id>", "Provenance: which agent proposed this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
-      const applicability = resolveApplicability(opts);
       withContext(deps, (ctx) => {
+        const { applicability, condition } = resolveApplicabilityAndCondition(
+          opts,
+          makeRepoResolver(ctx, opts.cwd),
+        );
         const scope: Scope = opts.repo ? "repo" : (opts.scope as Scope);
         let repoId: string | null = null;
         if (scope === "repo") repoId = resolveRepoOrThrow(ctx, opts.cwd).id;
@@ -333,6 +468,7 @@ export function buildProgram(deps: CliDeps): Command {
           repoId,
           evidence: opts.evidence,
           applicability: applicability as Applicability | undefined,
+          condition,
           source: opts.source,
           ...provenance(opts),
         });
@@ -346,7 +482,8 @@ export function buildProgram(deps: CliDeps): Command {
           line(`Merged into existing proposal (${shortId(p.id)}); confidence=${p.confidence.toFixed(2)}, evidence=${c}.`);
         } else {
           line(`Proposed (${shortId(p.id)}): ${p.rule}`);
-          line(`  scope=${p.scope} category=${p.category} domain=${p.domain ?? "-"} polarity=${p.polarity} applicability=${p.applicability} confidence=${p.confidence.toFixed(2)}`);
+          const condStr = p.condition ? ` condition=[${compactCondition(p.condition)}]` : "";
+          line(`  scope=${p.scope} category=${p.category} domain=${p.domain ?? "-"} polarity=${p.polarity} applicability=${p.applicability}${condStr} confidence=${p.confidence.toFixed(2)}`);
         }
         line("Review with: ctx prefs pending");
       });
@@ -363,8 +500,9 @@ export function buildProgram(deps: CliDeps): Command {
         if (opts.json) return printJson(all);
         if (all.length === 0) return line('No preferences yet. Try: ctx remember "..."');
         for (const p of all) {
+          const cond = p.condition ? ` [${compactCondition(p.condition)}]` : "";
           line(
-            `${shortId(p.id)}  [${p.status}/${p.applicability}] (${p.scope}/${p.category}/${p.domain ?? "-"}) ${p.polarity} c=${p.confidence.toFixed(2)}  ${p.rule}`,
+            `${shortId(p.id)}  [${p.status}/${p.applicability}]${cond} (${p.scope}/${p.category}/${p.domain ?? "-"}) ${p.polarity} c=${p.confidence.toFixed(2)}  ${p.rule}`,
           );
         }
       });
@@ -387,6 +525,7 @@ export function buildProgram(deps: CliDeps): Command {
           polarity: p.polarity,
           scope: p.scope,
           applicability: p.applicability,
+          condition: p.condition,
           confidence: p.confidence,
           evidenceCount: ctx.preferences.evidenceCount(p.id),
           evidence: ctx.preferences.evidenceFor(p.id).map((e) => ({
@@ -402,6 +541,7 @@ export function buildProgram(deps: CliDeps): Command {
           line("");
           line(`${shortId(p.id)}  [proposed/${p.applicability}]  (${p.scope}/${p.category}/${p.domain ?? "-"})  ${p.polarity}  confidence=${p.confidence.toFixed(2)}  evidence=${p.evidenceCount}`);
           line(`  rule: ${p.rule}`);
+          if (p.condition) line(`  condition: ${compactCondition(p.condition)}`);
           for (const e of p.evidence) line(`  - (${e.source}${e.agentId ? `/${e.agentId}` : ""}) ${e.text}`);
           line(`  approve: ctx prefs approve ${shortId(p.id)}   reject: ctx prefs reject ${shortId(p.id)}`);
         }
@@ -474,6 +614,10 @@ export function buildProgram(deps: CliDeps): Command {
         line(`  scope:      ${pref.scope}${repo ? ` (${repo.name})` : ""}`);
         line(`  status:     ${pref.status}`);
         line(`  applicability: ${pref.applicability}`);
+        if (pref.condition) {
+          line("  condition:");
+          for (const l of renderConditionLines(pref.condition, 2)) line(l);
+        }
         line(`  confidence: ${pref.confidence.toFixed(2)}`);
         line(`  version:    ${pref.version}`);
         line(`  created:    ${pref.createdAt}`);
@@ -655,25 +799,60 @@ export function buildProgram(deps: CliDeps): Command {
     .command("test-hook")
     .description("Dry-run the Claude prompt-retrieval hook for a task, without launching Claude.")
     .requiredOption("--task <text>", "The task/prompt to simulate")
+    .option(
+      "--file <path>",
+      "Simulate an active file (enables file/language conditions). Repeatable.",
+      collect,
+      [],
+    )
+    .option("--language <lang>", "Override the inferred language for the simulation")
+    .option("--domain <domain>", "Override the inferred domain for the simulation")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((opts) => {
       withContext(deps, (ctx) => {
-        const result = simulateHook(ctx, { cwd: opts.cwd, task: opts.task });
+        const result = simulateHook(ctx, {
+          cwd: opts.cwd,
+          task: opts.task,
+          files: opts.file,
+          languages: opts.language ? [opts.language] : undefined,
+          domain: opts.domain ?? undefined,
+        });
         if (opts.json) return printJson(result);
 
+        const rc = result.runtimeContext;
+        // Map a conditional preference id → its evaluation reason, for annotation.
+        const reasonById = new Map(result.conditionalEvaluations.map((e) => [e.id, e.reason]));
+
         line(`Task: ${result.task.trim() ? result.task : "(empty)"}`);
-        line(
-          `Repository: ${result.repo ? `${result.repo.name} (${result.repo.identity})` : "(none / not a git repo)"}`,
-        );
+        line("");
+        line("Runtime context");
+        line(`  repo:      ${rc.repo ? `${rc.repo.name} (${rc.repo.identity})` : "(none / not a git repo)"}`);
+        line(`  files:     ${rc.files.length ? rc.files.join(", ") : "(none)"}`);
+        line(`  languages: ${rc.languages.length ? rc.languages.join(", ") : "(none)"}`);
+        line(`  domain:    ${rc.domain ?? "(none)"}`);
+        line("");
         line(`Would inject context: ${result.wouldInject ? "yes" : "no"}`);
         line("");
         line(`Matched preferences (${result.preferences.length}):`);
         if (result.preferences.length === 0) line("  (none)");
         for (const p of result.preferences) {
           const domain = p.domain ? `[${p.domain}]` : "";
-          const suffix = p.applicability === "always" ? "" : `  (relevance=${p.relevance.toFixed(2)})`;
-          line(`  - [${p.scope}][${p.applicability}]${domain} ${p.rule}${suffix}`);
+          line(`  - [${p.scope}][${p.applicability}]${domain} ${p.rule}`);
+          if (p.applicability === "conditional") {
+            line(`      matched: ${reasonById.get(p.id) ?? "condition matched"}`);
+          } else if (p.applicability !== "always") {
+            line(`      relevance=${p.relevance.toFixed(2)}`);
+          }
+        }
+        const notMatched = result.conditionalEvaluations.filter((e) => !e.matched);
+        if (notMatched.length > 0) {
+          line("");
+          line(`Not matched — conditionals whose condition was false (${notMatched.length}):`);
+          for (const e of notMatched) {
+            line(`  - [${e.scope}][conditional] ${e.rule}`);
+            line(`      failed: ${e.reason}`);
+          }
         }
         if (result.overridden.length > 0) {
           line("");
@@ -722,6 +901,15 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--category <category>", "Preference category", "general")
     .option("--domain <domain>", "Explicit decision domain (optional)")
     .option("--lock", "Create it as a locked preference")
+    .option("--applicability <value>", "always | relevant | conditional (default: inferred from the rule)")
+    .option("--always", "Shortcut for --applicability always (inject on every prompt)")
+    .option(
+      "--when <key=value>",
+      "Conditional rule: inject only when the condition matches (language=, file=, domain=, repo=). Repeatable (AND).",
+      collect,
+      [],
+    )
+    .option("--when-json <json>", "Advanced: a structured condition as JSON (all/any/not)")
     .option("--evidence <text>", "Optional supporting evidence")
     .option("--agent-id <id>", "Provenance: which agent recorded this")
     .option("--session-id <id>", "Provenance: session identifier")
@@ -730,6 +918,10 @@ export function buildProgram(deps: CliDeps): Command {
     .action((rule, opts) => {
       withContext(deps, (ctx) => {
         const r = resolveRepoOrThrow(ctx, opts.cwd);
+        const { applicability, condition } = resolveApplicabilityAndCondition(
+          opts,
+          makeRepoResolver(ctx, opts.cwd),
+        );
         const pref = ctx.preferences.remember({
           rule,
           category: opts.category,
@@ -737,6 +929,8 @@ export function buildProgram(deps: CliDeps): Command {
           scope: "repo",
           repoId: r.id,
           status: opts.lock ? "locked" : "approved",
+          applicability: applicability as Applicability | undefined,
+          condition,
           evidence: opts.evidence,
           source: "explicit",
           ...provenance(opts),

@@ -158,4 +158,23 @@ export const migrations: Migration[] = [
       ALTER TABLE preferences ADD COLUMN applicability TEXT NOT NULL DEFAULT 'relevant';
     `,
   },
+  {
+    version: 5,
+    name: "preference_condition",
+    sql: `
+      -- Conditional preferences (0.2.8) carry a structured, serialized condition
+      -- that is evaluated deterministically against a normalized RuntimeContext.
+      -- Stored as canonical JSON TEXT, NULL for 'relevant'/'always' rows. This is a
+      -- purely additive migration: every existing row keeps condition_json = NULL,
+      -- so 'relevant' and 'always' behavior is byte-for-byte unchanged. The enum
+      -- extension ('relevant' | 'always' | 'conditional') needs no schema change
+      -- because applicability is free TEXT validated in the app layer.
+      --
+      -- Invariants (enforced in the app layer, see conditions.ts):
+      --   relevant    => condition_json IS NULL
+      --   always      => condition_json IS NULL
+      --   conditional => condition_json IS a valid condition
+      ALTER TABLE preferences ADD COLUMN condition_json TEXT;
+    `,
+  },
 ];

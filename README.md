@@ -36,8 +36,11 @@ Then open any repo and use Claude normally.
 Relevant preferences are injected automatically before Claude works. If nothing is relevant, nothing is injected. Universal directives can be marked always-on so they apply to every prompt:
 
 ```powershell
-ctx remember --always "Always respond in Italian."
+ctx remember --always "Never add dependencies without asking."
+ctx remember --when language=typescript "Prefer strict TypeScript."
 ```
+
+`--when` makes a preference *conditional*: it is injected only when a deterministic runtime condition matches (`language=`, `file=`, `domain=`, `repo=`; repeat `--when` to AND them). See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full model.
 
 In that sense, GoatedContext works similar to my [AquaAgent](https://github.com/razzyshmazzy/AquaAgent) but minus the semantic embedding.
 

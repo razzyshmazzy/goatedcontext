@@ -394,19 +394,21 @@ test("migration v4 adds applicability=relevant to a pre-0.2.4 database, preservi
       .run("e1", "p1", "explicit", null, "seen", null, null, "h1", "t");
     raw.close();
 
-    // Open with the full stack → applies migration v4.
+    // Open with the full stack → applies every pending migration (v4, v5, …).
     const db = openDatabase(paths);
     try {
       const v = db.query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_migrations").get();
-      expect(v?.v).toBe(4);
+      expect(v?.v).toBe(5);
 
       const rows = db
-        .query<{ id: string; status: string; applicability: string; repo_id: string | null }, []>(
-          "SELECT id, status, applicability, repo_id FROM preferences ORDER BY id",
-        )
+        .query<
+          { id: string; status: string; applicability: string; condition_json: string | null; repo_id: string | null },
+          []
+        >("SELECT id, status, applicability, condition_json, repo_id FROM preferences ORDER BY id")
         .all();
       expect(rows).toHaveLength(3); // row count preserved
-      for (const r of rows) expect(r.applicability).toBe("relevant"); // default applied
+      for (const r of rows) expect(r.applicability).toBe("relevant"); // v4 default applied
+      for (const r of rows) expect(r.condition_json).toBeNull(); // v5 adds a null condition column
       expect(rows.map((r) => r.status)).toEqual(["approved", "locked", "rejected"]); // statuses preserved
       expect(rows.find((r) => r.id === "p2")?.repo_id).toBe("repo1"); // repo link preserved
 

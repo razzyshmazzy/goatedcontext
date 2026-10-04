@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { KNOWN_DOMAINS } from "./analysis.ts";
+import { ConditionSchema } from "./conditions.ts";
 
 /**
  * Preference scope. `global` follows the developer everywhere; `repo` is bound
@@ -36,12 +37,21 @@ export type Polarity = z.infer<typeof Polarity>;
  *    current task (the original behavior).
  *  - always:   injected on every prompt, bypassing relevance scoring (but still
  *    subject to status/scope/precedence/conflict filtering).
+ *  - conditional: injected only when a structured, deterministic condition
+ *    evaluates true against the current runtime context (0.2.8). It never falls
+ *    back to semantic relevance; if the condition can't be evaluated, it doesn't
+ *    apply. The condition lives in `Preference.condition` (stored as canonical
+ *    JSON in `preferences.condition_json`).
  *
- * The storage column is free TEXT, so `conditional` can be added in a later
- * release (0.2.5) by extending this enum and adding a condition field/table —
- * no destructive migration required. 0.2.4 accepts ONLY these two values.
+ * The storage column is free TEXT, so this enum can be extended again later
+ * without a destructive migration.
+ *
+ * Invariants (enforced on every write path via `enforceConditionInvariant`):
+ *   relevant    => condition === null
+ *   always      => condition === null
+ *   conditional => condition is a valid Condition
  */
-export const Applicability = z.enum(["relevant", "always"]);
+export const Applicability = z.enum(["relevant", "always", "conditional"]);
 export type Applicability = z.infer<typeof Applicability>;
 
 /** An explicit domain must be one of the known domains (extensible list). */
@@ -63,6 +73,8 @@ export const Preference = z.object({
   repoId: z.string().nullable(),
   status: Status,
   applicability: Applicability,
+  /** Structured condition for `conditional` preferences; null otherwise. */
+  condition: ConditionSchema.nullable(),
   confidence: z.number().min(0).max(1),
   version: z.number().int().min(1),
   createdAt: z.string(),
@@ -120,6 +132,8 @@ export const RememberInputSchema = z.object({
   status: Status.optional(),
   /** Explicit applicability; when omitted, the service infers it from the rule. */
   applicability: Applicability.optional(),
+  /** Structured condition; required iff applicability resolves to `conditional`. */
+  condition: ConditionSchema.nullable().optional(),
   source: z.string().optional(),
   evidence: z.string().optional(),
   agentId: z.string().optional(),
@@ -136,6 +150,8 @@ export const ProposeInputSchema = z.object({
   evidence: NonEmptyText,
   /** Explicit applicability; when omitted, the service infers it from the rule. */
   applicability: Applicability.optional(),
+  /** Structured condition; required iff applicability resolves to `conditional`. */
+  condition: ConditionSchema.nullable().optional(),
   source: z.string().optional(),
   agentId: z.string().optional(),
   sessionId: z.string().optional(),

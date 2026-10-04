@@ -14,6 +14,9 @@ import {
 } from "../preferences/analysis.ts";
 import { precedenceRank } from "./precedence.ts";
 import { withReadTx } from "../../storage/sqlite/tx.ts";
+import type { Condition } from "../preferences/conditions.ts";
+import { buildRuntimeContext, type RuntimeContext } from "./runtime-context.ts";
+import { evaluateCondition } from "./evaluate.ts";
 
 /** Minimum relevance to be returned. Below this, a preference is dropped. */
 const RELEVANCE_THRESHOLD = 0.25;
@@ -28,11 +31,21 @@ const DEFAULT_LIMIT = 12;
  */
 const MAX_ALWAYS = 20;
 /**
- * Nominal relevance assigned to `always`-on preferences. They bypass task scoring
- * (they apply regardless of the task), so they sort ahead of scored `relevant`
- * rules in the output block.
+ * Safety cap on how many `conditional` preferences a single prompt may inject,
+ * mirroring `MAX_ALWAYS`. Conditions are evaluated deterministically and only
+ * matches reach this cap; it exists so a pathological number of matching
+ * conditionals cannot flood the window or starve the relevance budget. Chosen
+ * equal to `MAX_ALWAYS` (20) for a consistent prompt budget, and applied
+ * deterministically by precedence, then age, then id.
+ */
+const MAX_CONDITIONAL = 20;
+/**
+ * Nominal relevance assigned to `always`-on and matched `conditional` preferences.
+ * Both bypass task scoring (one applies unconditionally, the other because its
+ * condition already matched), so they sort ahead of scored `relevant` rules.
  */
 const ALWAYS_RELEVANCE = 1;
+const CONDITIONAL_RELEVANCE = 1;
 
 // Scoring weights.
 const W_DOMAIN = 0.5;
@@ -63,6 +76,28 @@ export interface RetrievedEnvironment {
   variableNames: string[];
 }
 
+/** Per-conditional evaluation trace, exposed only when `explain` is requested. */
+export interface ConditionalEvaluation {
+  id: string;
+  rule: string;
+  scope: string;
+  /** True when the condition evaluated true against the runtime context. */
+  matched: boolean;
+  /** Human-readable reason for the decision (top-level). */
+  reason: string;
+  condition: Condition | null;
+}
+
+/** Normalized runtime context view, exposed only when `explain` is requested. */
+export interface RuntimeContextView {
+  cwd: string;
+  repo: { id: string; name: string; identity: string } | null;
+  task: string | null;
+  files: string[];
+  languages: string[];
+  domain: string | null;
+}
+
 export interface RetrievalResult {
   repo: { id: string; name: string; identity: string } | null;
   task: string | null;
@@ -70,6 +105,10 @@ export interface RetrievalResult {
   environments: RetrievedEnvironment[];
   /** Preferences dropped because a higher-precedence rule superseded them. */
   overridden: { id: string; rule: string; supersededBy: string }[];
+  /** The normalized runtime context used for conditional evaluation (explain only). */
+  runtimeContext?: RuntimeContextView;
+  /** Evaluation result for every conditional candidate (explain only). */
+  conditionalEvaluations?: ConditionalEvaluation[];
 }
 
 export interface RetrievalOptions {
@@ -84,6 +123,23 @@ export interface RetrievalOptions {
    * and never contends on the write lock.
    */
   track?: boolean;
+  // ---- runtime-context inputs for conditional evaluation --------------------
+  // These are supplied by the ADAPTER. The Claude prompt hook has only cwd+task,
+  // so it leaves files/languages unset (file/language conditions then simply
+  // don't match — the documented missing-context rule). The CLI simulator may
+  // pass richer, explicit context for debugging.
+  /** Explicit file paths active for this turn (normalized to forward slashes). */
+  files?: string[];
+  /** Explicit languages; override extension inference when given. */
+  languages?: string[];
+  /** Explicit domain; overrides task-based domain inference when given. */
+  domain?: string | null;
+  /**
+   * When true, populate `runtimeContext` and `conditionalEvaluations` in the
+   * result (used by `ctx test-hook`). Off by default so the hot hook path adds
+   * no overhead.
+   */
+  explain?: boolean;
 }
 
 interface Scored {
@@ -168,39 +224,72 @@ export class RetrievalEngine {
       opts.track === false ? this.repos.resolveReadOnly(opts.cwd) : this.repos.resolve(opts.cwd);
     const task = opts.task?.trim() || null;
 
+    // The adapter-constructed, normalized runtime context. The condition evaluator
+    // reads ONLY this — it never discovers state on its own.
+    const runtimeContext: RuntimeContext = buildRuntimeContext({
+      cwd: opts.cwd,
+      repo,
+      task,
+      files: opts.files,
+      languages: opts.languages,
+      domain: opts.domain,
+    });
+
     // Gather + rank + resolve inside a read snapshot so a concurrent commit is
     // observed either fully-before or fully-after — never half-applied.
-    const { top, overridden } = withReadTx(this.db, () => {
+    const { top, overridden, conditionalEvaluations } = withReadTx(this.db, () => {
       const candidates = this.candidates(repo, opts.includeProposed ?? false);
 
-      // Applicability split. Both pools have already passed status + scope
-      // filtering in `candidates`, so a rejected `always` rule is never here.
+      // Applicability split. All pools have already passed status + scope filtering
+      // in `candidates`, so a rejected rule of any kind is never here.
       const alwaysPool = candidates.filter((p) => p.applicability === "always");
-      const relevantPool = candidates.filter((p) => p.applicability !== "always");
+      const conditionalPool = candidates.filter((p) => p.applicability === "conditional");
+      const relevantPool = candidates.filter((p) => p.applicability === "relevant");
+
+      // Conditional pool: evaluate each condition deterministically against the
+      // runtime context. Only matches are eligible — a conditional NEVER falls back
+      // to relevance, and an unevaluable condition does not match.
+      const evaluations = conditionalPool.map((pref) => ({
+        pref,
+        result: pref.condition
+          ? evaluateCondition(pref.condition, runtimeContext)
+          : { matched: false, reason: "missing condition" },
+      }));
+      const matchedConditional = evaluations.filter((e) => e.result.matched).map((e) => e.pref);
 
       // `relevant` rules keep their original behavior: score against the task and
-      // drop anything below the threshold. `always` rules bypass scoring entirely.
+      // drop anything below the threshold. `always` + matched `conditional` bypass
+      // scoring entirely.
       const scoredRelevant = this.rank(relevantPool, task);
       const scoredAlways = alwaysPool.map((pref) => ({ pref, relevance: ALWAYS_RELEVANCE }));
+      const scoredConditional = matchedConditional.map((pref) => ({
+        pref,
+        relevance: CONDITIONAL_RELEVANCE,
+      }));
 
-      // Resolve conflicts/precedence across the WHOLE set, so an always rule and a
-      // relevant rule competing for the same exclusive decision are reconciled and
-      // a repo rule can still override a global one.
-      const combined = [...scoredAlways, ...scoredRelevant];
+      // Resolve conflicts/precedence across the WHOLE set, so an always rule, a
+      // matched conditional and a relevant rule competing for the same exclusive
+      // decision are reconciled and a repo rule can still override a global one.
+      // Conditionals are NOT special-cased in precedence — they compete exactly
+      // like any other preference once their condition has matched.
+      const combined = [...scoredAlways, ...scoredConditional, ...scoredRelevant];
       const { winners, overridden } = resolveConflicts(combined.map((s) => s.pref));
       const winnerIds = new Set(winners.map((w) => w.id));
 
-      // Cap each pool independently so the relevance top-K can never silently
-      // starve the always-on rules, and vice-versa.
+      // Cap each pool independently so no pool can silently starve another.
+      const byPrecedenceAgeId = (a: Scored, b: Scored) =>
+        precedenceRank(a.pref) - precedenceRank(b.pref) ||
+        a.pref.createdAt.localeCompare(b.pref.createdAt) ||
+        a.pref.id.localeCompare(b.pref.id);
+
       const keptAlways = scoredAlways
         .filter((s) => winnerIds.has(s.pref.id))
-        .sort(
-          (a, b) =>
-            precedenceRank(a.pref) - precedenceRank(b.pref) ||
-            a.pref.createdAt.localeCompare(b.pref.createdAt) ||
-            a.pref.id.localeCompare(b.pref.id),
-        )
+        .sort(byPrecedenceAgeId)
         .slice(0, MAX_ALWAYS);
+      const keptConditional = scoredConditional
+        .filter((s) => winnerIds.has(s.pref.id))
+        .sort(byPrecedenceAgeId)
+        .slice(0, MAX_CONDITIONAL);
       const keptRelevant = scoredRelevant
         .filter((s) => winnerIds.has(s.pref.id))
         .sort(
@@ -208,9 +297,20 @@ export class RetrievalEngine {
         )
         .slice(0, limit);
 
-      // Always-on rules lead the block (they apply unconditionally), then the
+      const conditionalEvaluations: ConditionalEvaluation[] | undefined = opts.explain
+        ? evaluations.map((e) => ({
+            id: e.pref.id,
+            rule: e.pref.rule,
+            scope: e.pref.scope,
+            matched: e.result.matched,
+            reason: e.result.reason,
+            condition: e.pref.condition,
+          }))
+        : undefined;
+
+      // Unconditional (always) rules lead, then matched conditionals, then the
       // task-relevant matches in relevance order.
-      return { top: [...keptAlways, ...keptRelevant], overridden };
+      return { top: [...keptAlways, ...keptConditional, ...keptRelevant], overridden, conditionalEvaluations };
     });
 
     // Best-effort write, outside the read snapshot. Skipped when track === false
@@ -234,6 +334,19 @@ export class RetrievalEngine {
       })),
       environments: this.environments(repo),
       overridden,
+      ...(opts.explain
+        ? {
+            runtimeContext: {
+              cwd: runtimeContext.cwd,
+              repo: runtimeContext.repo,
+              task: runtimeContext.task,
+              files: runtimeContext.files,
+              languages: [...runtimeContext.languages].sort(),
+              domain: runtimeContext.domain,
+            },
+            conditionalEvaluations: conditionalEvaluations ?? [],
+          }
+        : {}),
     };
   }
 
