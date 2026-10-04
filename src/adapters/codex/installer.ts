@@ -2,6 +2,19 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { withFileLock } from "../../utils/fs.ts";
 import {
+  CTX_MEMORY_SKILL_NAME,
+  renderMemorySkill,
+} from "../../core/assets/memory-protocol.ts";
+import {
+  upsertSkill,
+  removeSkill,
+  skillFile,
+  skillHealth,
+  type SkillAction,
+  type SkillRemoveAction,
+  type SkillHealth,
+} from "../../core/assets/skill-install.ts";
+import {
   codexHome,
   codexHooksFile,
   upsertCodexHook,
@@ -12,18 +25,21 @@ import {
 } from "./hook.ts";
 
 /**
- * Install the goatedcontext Codex adapter — the RUNTIME channel only.
+ * Install the goatedcontext Codex adapter. Two native channels:
+ *   - RUNTIME read: a `UserPromptSubmit` hook in `~/.codex/hooks.json`
+ *     (`ctx hook codex-prompt`) that injects relevant preferences per prompt.
+ *   - MEMORY WRITE: a standalone SKILL.md at `$CODEX_HOME/skills/goatedcontext/`
+ *     teaching the canonical remember/propose/forget protocol, so Codex writes
+ *     durable preferences back without the user running `ctx` by hand.
  *
- * Codex gets its standing repo rules from the per-repo `AGENTS.md` written by
- * `ctx sync` (shared with Cursor); global `always` / `relevant` / matching
- * `conditional` reach Codex dynamically through a `UserPromptSubmit` hook in
- * `~/.codex/hooks.json` that calls `ctx hook codex-prompt`. Per the corrected
- * 0.2.9 policy we deliberately do NOT write a global `~/.codex/AGENTS.md`: a
- * personal/global preference must not be materialized into a static file.
+ * (Codex's current skills root is `~/.agents/skills`; `$CODEX_HOME/skills` is
+ * deprecated-but-supported and is what this release targets per spec. Repo rules
+ * still come from the shared `AGENTS.md` written by `ctx sync`; no global
+ * `~/.codex/AGENTS.md` is written.)
  *
- * Owns ONLY its own hook entry; unrelated Codex hooks/config are preserved.
- * Idempotent and lock-guarded. `installCodex` doubles as repair (converges to the
- * desired state regardless of prior state).
+ * Owns ONLY its own hook entry and its own `goatedcontext` skill dir; unrelated
+ * Codex hooks/config/skills are preserved. Idempotent and lock-guarded.
+ * `installCodex` doubles as repair (converges to the desired state).
  */
 
 export interface CodexInstallOptions {
@@ -38,6 +54,8 @@ export interface CodexInstallResult {
   home: string;
   hooksFile: string;
   hookAction: HookAction;
+  skillFile: string;
+  skillAction: SkillAction;
 }
 
 function resolveHome(opts: CodexInstallOptions): string {
@@ -53,29 +71,37 @@ export function installCodex(opts: CodexInstallOptions = {}): CodexInstallResult
     const hookAction = opts.disableHook
       ? removeCodexHook(hooksFile)
       : upsertCodexHook(hooksFile, opts.hookCommand ?? CODEX_HOOK_COMMAND_DEFAULT);
-    return { home, hooksFile, hookAction };
+    const skillAction = upsertSkill(home, CTX_MEMORY_SKILL_NAME, renderMemorySkill());
+    return { home, hooksFile, hookAction, skillFile: skillFile(home, CTX_MEMORY_SKILL_NAME), skillAction };
   });
 }
 
-/** Repair is identical to install: both converge to the desired hook state. */
+/** Repair is identical to install: both converge to the desired hook + skill state. */
 export const repairCodex = installCodex;
 
 export interface CodexUninstallResult {
   home: string;
   hooksFile: string;
   hookAction: HookAction;
+  skillAction: SkillRemoveAction;
 }
 
-/** Remove the goatedcontext Codex hook. Repo AGENTS.md (shared) is left to `ctx sync --remove`. */
+/** Remove the goatedcontext Codex hook + memory skill. Repo AGENTS.md is left to `ctx sync --remove`. */
 export function uninstallCodex(opts: CodexInstallOptions = {}): CodexUninstallResult {
   const home = resolveHome(opts);
   const hooksFile = codexHooksFile(home);
-  if (!existsSync(home)) return { home, hooksFile, hookAction: "absent" };
+  if (!existsSync(home)) return { home, hooksFile, hookAction: "absent", skillAction: "absent" };
   const lockFile = join(home, ".ctx-install.lock");
   return withFileLock(lockFile, () => {
     const hookAction = removeCodexHook(hooksFile);
-    return { home, hooksFile, hookAction };
+    const skillAction = removeSkill(home, CTX_MEMORY_SKILL_NAME);
+    return { home, hooksFile, hookAction, skillAction };
   });
+}
+
+/** Health of the installed Codex memory skill versus the current protocol. */
+export function codexSkillHealth(home: string): SkillHealth {
+  return skillHealth(home, CTX_MEMORY_SKILL_NAME, renderMemorySkill());
 }
 
 export { detectCodexHook };

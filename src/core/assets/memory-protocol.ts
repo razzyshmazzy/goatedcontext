@@ -1,18 +1,42 @@
----
-name: context-learn
-description: >-
-  Persist, update, and retract the developer's durable coding preferences in goatedcontext (ctx). Use whenever the developer states, changes, or revokes a lasting preference or project convention (e.g. "always use Bun in this repo", "from now on use tabs", "forget that I prefer Postgres") so it follows them across repos and reaches every agent — without them running ctx by hand.
----
+/**
+ * THE canonical goatedcontext "memory protocol".
+ *
+ * Supported agents must not merely READ ctx — they must know when to WRITE durable
+ * developer preferences back, so the user never has to run `ctx remember/propose/
+ * forget` by hand. This file is the SINGLE source of that behavioral policy. Every
+ * agent adapter (Claude skill, Codex SKILL.md, Cursor skill/rule) renders the SAME
+ * body from here; only the host-required frontmatter wrapper differs. Parity tests
+ * assert the body is byte-identical across all three.
+ *
+ * This is instruction text, not code: the agent already understands natural
+ * language; the protocol tells it WHEN to call the deterministic `ctx` commands.
+ * There is NO background daemon, LLM, scraper, or embedding here (and there must
+ * never be) — see the 0.2.10 spec §26.
+ */
 
-# goatedcontext memory protocol
+/**
+ * Bump when the body below changes in a way installers must re-sync. Adapters store
+ * this marker in the rendered artifact so `ctx doctor` can flag a STALE skill (an
+ * old installed body) and `ctx repair` can converge it.
+ */
+export const MEMORY_PROTOCOL_VERSION = "1";
 
-`goatedcontext` (the `ctx` CLI) is the developer's persistent context store. You
+/** Hidden marker embedded in every rendered artifact for staleness detection. */
+export const MEMORY_PROTOCOL_MARKER = `<!-- ctx-memory-protocol: v${MEMORY_PROTOCOL_VERSION} -->`;
+
+/**
+ * The canonical protocol body (identical for every agent). Starts at the top-level
+ * heading; the host wrapper supplies frontmatter above it.
+ */
+export const MEMORY_PROTOCOL_BODY = `# goatedcontext memory protocol
+
+\`goatedcontext\` (the \`ctx\` CLI) is the developer's persistent context store. You
 already RECEIVE relevant preferences automatically. This skill tells you when to
-WRITE durable preferences back, so the developer never has to run `ctx` by hand.
-Use the `ctx` CLI for every memory operation — never edit `~/.ctx`, the SQLite
-database, or `AGENTS.md` directly, and prefer `--json` output when you parse.
+WRITE durable preferences back, so the developer never has to run \`ctx\` by hand.
+Use the \`ctx\` CLI for every memory operation — never edit \`~/.ctx\`, the SQLite
+database, or \`AGENTS.md\` directly, and prefer \`--json\` output when you parse.
 
-## 1. Durable preference → persist with `ctx remember`
+## 1. Durable preference → persist with \`ctx remember\`
 
 When the developer clearly states a lasting preference, persist it. Judge INTENT,
 not keywords, but these words usually signal persistence: always, never, from now
@@ -52,7 +76,7 @@ Never silently turn a local convention into a global rule.
     "I prefer Postgres for relational data." / "Prefer simple architectures."
 Do NOT force every preference into --always.
 
-## 2. Inferred preference → `ctx propose`, never `ctx remember`
+## 2. Inferred preference → \`ctx propose\`, never \`ctx remember\`
 
 If the developer did NOT explicitly state a durable preference but you notice a
 likely recurring one from behavior (e.g. they keep switching npm -> Bun across
@@ -72,7 +96,7 @@ signals persistence. Never persist these:
 - "For this one migration, avoid triggers."
 Interpret intent conservatively; never use keyword-only logic.
 
-## 4. Retraction / correction → `ctx forget` (or replace)
+## 4. Retraction / correction → \`ctx forget\` (or replace)
 
 "Stop using Bun in this repo." / "Forget that I prefer Postgres." / "Actually use
 npm from now on." / "Don't remember that anymore."
@@ -94,7 +118,7 @@ delete.
 Never put into preferences: passwords, API keys, tokens, private keys,
 credentials, or secret environment values — nor source code, private file
 contents, customer data, or large task context. Preferences describe durable
-developer BEHAVIOR and context. Secret VALUES belong only in `ctx env`.
+developer BEHAVIOR and context. Secret VALUES belong only in \`ctx env\`.
 
 ## 6. Be invisible, and never block the task
 
@@ -102,12 +126,45 @@ developer BEHAVIOR and context. Secret VALUES belong only in `ctx env`.
   narrate the command ("I ran ctx remember ...") unless the developer asks, it
   fails, or it materially affects what they need to know. It should feel like
   memory, not CLI orchestration.
-- Allowed memory operations: `ctx remember`, `ctx propose`, `ctx forget`,
-  `ctx prefs`, `ctx why`. Pass `--agent-id`/`--session-id` when your host
+- Allowed memory operations: \`ctx remember\`, \`ctx propose\`, \`ctx forget\`,
+  \`ctx prefs\`, \`ctx why\`. Pass \`--agent-id\`/\`--session-id\` when your host
   exposes a session id. Nothing else mutates ctx.
-- If `ctx` is unavailable or a write fails: do NOT fail the developer's task and
+- If \`ctx\` is unavailable or a write fails: do NOT fail the developer's task and
   do NOT retry in a loop. If the preference was explicit, mention briefly at the
   end — "I followed that preference here, but couldn't persist it to ctx." — with
   no stack traces or implementation noise.
 
-<!-- ctx-memory-protocol: v1 -->
+${MEMORY_PROTOCOL_MARKER}`;
+
+/** Shared one-line description (hosts may tweak only trivially in their frontmatter). */
+export const MEMORY_PROTOCOL_DESCRIPTION =
+  "Persist, update, and retract the developer's durable coding preferences in goatedcontext (ctx). Use whenever the developer states, changes, or revokes a lasting preference or project convention (e.g. \"always use Bun in this repo\", \"from now on use tabs\", \"forget that I prefer Postgres\") so it follows them across repos and reaches every agent — without them running ctx by hand.";
+
+/**
+ * Render a SKILL.md-style artifact (YAML frontmatter + the canonical body). Used by
+ * the Claude and Codex adapters (same format); Cursor supplies its own wrapper.
+ */
+export function renderSkillMd(opts: { name: string; description?: string }): string {
+  const description = (opts.description ?? MEMORY_PROTOCOL_DESCRIPTION).trim();
+  return `---\nname: ${opts.name}\ndescription: >-\n  ${description}\n---\n\n${MEMORY_PROTOCOL_BODY}\n`;
+}
+
+/** Extract the canonical body from a rendered artifact (strips any leading frontmatter). */
+export function extractProtocolBody(rendered: string): string {
+  const fm = rendered.match(/^---\n[\s\S]*?\n---\n+/);
+  const body = fm ? rendered.slice(fm[0].length) : rendered;
+  return body.trim();
+}
+
+/**
+ * The skill NAME (and therefore folder name — Codex/Cursor require they match) for
+ * the standalone memory skill installed into Codex and Cursor. Claude's adapter
+ * renders the same body under its existing `context-learn` skill instead of adding
+ * a new one.
+ */
+export const CTX_MEMORY_SKILL_NAME = "goatedcontext";
+
+/** The rendered SKILL.md shared by the Codex and Cursor memory-skill installers. */
+export function renderMemorySkill(): string {
+  return renderSkillMd({ name: CTX_MEMORY_SKILL_NAME });
+}

@@ -408,23 +408,38 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
     // suppresses the others). Absent agents are normal, so these never `fail` — a
     // detected-but-unconfigured agent is a `warn` with an actionable fix.
     const statuses = agentStatuses({ env, cwd: deps.cwd, claudeHome: deps.claudeHome });
+    const repairHint = (id: string) => (id === "claude" ? "ctx install claude --repair" : `ctx repair ${id}`);
     for (const s of statuses) {
-      if (s.id === "claude") continue; // covered by the detailed checks above
-      let status: CheckStatus;
-      let detail: string;
-      let fix: string | undefined;
-      if (s.healthy) {
-        status = "ok";
-        detail = "configured";
-      } else if (s.detected) {
-        status = "warn";
-        detail = "installed but not configured for ctx";
-        fix = `Run \`ctx install ${s.id}\`.`;
-      } else {
-        status = "ok";
-        detail = "not installed (optional)";
+      if (s.id !== "claude") {
+        // Overall integration (Claude's is covered by the detailed checks above).
+        let status: CheckStatus;
+        let detail: string;
+        let fix: string | undefined;
+        if (s.healthy) {
+          status = "ok";
+          detail = "configured";
+        } else if (s.detected) {
+          status = "warn";
+          detail = "installed but not fully configured for ctx";
+          fix = `Run \`ctx install ${s.id}\`.`;
+        } else {
+          status = "ok";
+          detail = "not installed (optional)";
+        }
+        add({ section: s.label, id: `${s.id}-adapter`, label: "ctx integration", status, detail, fix });
       }
-      add({ section: s.label, id: `${s.id}-adapter`, label: "ctx integration", status, detail, fix });
+      // Memory-WRITE skill/guidance, verified per DETECTED agent (incl. Claude).
+      if (s.detected) {
+        const mh = s.memorySkill.health;
+        add({
+          section: s.label,
+          id: `${s.id}-memory-skill`,
+          label: "ctx memory skill",
+          status: mh === "current" ? "ok" : "warn",
+          detail: mh === "current" ? "installed" : mh === "stale" ? "stale" : "missing",
+          fix: mh === "current" ? undefined : `Run \`${repairHint(s.id)}\`.`,
+        });
+      }
     }
   }
 

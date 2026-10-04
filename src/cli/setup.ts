@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { CtxContext } from "../core/context.ts";
 import { installClaude, type ClaudeInstallResult } from "../adapters/claude/installer.ts";
 import { installCodex } from "../adapters/codex/installer.ts";
+import { installCursorSkill } from "../adapters/cursor/installer.ts";
 import { syncProject } from "../core/project/sync.ts";
 import { agentStatuses } from "../core/agents/registry.ts";
 import type { AgentId } from "../core/agents/capabilities.ts";
@@ -101,6 +102,8 @@ export interface SetupOptions {
   claudeHome?: string;
   /** Override the Codex config dir ($CODEX_HOME or ~/.codex). */
   codexHome?: string;
+  /** Override the Cursor config dir (~/.cursor). */
+  cursorHome?: string;
   /** Working directory used to resolve the repo for Codex/Cursor static projection. */
   cwd?: string;
   /**
@@ -375,7 +378,7 @@ export function runSetup(opts: SetupOptions): SetupResult {
   const auto = Boolean(opts.autoDetectAgents);
   const detectedAgents = new Set<AgentId>(
     auto
-      ? agentStatuses({ env, cwd, claudeHome: opts.claudeHome, codexHome: opts.codexHome })
+      ? agentStatuses({ env, cwd, claudeHome: opts.claudeHome, codexHome: opts.codexHome, cursorHome: opts.cursorHome })
           .filter((s) => s.detected)
           .map((s) => s.id)
       : [],
@@ -429,13 +432,16 @@ export function runSetup(opts: SetupOptions): SetupResult {
     }
   }
   if (auto && detectedAgents.has("cursor")) {
-    const synced = syncRepoSafe();
-    agentsConfigured.push("cursor");
-    agentLines.push(
-      synced
-        ? "✓ Cursor integration"
-        : "· Cursor detected — run `ctx sync` inside a repo to project its AGENTS.md",
-    );
+    // Cursor gets the global memory-WRITE skill (always installable) + the repo's
+    // static AGENTS.md READ projection when inside a repo.
+    try {
+      installCursorSkill({ home: opts.cursorHome });
+      syncRepoSafe();
+      agentsConfigured.push("cursor");
+      agentLines.push("✓ Cursor integration");
+    } catch {
+      warnings.push("Could not configure the Cursor adapter (left untouched).");
+    }
   }
 
   // 6. Will a brand-new shell find `ctx`? (Only a hint; not a failure on its own

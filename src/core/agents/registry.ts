@@ -8,12 +8,17 @@ import {
   capabilitiesFor,
 } from "./capabilities.ts";
 import { detectPromptHook } from "../../adapters/claude/hook.ts";
-import { CTX_INSTRUCTION_BEGIN } from "../../adapters/claude/skills.ts";
+import { CTX_INSTRUCTION_BEGIN, CLAUDE_SKILLS } from "../../adapters/claude/skills.ts";
 import { codexHome, codexHooksFile, detectCodexHook } from "../../adapters/codex/hook.ts";
+import { codexSkillHealth } from "../../adapters/codex/installer.ts";
+import { cursorSkillHealth } from "../../adapters/cursor/installer.ts";
 import { AGENTS_BEGIN, AGENTS_END } from "../project/projection.ts";
+import { skillHealth, type SkillHealth } from "../assets/skill-install.ts";
 import { hasManagedBlock } from "../../utils/managed-block.ts";
 import { gitToplevel } from "../../utils/git.ts";
 import { whichSync } from "../../utils/runtime.ts";
+
+const CONTEXT_LEARN_CONTENT = CLAUDE_SKILLS.find((s) => s.dir === "context-learn")!.content;
 
 /**
  * The agent registry: one clean place that knows the supported agents, their
@@ -31,6 +36,8 @@ export interface AgentStatusOptions {
   claudeHome?: string;
   /** Override the Codex config dir ($CODEX_HOME or ~/.codex). */
   codexHome?: string;
+  /** Override the Cursor config dir (~/.cursor). */
+  cursorHome?: string;
 }
 
 export interface AgentStatus {
@@ -47,6 +54,8 @@ export interface AgentStatus {
   staticPresent: boolean;
   /** Where this agent's ctx-relevant config lives. */
   configPath: string;
+  /** The ctx memory-WRITE skill/guidance for this agent (teaches remember/propose/forget). */
+  memorySkill: { installed: boolean; health: SkillHealth };
   /** Agent version when cheaply available; otherwise null (we never spawn to find out). */
   version: string | null;
   /** Short, human-readable notes (missing pieces, honest limitations). */
@@ -98,12 +107,16 @@ function claudeStatus(opts: AgentStatusOptions): AgentStatus {
   })();
   const instructions = safeIncludes(join(home, "CLAUDE.md"), CTX_INSTRUCTION_BEGIN);
   const skills = existsSync(join(home, "skills", "context", "SKILL.md"));
+  const memHealth = skillHealth(home, "context-learn", CONTEXT_LEARN_CONTENT);
+  const memorySkill = { installed: memHealth !== "missing", health: memHealth };
   const installed = hook || instructions || skills;
-  const healthy = hook && instructions && skills;
+  const healthy = hook && instructions && skills && memHealth === "current";
   const notes: string[] = [];
   if (installed && !hook) notes.push("prompt hook missing (repair: ctx install claude --repair)");
   if (installed && !instructions) notes.push("instruction block missing");
   if (installed && !skills) notes.push("skills missing");
+  if (installed && memHealth === "stale") notes.push("memory skill stale (repair: ctx install claude --repair)");
+  if (installed && memHealth === "missing") notes.push("memory skill missing (repair: ctx install claude --repair)");
   return {
     id: "claude",
     label: LABELS.claude,
@@ -113,6 +126,7 @@ function claudeStatus(opts: AgentStatusOptions): AgentStatus {
     healthy,
     staticPresent: false, // Claude is delivered at runtime; we don't project AGENTS.md for it
     configPath: home,
+    memorySkill,
     version: null,
     notes,
   };
@@ -136,17 +150,24 @@ function codexStatus(opts: AgentStatusOptions): AgentStatus {
       return false;
     }
   })();
+  const memHealth = codexSkillHealth(home);
+  const memorySkill = { installed: memHealth !== "missing", health: memHealth };
+  const anyInstalled = installed || memorySkill.installed;
   const notes: string[] = [];
-  if (!installed && (existsSync(home) || onPath)) notes.push("not configured (run: ctx install codex)");
+  if (!anyInstalled && (existsSync(home) || onPath)) notes.push("not configured (run: ctx install codex)");
+  if (anyInstalled && !installed) notes.push("prompt hook missing (repair: ctx repair codex)");
+  if (anyInstalled && memHealth === "stale") notes.push("memory skill stale (repair: ctx repair codex)");
+  if (anyInstalled && memHealth === "missing") notes.push("memory skill missing (repair: ctx repair codex)");
   return {
     id: "codex",
     label: LABELS.codex,
     capabilities: CODEX_CAPS,
     detected: existsSync(home) || onPath,
-    installed,
-    healthy: installed,
+    installed: anyInstalled,
+    healthy: installed && memHealth === "current",
     staticPresent: repoAgentsBlockPresent(opts.cwd ?? process.cwd()),
     configPath: home,
+    memorySkill,
     version: null,
     notes,
   };
@@ -154,7 +175,7 @@ function codexStatus(opts: AgentStatusOptions): AgentStatus {
 
 function cursorStatus(opts: AgentStatusOptions): AgentStatus {
   const cwd = opts.cwd ?? process.cwd();
-  const globalDir = join(homedir(), ".cursor");
+  const globalDir = opts.cursorHome ?? join(homedir(), ".cursor");
   const repoRoot = (() => {
     try {
       return gitToplevel(cwd);
@@ -163,19 +184,28 @@ function cursorStatus(opts: AgentStatusOptions): AgentStatus {
     }
   })();
   const staticPresent = repoAgentsBlockPresent(cwd);
-  const installed = staticPresent; // Cursor's only channel is the repo AGENTS.md block
+  const memHealth = cursorSkillHealth({ home: globalDir });
+  const memorySkill = { installed: memHealth !== "missing", health: memHealth };
+  // Cursor has two channels: the repo AGENTS.md (static READ) and the global memory
+  // skill (WRITE). "installed" = either is present; "healthy" requires the write
+  // skill current and, when in a repo, the static block present.
+  const installed = staticPresent || memorySkill.installed;
+  const healthy = memHealth === "current" && (repoRoot ? staticPresent : true);
   const notes = ["runtime injection unavailable (Cursor hooks cannot inject context)"];
-  if (!installed && repoRoot) notes.push("not projected into this repo (run: ctx install cursor)");
-  if (!repoRoot) notes.push("not inside a git repo — Cursor static projection is repo-scoped");
+  if (memHealth === "stale") notes.push("memory skill stale (repair: ctx repair cursor)");
+  if (memHealth === "missing") notes.push("memory skill missing (run: ctx install cursor)");
+  if (!staticPresent && repoRoot) notes.push("repo AGENTS.md not projected (run: ctx sync)");
+  if (!repoRoot) notes.push("not inside a git repo — the repo AGENTS.md projection is repo-scoped");
   return {
     id: "cursor",
     label: LABELS.cursor,
     capabilities: CURSOR_CAPS,
     detected: existsSync(globalDir) || installed,
     installed,
-    healthy: installed,
+    healthy,
     staticPresent,
     configPath: repoRoot ? join(repoRoot, "AGENTS.md") : globalDir,
+    memorySkill,
     version: null,
     notes,
   };

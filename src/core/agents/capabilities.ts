@@ -26,6 +26,8 @@ export interface AgentCapabilities {
   fileContextAvailable: boolean;
   /** Does the agent support once-per-session context injection? */
   sessionInjection: boolean;
+  /** Can we install a native skill teaching the ctx memory-WRITE protocol? */
+  memorySkill: boolean;
 }
 
 /**
@@ -42,6 +44,7 @@ export const CLAUDE_CAPABILITIES: AgentCapabilities = {
   promptAvailable: true,
   fileContextAvailable: false,
   sessionInjection: false,
+  memorySkill: true,
 };
 
 /**
@@ -56,6 +59,7 @@ export const CODEX_CAPABILITIES: AgentCapabilities = {
   promptAvailable: true,
   fileContextAvailable: false,
   sessionInjection: false,
+  memorySkill: true,
 };
 
 /**
@@ -73,6 +77,7 @@ export const CURSOR_CAPABILITIES: AgentCapabilities = {
   promptAvailable: false,
   fileContextAvailable: false,
   sessionInjection: false,
+  memorySkill: true,
 };
 
 /**
@@ -89,6 +94,7 @@ export const AGENTS_FILE_CAPABILITIES: AgentCapabilities = {
   promptAvailable: false,
   fileContextAvailable: false,
   sessionInjection: false,
+  memorySkill: false,
 };
 
 export function capabilitiesFor(id: AgentId): AgentCapabilities {

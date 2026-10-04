@@ -91,6 +91,19 @@ faked or broadened). `AGENTS.md` never contains your global or task-specific
 preferences. Commit `AGENTS.md` to share repo context with your team. See
 [ARCHITECTURE.md](./ARCHITECTURE.md) for the full model.
 
+### Agents remember for you
+
+`setup`/`install` also teach each agent *when to write preferences back* — so you
+never run `ctx remember` by hand. Just say it in normal conversation:
+
+> **You:** Always use Bun in this repo.
+> **Agent:** *(persists it to ctx, then continues)*
+
+Explicit durable preferences are saved automatically (scoped conservatively);
+one-off task instructions are not; "forget that I prefer Postgres" removes it; and
+secrets are never stored. This guidance is installed as a native skill for each
+agent — run `ctx agents` to see which have it.
+
 ## Secrets & environments
 
 Reusable environment-variable bundles.

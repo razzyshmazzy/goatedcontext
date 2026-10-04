@@ -560,3 +560,48 @@ adapters translate native input → `RuntimeContext` and canonical plan → nati
 delivery, nothing more. `ctx agents` lists each adapter's capabilities and health;
 `ctx doctor` diagnoses each independently; stats carry backward-compatible per-agent
 counters (`hook_runs_by_agent`, `context_injections_by_agent`).
+
+## Agents WRITE ctx too — the memory protocol (0.2.10)
+
+Reading preferences is only half of persistent context. 0.2.10 teaches every
+supported agent to WRITE durable preferences back, so a developer who says
+"always use Bun in this repo" never has to run `ctx remember` by hand.
+
+- **One canonical source.** The behavioral policy lives once, in
+  `src/core/assets/memory-protocol.ts` (`MEMORY_PROTOCOL_BODY` + a version marker).
+  It is instruction text, not a background process — there is no daemon, no extra
+  LLM, no embeddings, no conversation scraping. The agent already understands
+  language; the skill tells it WHEN to call the deterministic `ctx` commands.
+- **Native skill surfaces, identical body.** It is installed through each host's
+  own Agent-Skills (`SKILL.md`) surface — Claude's existing `context-learn` skill,
+  Codex at `$CODEX_HOME/skills/goatedcontext/SKILL.md` (the `~/.agents/skills` path
+  is newer; `$CODEX_HOME/skills` is still supported), and a **user** Cursor skill at
+  `~/.cursor/skills/goatedcontext/SKILL.md` (Cursor's only file-based, all-projects
+  mechanism; global rules are UI-only). Only the frontmatter wrapper differs; the
+  body is byte-identical across all three (parity-tested).
+- **The decision policy it teaches** (conservative by design):
+  - *Explicit durable preference* ("always use Bun in this repo", "from now on use
+    tabs") → `ctx remember`, silently. Scope: repo for "this repo/project/here",
+    global only when clearly cross-project; **ambiguous → repo**. Applicability:
+    `--always` for universal directives, `--when key=value` for explicit conditions,
+    else the default `relevant`.
+  - *Inferred* (a recurring pattern, not stated) → `ctx propose`, never `remember`;
+    a single isolated request persists nothing.
+  - *One-off task instruction* ("use Python for this script", "make this button
+    red") → store **nothing**.
+  - *Retraction* ("forget that I prefer Postgres", "actually use npm from now on")
+    → look up (`ctx prefs`/`ctx why`) then `ctx forget`, or persist the replacement;
+    if ambiguous, ask ONE clarification — never guess which memory to delete.
+  - *Secrets / task data* → never preference-stored (those belong in `ctx env`).
+  - Operate silently (don't narrate the CLI), and never fail or block the task if a
+    write fails — mention it briefly only if an explicit preference couldn't persist.
+- **Separation from AGENTS.md.** This is agent-level TOOLING — it is deliberately
+  NOT placed in the repo `AGENTS.md`, which remains the static projection of repo
+  approved/locked always preferences (the READ side). The skill teaches HOW to use
+  ctx; ctx remains the source of WHAT the preferences are.
+- **Lifecycle.** `ctx install <agent>`, `ctx repair <agent>`, and `ctx setup`
+  (auto-detecting installed agents) all install/converge the memory skill; uninstall
+  removes only the goatedcontext-owned skill directory, preserving unrelated skills.
+  `ctx agents` and `ctx doctor` report each adapter's memory-skill health
+  (`current`/`stale`/`missing`) via a version marker embedded in the installed file,
+  so an out-of-date skill is flagged with a concrete repair command.

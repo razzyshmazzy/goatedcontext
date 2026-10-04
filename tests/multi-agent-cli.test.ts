@@ -253,3 +253,96 @@ test(
   },
   TIMEOUT,
 );
+
+// ---- 0.2.10: memory-write skill installation ---------------------------------
+
+test(
+  "install codex + cursor install the memory skill; ctx agents reports it current",
+  async () => {
+    const h = home();
+    const codexHome = mkdtempSync(join(tmpdir(), "ctx-ma-codex3-"));
+    const cursorHome = mkdtempSync(join(tmpdir(), "ctx-ma-cursor-"));
+    const repo = gitRepo();
+    const env = { CTX_HOME: h, CODEX_HOME: codexHome };
+    try {
+      await run(["install", "codex", "--codex-home", codexHome, "--cwd", repo], env);
+      await run(["install", "cursor", "--cursor-home", cursorHome, "--cwd", repo], env);
+      expect(existsSync(join(codexHome, "skills", "goatedcontext", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(cursorHome, "skills", "goatedcontext", "SKILL.md"))).toBe(true);
+
+      const agents = JSON.parse(
+        (await run(["agents", "--codex-home", codexHome, "--cursor-home", cursorHome, "--cwd", repo, "--json"], env)).stdout,
+      );
+      const codex = agents.find((a: { id: string }) => a.id === "codex");
+      const cursor = agents.find((a: { id: string }) => a.id === "cursor");
+      expect(codex.memorySkill.health).toBe("current");
+      expect(cursor.memorySkill.health).toBe("current");
+      expect(codex.capabilities.memorySkill).toBe(true);
+    } finally {
+      for (const d of [h, codexHome, cursorHome, repo]) rmSync(d, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "doctor flags a missing/stale codex memory skill; repair codex restores it",
+  async () => {
+    const h = home();
+    const codexHome = mkdtempSync(join(tmpdir(), "ctx-ma-codex4-"));
+    const fakeHome = mkdtempSync(join(tmpdir(), "ctx-ma-fh-"));
+    const repo = gitRepo();
+    const env = { CTX_HOME: h, CODEX_HOME: codexHome, HOME: fakeHome, USERPROFILE: fakeHome };
+    try {
+      await run(["install", "codex", "--codex-home", codexHome, "--cwd", repo], env);
+      // Remove just the skill file to simulate a stale/missing skill.
+      rmSync(join(codexHome, "skills", "goatedcontext"), { recursive: true, force: true });
+
+      const doc = JSON.parse((await run(["doctor", "--json", "--cwd", repo], env)).stdout);
+      const check = doc.checks.find((c: { id: string }) => c.id === "codex-memory-skill");
+      expect(check).toBeTruthy();
+      expect(check.status).toBe("warn");
+      expect(check.fix).toContain("ctx repair codex");
+
+      const rep = await run(["repair", "codex", "--codex-home", codexHome, "--cwd", repo], env);
+      expect(rep.code).toBe(0);
+      expect(existsSync(join(codexHome, "skills", "goatedcontext", "SKILL.md"))).toBe(true);
+    } finally {
+      for (const d of [h, codexHome, fakeHome, repo]) rmSync(d, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "setup auto-detect installs the memory skill for each detected agent (no manual step)",
+  async () => {
+    const h = home();
+    const claudeHome = mkdtempSync(join(tmpdir(), "ctx-ma-cl-"));
+    const codexHome = mkdtempSync(join(tmpdir(), "ctx-ma-cx-"));
+    const cursorHome = mkdtempSync(join(tmpdir(), "ctx-ma-cu-"));
+    const repo = gitRepo();
+    const fakeHome = mkdtempSync(join(tmpdir(), "ctx-ma-fh2-"));
+    const env = { CTX_HOME: h, HOME: fakeHome, USERPROFILE: fakeHome };
+    try {
+      const res = await run(
+        [
+          "setup", "--skip-global",
+          "--claude-home", claudeHome,
+          "--codex-home", codexHome,
+          "--cursor-home", cursorHome,
+          "--cwd", repo,
+        ],
+        env,
+      );
+      expect(res.code).toBe(0);
+      // Each detected agent's memory skill is installed WITHOUT any separate command.
+      expect(existsSync(join(claudeHome, "skills", "context-learn", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(codexHome, "skills", "goatedcontext", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(cursorHome, "skills", "goatedcontext", "SKILL.md"))).toBe(true);
+    } finally {
+      for (const d of [h, claudeHome, codexHome, cursorHome, repo, fakeHome]) rmSync(d, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT,
+);

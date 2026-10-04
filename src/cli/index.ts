@@ -8,6 +8,7 @@ import { CtxError, ValidationError } from "../utils/errors.ts";
 import { shortId } from "../utils/id.ts";
 import { installClaude, repairClaude, uninstallClaude } from "../adapters/claude/installer.ts";
 import { installCodex, uninstallCodex } from "../adapters/codex/installer.ts";
+import { installCursorSkill, uninstallCursorSkill } from "../adapters/cursor/installer.ts";
 import { syncProject, unsyncProject } from "../core/project/sync.ts";
 import { planDelivery } from "../core/agents/delivery.ts";
 import { capabilitiesFor, type AgentId } from "../core/agents/capabilities.ts";
@@ -223,6 +224,7 @@ export function buildProgram(deps: CliDeps): Command {
     .description("One command: initialize ctx, make it persistent, and auto-configure whichever supported agents (Claude/Codex/Cursor) are installed.")
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
     .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--cursor-home <dir>", "Override the Cursor config dir (~/.cursor)")
     .option("--cwd <dir>", "Working directory used to resolve the repo for Codex/Cursor projection", process.cwd())
     .option("--skip-global", "Don't install a persistent global `ctx` (advanced/manual installs)")
     .option("--json", "Output JSON")
@@ -232,6 +234,7 @@ export function buildProgram(deps: CliDeps): Command {
         version: VERSION,
         claudeHome: opts.claudeHome,
         codexHome: opts.codexHome,
+        cursorHome: opts.cursorHome,
         cwd: opts.cwd,
         autoDetectAgents: true,
         skipGlobalInstall: Boolean(opts.skipGlobal),
@@ -1188,6 +1191,7 @@ export function buildProgram(deps: CliDeps): Command {
     .argument("<target>", "Adapter target (claude | codex | cursor)")
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
     .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--cursor-home <dir>", "Override the Cursor config dir (~/.cursor)")
     .option("--cwd <dir>", "Working directory used to resolve the repo (codex/cursor projection)", process.cwd())
     .option("--hook-command <cmd>", "Command the agent runs for the prompt hook")
     .option("--disable-hook", "Remove the proactive-retrieval hook (keeps skills & preferences)")
@@ -1241,6 +1245,7 @@ export function buildProgram(deps: CliDeps): Command {
     .argument("<target>", "Adapter target (claude | codex | cursor)")
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
     .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--cursor-home <dir>", "Override the Cursor config dir (~/.cursor)")
     .option("--cwd <dir>", "Working directory used to resolve the repo (cursor projection)", process.cwd())
     .option("--json", "Output JSON")
     .action((target, opts) => {
@@ -1255,6 +1260,31 @@ export function buildProgram(deps: CliDeps): Command {
       line(
         `  skills:        ${result.removedSkills.length ? result.removedSkills.join(", ") : "(none present)"}`,
       );
+      line(`  instructions:  ${result.instructionsFile} (${result.instructionsAction})`);
+      line(`  prompt hook:   ${result.settingsFile} (${result.hookAction})`);
+    });
+
+  // ---- repair (converge an adapter's integration to the desired state) -----
+  program
+    .command("repair")
+    .description("Repair a ctx agent adapter — restore/update its runtime integration and memory skill. Targets: claude | codex | cursor")
+    .argument("<target>", "Adapter target (claude | codex | cursor)")
+    .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
+    .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--cursor-home <dir>", "Override the Cursor config dir (~/.cursor)")
+    .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
+    .option("--json", "Output JSON")
+    .action((target, opts) => {
+      const withRepair = { ...opts, repair: true };
+      if (target === "codex") return installCodexTarget(deps, withRepair);
+      if (target === "cursor") return installCursorTarget(deps, withRepair);
+      if (target !== "claude") {
+        throw new CtxError(`Unknown repair target "${target}". Supported: claude, codex, cursor`);
+      }
+      const result = repairClaude({ claudeHome: opts.claudeHome });
+      if (opts.json) return printJson(result);
+      line("Repaired Claude Code adapter.");
+      for (const s of result.skills) line(`  skill:         ${s.dir} (${s.action})`);
       line(`  instructions:  ${result.instructionsFile} (${result.instructionsAction})`);
       line(`  prompt hook:   ${result.settingsFile} (${result.hookAction})`);
     });
@@ -1291,6 +1321,7 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--cwd <dir>", "Working directory (Cursor/AGENTS.md projection is repo-scoped)", process.cwd())
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
     .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
+    .option("--cursor-home <dir>", "Override the Cursor config dir (~/.cursor)")
     .option("--json", "Output JSON")
     .action((opts) => {
       const statuses = agentStatuses({
@@ -1298,6 +1329,7 @@ export function buildProgram(deps: CliDeps): Command {
         cwd: opts.cwd,
         claudeHome: opts.claudeHome,
         codexHome: opts.codexHome,
+        cursorHome: opts.cursorHome,
       });
       if (opts.json) return printJson(statuses);
       for (const s of statuses) {
@@ -1306,6 +1338,14 @@ export function buildProgram(deps: CliDeps): Command {
         if (s.capabilities.runtimePromptInjection) parts.push(s.installed ? "runtime ✓" : "runtime available");
         else parts.push("runtime unavailable");
         if (s.capabilities.staticAgentsMd) parts.push(s.staticPresent ? "AGENTS.md ✓" : "AGENTS.md available");
+        // Memory-WRITE skill health.
+        parts.push(
+          s.memorySkill.health === "current"
+            ? "memory skill ✓"
+            : s.memorySkill.health === "stale"
+              ? "memory skill (stale)"
+              : "memory skill (missing)",
+        );
         line(`${s.label.padEnd(13)} ${parts.join("   ")}`);
       }
       line("");
@@ -1345,20 +1385,32 @@ function installCodexTarget(deps: CliDeps, opts: Record<string, unknown>): void 
         : `  prompt hook:   ${result.hooksFile} (${result.hookAction})`,
     );
     if (synced) line(`  repo AGENTS:   ${synced.agentsFile} (${synced.agentsAction}, ${synced.ruleCount} rule(s))`);
+    line(`  memory skill:  ${result.skillFile} (${result.skillAction})`);
     line("");
     line("Codex hooks are a new surface; if the prompt hook doesn't fire, verify hooks.json against your Codex version — repo AGENTS.md still applies statically.");
   });
 }
 
-/** `ctx install cursor` (also `--repair`): Cursor is static-only — project the repo's AGENTS.md. */
+/**
+ * `ctx install cursor` (also `--repair`): install the global memory-WRITE skill
+ * (`~/.cursor/skills/goatedcontext/`) AND project this repo's static AGENTS.md.
+ * Cursor has no runtime injection hook, so these two static files are its channels.
+ */
 function installCursorTarget(deps: CliDeps, opts: Record<string, unknown>): void {
   withContext(deps, (ctx) => {
-    const r = syncProject(ctx, (opts.cwd as string) ?? process.cwd());
-    if (opts.json) return printJson(r);
-    line(opts.repair ? `Repaired Cursor adapter for ${r.repo.name}.` : `Installed Cursor adapter for ${r.repo.name}.`);
-    line(`  AGENTS.md:     ${r.agentsFile} (${r.agentsAction}, ${r.ruleCount} repo rule(s))`);
+    const skill = installCursorSkill({ home: opts.cursorHome as string | undefined });
+    let synced: ReturnType<typeof syncProject> | null = null;
+    try {
+      synced = syncProject(ctx, (opts.cwd as string) ?? process.cwd());
+    } catch {
+      /* not in a repo — the global memory skill still installed fine */
+    }
+    if (opts.json) return printJson({ cursorSkill: skill, repoSync: synced });
+    line(opts.repair ? "Repaired Cursor adapter." : "Installed Cursor adapter.");
+    line(`  memory skill:  ${skill.skillFile} (${skill.skillAction})`);
+    if (synced) line(`  repo AGENTS:   ${synced.agentsFile} (${synced.agentsAction}, ${synced.ruleCount} repo rule(s))`);
     line("");
-    line("Cursor has no reliable prompt-time injection hook, so goatedcontext serves Cursor via AGENTS.md only (always-on). Commit it to share with your team.");
+    line("Cursor has no reliable prompt-time hook: it READS the repo AGENTS.md and learns to WRITE preferences from the user skill. (User skills are local-editor only — not cloud agents.)");
   });
 }
 
@@ -1370,16 +1422,24 @@ function uninstallCodexTarget(deps: CliDeps, opts: Record<string, unknown>): voi
   if (opts.json) return printJson(result);
   line("Removed the ctx Codex adapter. Your preferences and environments are untouched.");
   line(`  prompt hook:   ${result.hooksFile} (${result.hookAction})`);
+  line(`  memory skill:  (${result.skillAction})`);
   line("");
   line("The repo's AGENTS.md is shared with Cursor/other agents — remove it with `ctx sync --remove` in the repo.");
 }
 
 function uninstallCursorTarget(deps: CliDeps, opts: Record<string, unknown>): void {
+  const skill = uninstallCursorSkill({ home: opts.cursorHome as string | undefined });
   withContext(deps, (ctx) => {
-    const r = unsyncProject(ctx, (opts.cwd as string) ?? process.cwd());
-    if (opts.json) return printJson(r);
-    line(`Removed the ctx Cursor adapter for ${r.repo.name}.`);
-    line(`  AGENTS.md:     ${r.agentsFile} (${r.agentsAction})`);
+    let unsynced: ReturnType<typeof unsyncProject> | null = null;
+    try {
+      unsynced = unsyncProject(ctx, (opts.cwd as string) ?? process.cwd());
+    } catch {
+      /* not in a repo — the global skill removal still applied */
+    }
+    if (opts.json) return printJson({ cursorSkill: skill, repoUnsync: unsynced });
+    line("Removed the ctx Cursor adapter. Your preferences and environments are untouched.");
+    line(`  memory skill:  (${skill.skillAction})`);
+    if (unsynced) line(`  AGENTS.md:     ${unsynced.agentsFile} (${unsynced.agentsAction})`);
   });
 }
 
