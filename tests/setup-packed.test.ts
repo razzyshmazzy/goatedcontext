@@ -239,8 +239,15 @@ test(
       // them in any casing (e.g. COMSPEC vs ComSpec), so look them up case-insensitively.
       const envHas = (name: string) =>
         Object.keys(env).some((k) => k.toLowerCase() === name.toLowerCase() && env[k]);
-      const winVars = ["SystemRoot", "windir", "ComSpec", "PATHEXT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE"];
-      const missing = winVars.filter((k) => !envHas(k));
+      // The process vars that MUST survive env sanitization for `npm` to run are
+      // platform-specific. On Windows, cmd/npm need the core system vars; on POSIX
+      // those don't exist at all, and the only vars this test genuinely depends on
+      // are PATH (to resolve/run npm) and HOME (npm's cache/config). Asserting the
+      // Windows set on Ubuntu/macOS was the cross-platform CI regression.
+      const requiredVars = isWin
+        ? ["SystemRoot", "windir", "ComSpec", "PATHEXT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE"]
+        : ["PATH", "HOME"];
+      const missing = requiredVars.filter((k) => !envHas(k));
       const npmVersion = captureChild("npm", ["--version"], { env });
       // Only shout when something is actually wrong, so normal runs stay quiet but
       // a broken isolated env prints exactly why npm can't run.
@@ -255,7 +262,7 @@ test(
             `tool dirs prepended:                  ${TOOL_DIRS.join(", ")}`,
             `resolved npm on isolated PATH:        ${resolvedNpm ?? "(NOT RESOLVED — this breaks the install)"}`,
             `npm --version:                        code=${npmVersion.code} out=${npmVersion.stdout.trim() || "(empty)"} err=${npmVersion.stderr.trim() || "(empty)"}`,
-            `required win vars MISSING:            ${missing.join(", ") || "(none)"}`,
+            `required ${isWin ? "win" : "posix"} vars MISSING:          ${missing.join(", ") || "(none)"}`,
             `PATH:                                 ${env.PATH}`,
             "=== end ===",
             "",
