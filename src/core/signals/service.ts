@@ -27,6 +27,7 @@ import { withWriteTx } from "../../storage/sqlite/tx.ts";
 const MAX_DOMAIN_LEN = 64;
 const MAX_CHOICE_LEN = 80;
 const MAX_CONTEXT_LEN = 200;
+const MAX_REASON_LEN = 200;
 
 export interface Signal {
   id: string;
@@ -37,6 +38,14 @@ export interface Signal {
   sessionId: string | null;
   agentId: string | null;
   context: string | null;
+  /** The choice usually preferred, when this decision was an exception to it. */
+  preferredChoice: string | null;
+  /** A compact, free-form reason the choice differed (NOT normalized; preserved verbatim). */
+  reason: string | null;
+  /** A normalized constraint category that drove the exception (e.g. "free-tier"). */
+  constraintTag: string | null;
+  /** True when this decision departed from the usual preference. */
+  isException: boolean;
   createdAt: string;
 }
 
@@ -49,6 +58,10 @@ interface SignalRow {
   session_id: string | null;
   agent_id: string | null;
   context: string | null;
+  preferred_choice: string | null;
+  reason: string | null;
+  constraint_tag: string | null;
+  is_exception: number;
   created_at: string;
 }
 
@@ -62,6 +75,10 @@ function rowToSignal(r: SignalRow): Signal {
     sessionId: r.session_id,
     agentId: r.agent_id,
     context: r.context,
+    preferredChoice: r.preferred_choice,
+    reason: r.reason,
+    constraintTag: r.constraint_tag,
+    isException: r.is_exception === 1,
     createdAt: r.created_at,
   };
 }
@@ -86,6 +103,11 @@ export function normalizeChoice(raw: string): string {
   return raw.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+/** Normalize a constraint category to a kebab token (same canonicalization as domains). */
+export function normalizeConstraint(raw: string): string {
+  return normalizeDomain(raw);
+}
+
 export interface AddSignalInput {
   domain: string;
   choice: string;
@@ -93,6 +115,14 @@ export interface AddSignalInput {
   sessionId?: string | null;
   agentId?: string | null;
   context?: string | null;
+  /** The usually-preferred choice this decision departed from (exception context). */
+  preferredChoice?: string | null;
+  /** A compact reason the choice differed (preserved verbatim, only trimmed + capped). */
+  reason?: string | null;
+  /** A constraint category that drove the choice (e.g. "free-tier", "existing-stack"). */
+  constraint?: string | null;
+  /** Mark this as an exception to the usual preference (default false). */
+  exception?: boolean;
 }
 
 /** One choice observed in a domain, with aggregate evidence (never a verdict). */
@@ -110,12 +140,35 @@ export interface ChoiceEvidence {
   lastSeen: string;
 }
 
+/**
+ * One EXCEPTION choice: a decision that departed from the usual preference, with the
+ * reasons/constraints preserved so an agent can tell a constrained exception apart from
+ * an ordinary default. Reasons matter more than counts — they are kept, not collapsed.
+ */
+export interface ExceptionEvidence {
+  choice: string;
+  label: string;
+  /** The choice usually preferred, when recorded (most recent spelling). */
+  preferredChoice: string | null;
+  observations: number;
+  distinctRepos: number;
+  distinctSessions: number;
+  /** Distinct compact reasons, most recent first (verbatim; never normalized). */
+  reasons: string[];
+  /** Distinct normalized constraint categories seen (e.g. "free-tier", "compliance"). */
+  constraints: string[];
+  firstSeen: string;
+  lastSeen: string;
+}
+
 /** Aggregated, non-authoritative evidence for one decision domain. */
 export interface DomainEvidence {
   domain: string;
-  /** Choices seen in this domain, strongest evidence first. Minority choices are KEPT. */
+  /** ORDINARY (non-exception) choices, strongest evidence first. Minority choices are KEPT. */
   choices: ChoiceEvidence[];
-  /** True when more than one distinct choice has been observed (unresolved). */
+  /** EXCEPTIONS: choices made against the usual preference, with their reasons preserved. */
+  exceptions: ExceptionEvidence[];
+  /** True when more than one distinct ORDINARY choice has been observed (unresolved). */
   contradictory: boolean;
 }
 
@@ -141,29 +194,37 @@ export class SignalService {
     const agentId = input.agentId ?? null;
     const context = input.context ? input.context.trim().slice(0, MAX_CONTEXT_LEN) : null;
     const choiceRaw = input.choice.trim().slice(0, MAX_CHOICE_LEN);
+    // Choice-like fields are canonicalized; the reason is free-form evidence and is
+    // only trimmed + capped (never lowercased/normalized — its wording carries meaning).
+    const preferredChoice = input.preferredChoice ? normalizeChoice(input.preferredChoice) : null;
+    const constraintTag = input.constraint ? normalizeConstraint(input.constraint) : null;
+    const reason = input.reason ? input.reason.trim().slice(0, MAX_REASON_LEN) : null;
+    const isException = input.exception ? 1 : 0;
     const ts = nowIso();
     const day = ts.slice(0, 10);
 
     return withWriteTx(this.db, () => {
-      // Same immediate context = same (domain, choice, repo, session) on the same day.
+      // Same immediate context = same (domain, choice, repo, session, exception-ness) on
+      // the same day. Exception vs ordinary are distinct evidence even for one choice.
       const existing = this.db
-        .query<SignalRow, [string, string, string | null, string | null, string]>(
+        .query<SignalRow, [string, string, string | null, string | null, number, string]>(
           `SELECT * FROM decision_signals
            WHERE domain = ? AND choice = ? AND repo_id IS ? AND session_id IS ?
-             AND substr(created_at, 1, 10) = ?
+             AND is_exception = ? AND substr(created_at, 1, 10) = ?
            LIMIT 1`,
         )
-        .get(domain, choice, repoId, sessionId, day);
+        .get(domain, choice, repoId, sessionId, isException, day);
       if (existing) return { signal: rowToSignal(existing), created: false };
 
       const id = newId();
       this.db
         .query(
           `INSERT INTO decision_signals
-             (id, domain, choice, choice_raw, repo_id, session_id, agent_id, context, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, domain, choice, choice_raw, repo_id, session_id, agent_id, context,
+              preferred_choice, reason, constraint_tag, is_exception, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(id, domain, choice, choiceRaw, repoId, sessionId, agentId, context, ts);
+        .run(id, domain, choice, choiceRaw, repoId, sessionId, agentId, context, preferredChoice, reason, constraintTag, isException, ts);
       return { signal: this.getById(id)!, created: true };
     });
   }
@@ -217,14 +278,24 @@ export class SignalService {
 
     const out: DomainEvidence[] = [];
     for (const [dom, rows] of byDomain) {
-      const byChoice = new Map<string, Signal[]>();
-      for (const s of rows) {
-        const arr = byChoice.get(s.choice) ?? [];
-        arr.push(s);
-        byChoice.set(s.choice, arr);
-      }
+      // Ordinary (default-following) and exception decisions are aggregated SEPARATELY,
+      // so a constrained exception is never conflated with the ordinary default (reasons
+      // matter more than raw counts — "Firebase 3 / Supabase 2" is not "Firebase wins").
+      const ordinary = rows.filter((r) => !r.isException);
+      const exception = rows.filter((r) => r.isException);
+
+      const groupByChoice = (rs: Signal[]) => {
+        const m = new Map<string, Signal[]>();
+        for (const s of rs) {
+          const arr = m.get(s.choice) ?? [];
+          arr.push(s);
+          m.set(s.choice, arr);
+        }
+        return m;
+      };
+
       const choices: ChoiceEvidence[] = [];
-      for (const [ch, chRows] of byChoice) {
+      for (const [ch, chRows] of groupByChoice(ordinary)) {
         const repos = new Set(chRows.filter((r) => r.repoId).map((r) => r.repoId!));
         const sessions = new Set(chRows.filter((r) => r.sessionId).map((r) => r.sessionId!));
         const sorted = [...chRows].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -238,15 +309,41 @@ export class SignalService {
           lastSeen: sorted[sorted.length - 1]!.createdAt,
         });
       }
-      // Strongest evidence first: distinct repos, then observations, then recency.
-      choices.sort(
-        (a, b) =>
-          b.distinctRepos - a.distinctRepos ||
-          b.observations - a.observations ||
-          b.lastSeen.localeCompare(a.lastSeen) ||
-          a.choice.localeCompare(b.choice),
-      );
-      out.push({ domain: dom, choices, contradictory: choices.length > 1 });
+
+      const exceptions: ExceptionEvidence[] = [];
+      for (const [ch, chRows] of groupByChoice(exception)) {
+        const repos = new Set(chRows.filter((r) => r.repoId).map((r) => r.repoId!));
+        const sessions = new Set(chRows.filter((r) => r.sessionId).map((r) => r.sessionId!));
+        const sorted = [...chRows].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        // Distinct reasons/constraints, most-recent-first, preserved verbatim.
+        const reasons = [...new Set(chRows.map((r) => r.reason).filter((x): x is string => !!x))];
+        const constraints = [...new Set(chRows.map((r) => r.constraintTag).filter((x): x is string => !!x))];
+        const preferred = chRows.map((r) => r.preferredChoice).find((x): x is string => !!x) ?? null;
+        exceptions.push({
+          choice: ch,
+          label: chRows[0]!.choiceRaw,
+          preferredChoice: preferred,
+          observations: chRows.length,
+          distinctRepos: repos.size,
+          distinctSessions: sessions.size,
+          reasons,
+          constraints,
+          firstSeen: sorted[0]!.createdAt,
+          lastSeen: sorted[sorted.length - 1]!.createdAt,
+        });
+      }
+
+      const byStrength = (a: ChoiceEvidence | ExceptionEvidence, b: ChoiceEvidence | ExceptionEvidence) =>
+        b.distinctRepos - a.distinctRepos ||
+        b.observations - a.observations ||
+        b.lastSeen.localeCompare(a.lastSeen) ||
+        a.choice.localeCompare(b.choice);
+      choices.sort(byStrength);
+      exceptions.sort(byStrength);
+
+      // "Contradictory" is about the ORDINARY default only — multiple distinct exception
+      // reasons are expected and are NOT a contradiction in the default.
+      out.push({ domain: dom, choices, exceptions, contradictory: choices.length > 1 });
     }
     out.sort((a, b) => a.domain.localeCompare(b.domain));
     return out;

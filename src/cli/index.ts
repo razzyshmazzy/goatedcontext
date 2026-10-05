@@ -1163,6 +1163,10 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--no-repo", "Record as a repo-less (cross-project) observation")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--context <text>", "Optional short provenance note (capped; never secrets)")
+    .option("--preferred-choice <choice>", "The usually-preferred choice this decision departed from")
+    .option("--reason <text>", "Why the choice differed (compact; preserved verbatim; never secrets)")
+    .option("--constraint <tag>", "Constraint category that drove it (e.g. free-tier, existing-stack)")
+    .option("--exception", "Mark this as an exception to the usual preference")
     .option("--agent-id <id>", "Provenance: which agent recorded this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--json", "Output JSON")
@@ -1171,18 +1175,27 @@ export function buildProgram(deps: CliDeps): Command {
         // Default: link to the current repo when --cwd is inside one, unless --no-repo.
         let repoId: string | null = null;
         if (opts.repo !== false) repoId = ctx.repos.resolve(opts.cwd)?.id ?? null;
+        // A preferred-choice/reason/constraint implies this was an exception.
+        const exception = Boolean(opts.exception || opts.preferredChoice || opts.reason || opts.constraint);
         const { signal: s, created } = ctx.signals.add({
           domain: opts.domain,
           choice: opts.choice,
           repoId,
           context: opts.context ?? null,
+          preferredChoice: opts.preferredChoice ?? null,
+          reason: opts.reason ?? null,
+          constraint: opts.constraint ?? null,
+          exception,
           ...provenance(opts),
         });
         if (opts.json) return printJson({ ...s, created });
+        const tag = s.isException
+          ? ` (exception${s.preferredChoice ? ` vs ${s.preferredChoice}` : ""}${s.constraintTag ? `, ${s.constraintTag}` : ""})`
+          : "";
         line(
           created
-            ? `Recorded signal: ${s.domain}=${s.choiceRaw}${s.repoId ? " (this repo)" : ""}.`
-            : `Signal already recorded in this context: ${s.domain}=${s.choiceRaw}.`,
+            ? `Recorded signal: ${s.domain}=${s.choiceRaw}${s.repoId ? " (this repo)" : ""}${tag}.`
+            : `Signal already recorded in this context: ${s.domain}=${s.choiceRaw}${tag}.`,
         );
       });
     });
@@ -1233,19 +1246,29 @@ export function buildProgram(deps: CliDeps): Command {
         const evidence = ctx.signals.aggregate(opts.domain);
         if (opts.json) return printJson(evidence);
         if (evidence.length === 0) return line("No signals recorded.");
+        const repos = (n: number) => `${n} repo${n === 1 ? "" : "s"}`;
         for (const d of evidence) {
-          line(`${d.domain}${d.contradictory ? "  (no single stable choice yet)" : ""}:`);
+          line(`${d.domain}${d.contradictory ? "  (no single stable default yet)" : ""}:`);
           for (const c of d.choices) {
             line(
               `  ${c.label}: ${c.observations} observation${c.observations === 1 ? "" : "s"}` +
-                ` across ${c.distinctRepos} repo${c.distinctRepos === 1 ? "" : "s"}` +
+                ` across ${repos(c.distinctRepos)}` +
                 (c.distinctSessions ? ` / ${c.distinctSessions} session${c.distinctSessions === 1 ? "" : "s"}` : "") +
                 ` (last ${c.lastSeen.slice(0, 10)})`,
             );
           }
+          if (d.exceptions.length > 0) {
+            line("  exceptions:");
+            for (const e of d.exceptions) {
+              const pref = e.preferredChoice ? ` instead of ${e.preferredChoice}` : "";
+              const why = e.reasons.length ? ` — ${e.reasons.join("; ")}` : "";
+              const con = e.constraints.length ? ` [${e.constraints.join(", ")}]` : "";
+              line(`    ${e.label}${pref}: ${e.observations} across ${repos(e.distinctRepos)}${con}${why}`);
+            }
+          }
         }
         line("");
-        line("Evidence only — not a preference. Decide whether to `ctx propose` based on the pattern.");
+        line("Evidence only — not a preference. Exceptions do NOT weaken the default. Decide whether to `ctx propose` based on the pattern.");
       });
     });
 

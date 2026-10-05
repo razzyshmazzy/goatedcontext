@@ -210,6 +210,43 @@ Flow: *explicit durable* → **preference**; *a repeated local pattern in one
 conversation* → possible **proposal**; *decisions recurring across sessions/repos* →
 **signals** → (agent judgment) → possible **proposal** → normal preference lifecycle.
 
+### Preferences are defeasible defaults
+
+A preference guides decisions strongly but is **not** an absolute command. It yields —
+**without being deleted** — to an explicit current instruction, a hard project
+**constraint**, a technical impossibility, a security/safety limit, a more-specific
+rule, or a plain environment **fact**. The memory protocol teaches the agent to
+distinguish four things and persist only the first:
+
+| Concept | Example | Persisted? |
+|---|---|---|
+| **Preference** | "Prefer Firebase." | Yes — a durable default. |
+| **Constraint** | "Keep this project on free tiers." | No — a reasoning input for this task. |
+| **Fact** | "the video workload exceeds the free tier" | No — verified with normal tools, not stored. |
+| **Decision** | "use another store for video" | No — recorded only as a signal if meaningful. |
+
+Constraints and facts are **reasoning inputs, not preferences**: ctx never persists
+them as rules and is deliberately **not** a provider/pricing facts database (those
+change; agents verify them live). Specificity is handled by the *existing* scope/
+conditional precedence — a repo "use Supabase here" beats a global "prefer Firebase" —
+**not** a new ranking engine and never numeric weights. A preference may also apply
+*partially*: keep Firebase Auth even if its storage doesn't fit a given workload.
+
+### Exception evidence & conditional refinement
+
+When a decision departs from the usual preference, the agent records an **exception
+signal** carrying the compact `preferred_choice`, a verbatim `reason`, a normalized
+`constraint_tag`, and `is_exception` (migration v8, all additive + nullable). An
+exception is **evidence about conditions**, never a preference change — it does not
+weaken or delete the default. Aggregation keeps ordinary defaults and exceptions
+**apart** and preserves each exception's reason/constraint, because *reasons matter
+more than counts*: "Firebase 3, Supabase 2" is not "Firebase wins" — it is "Firebase by
+default, Supabase when the free-tier storage doesn't fit." Repeated **coherent**
+exceptions may lead the agent to `ctx propose` a *conditional* refinement ("Prefer
+Firebase when it fits cost/storage constraints; otherwise a free-tier alternative") —
+still a proposal, never an automatic change, and contradictory exceptions (different
+reasons) propose nothing.
+
 ### The signals ledger (`decision_signals`, 0.3.2)
 
 The memory protocol teaches the agent to judge durable intent **semantically** (no
@@ -218,7 +255,8 @@ choice, to record a compact signal. Signals are the one thing conversation conte
 can't supply: the same choice made once in each of several *different* repositories.
 
 - **Schema:** `id, domain, choice, choice_raw, repo_id?, session_id?, agent_id?,
-  context?, created_at`. Only the compact `(domain, choice)` decision plus provenance —
+  context?, created_at` + the v8 exception fields `preferred_choice?, reason?,
+  constraint_tag?, is_exception`. Only the compact `(domain, choice)` decision plus provenance —
   **never transcripts, source code, or secrets**. No FK to `repos` (like the events
   log), so cross-repo evidence survives a repo row being deleted.
 - **Dedup:** a repeat of the same `(domain, choice, repo, session)` on the same day is

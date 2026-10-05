@@ -19,7 +19,7 @@
  * this marker in the rendered artifact so `ctx doctor` can flag a STALE skill (an
  * old installed body) and `ctx repair` can converge it.
  */
-export const MEMORY_PROTOCOL_VERSION = "2";
+export const MEMORY_PROTOCOL_VERSION = "3";
 
 /** Hidden marker embedded in every rendered artifact for staleness detection. */
 export const MEMORY_PROTOCOL_MARKER = `<!-- ctx-memory-protocol: v${MEMORY_PROTOCOL_VERSION} -->`;
@@ -51,6 +51,36 @@ For an explicit, unambiguous preference the fastest path is best: pick scope +
 applicability and run exactly ONE \`ctx remember\`. Do NOT first run \`ctx prefs\`,
 \`ctx why\`, or any inspection for a straightforward new write, and do not narrate
 tool selection — just persist and continue the task.
+
+## Preferences are DEFAULTS, not commands
+
+A stored preference is a strong default, not an absolute order. Satisfy as many durable
+preferences as you can, but a default YIELDS — without being deleted — to any of:
+explicit current user instructions, a hard project requirement, technical
+impossibility, a security/safety constraint, a more-specific preference that applies,
+or a plain fact about the current environment. Distinguish four things, and do not
+confuse them:
+- PREFERENCE — a durable default ("Prefer Firebase.").
+- CONSTRAINT — a requirement for THIS task/project ("Keep this project on free tiers.").
+- FACT — a technical/environment reality ("the video workload exceeds the free tier").
+- DECISION — what you actually do after reconciling them ("use another store for video").
+Persist only PREFERENCES. Do NOT persist facts, and do NOT turn a temporary constraint
+into a global preference.
+
+When a default does not fit, make the smallest viable exception and KEEP the default:
+- Prefer Bun, but the deploy target only supports npm -> use npm here; keep Bun.
+- Prefer React, but this is an existing Vue app -> work in Vue; do not rewrite it.
+- Prefer PostgreSQL, but the app is static with no backend -> do not invent a backend.
+- Prefer Firebase, but the free tier cannot hold the video workload -> use another store
+  for that; keep Firebase where it still fits (e.g. Auth). Do not replace the whole
+  stack because one component conflicts.
+Verify an exception-justifying fact with your normal tools when it matters — do not
+invent an incompatibility to dodge a preference (ctx is not a cloud-facts database).
+More-specific rules win over broader ones through ctx's EXISTING scope/conditional
+precedence (a repo "use Supabase here" beats a global "prefer Firebase") — do not
+invent a new ranking or numeric weights. If a meaningful exception was required, say so
+in one line — "You usually prefer Firebase, but this project's video storage does not
+fit the free-tier constraint, so I'm using X for storage." — never dump memories or scores.
 
 ## 1. Durable preference → \`ctx remember\`
 
@@ -164,6 +194,20 @@ judgment — there is NO automatic threshold:
   nothing; there is no stable default yet — do not hide the minority choice.
 Signals are evidence ONLY: an explicit approved/locked preference always wins over
 them. Never surface raw signal history to the user unprompted.
+
+### Exceptions — record WHY, never weaken the default
+When you choose AGAINST the usual preference for a real reason, record the exception as
+evidence. It does NOT change, weaken, or delete the preference:
+
+    ctx signal add --domain backend --choice supabase --preferred-choice firebase --reason "free-tier storage insufficient for video workload" --constraint free-tier --exception
+
+Aggregation keeps ordinary defaults and exceptions apart and preserves each exception's
+reason/constraint — reasons matter, not just counts. Repeated COHERENT exceptions for
+the same reason may justify proposing a refined, CONDITIONAL preference, e.g.
+\`ctx propose "Prefer Firebase when it fits cost/storage constraints; otherwise a
+free-tier alternative."\` — never an automatic change. If exceptions disagree (Supabase
+for storage in one repo, AWS for compliance in another), keep the distinct reasons and
+propose nothing — there is no single stable alternative.
 
 ## 5. Retraction / correction → \`ctx forget\` (or replace)
 

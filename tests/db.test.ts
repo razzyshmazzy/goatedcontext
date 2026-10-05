@@ -6,7 +6,7 @@ test("database initializes with the latest migration applied", () => {
   const row = db
     .query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_migrations")
     .get();
-  expect(row?.v).toBe(7);
+  expect(row?.v).toBe(8);
   db.close();
 });
 

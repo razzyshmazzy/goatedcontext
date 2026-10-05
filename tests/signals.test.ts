@@ -149,7 +149,10 @@ test("the ledger stores ONLY compact decision fields — no transcript/code/secr
       .map((r) => r.name)
       .sort();
     expect(cols).toEqual(
-      ["agent_id", "choice", "choice_raw", "context", "created_at", "domain", "id", "repo_id", "session_id"].sort(),
+      [
+        "agent_id", "choice", "choice_raw", "constraint_tag", "context", "created_at",
+        "domain", "id", "is_exception", "preferred_choice", "reason", "repo_id", "session_id",
+      ].sort(),
     );
   } finally {
     t.cleanup();

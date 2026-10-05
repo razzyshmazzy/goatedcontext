@@ -56,6 +56,8 @@ Explicit durable preferences are remembered. Weakly inferred preferences are pro
 
 goatedcontext can also learn recurring development choices across projects without treating every one-off instruction as permanent memory.
 
+Preferences are defaults, not rigid commands: agents can make project-specific exceptions while preserving the underlying preference.
+
 ## How context reaches agents
 
 goatedcontext uses two delivery layers.

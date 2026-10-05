@@ -402,7 +402,7 @@ test("migration v4 adds applicability=relevant to a pre-0.2.4 database, preservi
     const db = openDatabase(paths);
     try {
       const v = db.query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_migrations").get();
-      expect(v?.v).toBe(7);
+      expect(v?.v).toBe(8);
 
       const rows = db
         .query<

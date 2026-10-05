@@ -223,4 +223,24 @@ export const migrations: Migration[] = [
       CREATE INDEX idx_signals_created ON decision_signals(created_at);
     `,
   },
+  {
+    version: 8,
+    name: "signal_exception_context",
+    sql: `
+      -- Exception context on a decision signal (0.3.3). When a choice DIFFERS from the
+      -- usual preference, the agent records WHY, so later reasoning can tell an ordinary
+      -- default-following choice apart from a constrained exception — e.g. chose Supabase
+      -- over the usual Firebase because the free-tier storage didn't fit the workload.
+      -- Purely additive + nullable: every existing signal keeps these as NULL / 0, so
+      -- prior behavior is byte-for-byte unchanged. These are EVIDENCE only; an exception
+      -- never weakens, deletes, or replaces the stored preference (enforced in the app).
+      -- 'constraint' is a SQL keyword, so the column is 'constraint_tag'.
+      ALTER TABLE decision_signals ADD COLUMN preferred_choice TEXT;
+      ALTER TABLE decision_signals ADD COLUMN reason          TEXT;
+      ALTER TABLE decision_signals ADD COLUMN constraint_tag  TEXT;
+      ALTER TABLE decision_signals ADD COLUMN is_exception    INTEGER NOT NULL DEFAULT 0;
+
+      CREATE INDEX idx_signals_exception ON decision_signals(domain, is_exception);
+    `,
+  },
 ];
