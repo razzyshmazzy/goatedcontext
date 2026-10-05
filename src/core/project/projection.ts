@@ -52,10 +52,11 @@ export function selectStaticPreferences(ctx: CtxContext, cwd: string): {
   if (!repo) return { repo: null, preferences: [] };
 
   // Scope candidates to THIS repo (+ global) FIRST — repo isolation. A repo-scoped
-  // row for a different repo can never be considered here.
-  const candidates = ctx.preferences
-    .list()
-    .filter((p) => p.scope === "global" || (p.scope === "repo" && p.repoId === repo.id));
+  // row for a different repo can never be considered here. Filtered in SQL (D2) so a
+  // many-repo store does not materialize unrelated repos' rows; semantics are
+  // identical to the prior `list().filter(global || this-repo)` over active rows
+  // (the subsequent planDelivery static bucket already requires approved/locked).
+  const candidates = ctx.preferences.listCandidates({ repoId: repo.id });
 
   // The static bucket for a plain AGENTS.md file == repo approved/locked always.
   const staticIds = new Set(planDelivery(AGENTS_FILE_CAPABILITIES, candidates).static);

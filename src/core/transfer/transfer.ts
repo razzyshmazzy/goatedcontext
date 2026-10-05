@@ -174,8 +174,10 @@ export function importData(ctx: CtxContext, raw: unknown): ImportSummary {
     repoIdByIdentity.set(r.identity, repo.id);
   }
 
-  let imported = 0;
+  // Resolve each record's repo and skip the unresolvable ones FIRST, then import the
+  // resolvable set in ONE transaction (D5) instead of one-transaction-per-preference.
   let skipped = 0;
+  const items: { rec: Parameters<typeof ctx.preferences.importOne>[0]; repoId: string | null }[] = [];
   for (const p of bundle.preferences) {
     let repoId: string | null = null;
     if (p.scope === "repo") {
@@ -191,8 +193,8 @@ export function importData(ctx: CtxContext, raw: unknown): ImportSummary {
       linkedIdentities.add(p.repoIdentity);
     }
 
-    const result = ctx.preferences.importOne(
-      {
+    items.push({
+      rec: {
         rule: p.rule,
         category: p.category,
         domain: p.domain,
@@ -212,9 +214,13 @@ export function importData(ctx: CtxContext, raw: unknown): ImportSummary {
         })),
       },
       repoId,
-    );
+    });
+  }
+
+  let imported = 0;
+  for (const result of ctx.preferences.importMany(items)) {
     if (result.created) imported++;
-    else skipped++;
+    else skipped++; // merged into an existing equivalent preference
   }
 
   return {

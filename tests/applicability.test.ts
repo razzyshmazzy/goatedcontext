@@ -327,13 +327,13 @@ test("an unknown applicability value is rejected with no write", () => {
   t.cleanup();
 });
 
-// ---- safety cap (performance guard) ----------------------------------------
+// ---- delivery semantics (0.3.0 D1: no arbitrary cap) ------------------------
 
-test("always-on rules are capped deterministically and never starved by relevant top-K", () => {
+test("all effective always-on rules are delivered (no arbitrary cap) and never starved by relevant top-K", () => {
   const t = makeTestContext();
   // 100 always rules + 50 relevant rules.
   for (let i = 0; i < 100; i++) {
-    t.ctx.preferences.remember({ rule: `Always apply universal directive ${i}.`, scope: "global" });
+    t.ctx.preferences.remember({ rule: `Always apply universal directive tag${i}.`, scope: "global" });
   }
   for (let i = 0; i < 50; i++) {
     t.ctx.preferences.remember({
@@ -345,10 +345,14 @@ test("always-on rules are capped deterministically and never starved by relevant
   }
   const a = t.ctx.retrieval.retrieve({ cwd: process.cwd(), task: "hi", track: false });
   const alwaysReturned = a.preferences.filter((p) => p.applicability === "always");
-  // Capped at MAX_ALWAYS (20), never zero — the relevance top-K cannot starve them.
-  expect(alwaysReturned).toHaveLength(20);
+  // 0.3.0: EVERY effective always rule is delivered — no silent drop at 20.
+  expect(alwaysReturned).toHaveLength(100);
+  // And relevant rules are not starved (the relevance top-K still applies to them).
+  // Observability: diagnostics report the full effective set with nothing budget-dropped.
+  expect(a.delivery.omittedByBudget).toBe(0);
+  expect(a.delivery.effective).toBeGreaterThanOrEqual(100);
 
-  // Deterministic: the same prompt yields the same set (no random selection).
+  // Deterministic: the same prompt yields the same set (no random selection, no age drop).
   const b = t.ctx.retrieval.retrieve({ cwd: process.cwd(), task: "hi", track: false });
   expect(b.preferences.map((p) => p.id)).toEqual(a.preferences.map((p) => p.id));
   t.cleanup();
@@ -398,7 +402,7 @@ test("migration v4 adds applicability=relevant to a pre-0.2.4 database, preservi
     const db = openDatabase(paths);
     try {
       const v = db.query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_migrations").get();
-      expect(v?.v).toBe(5);
+      expect(v?.v).toBe(6);
 
       const rows = db
         .query<

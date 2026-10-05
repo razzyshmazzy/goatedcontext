@@ -4,9 +4,11 @@
 
 > “You know what’s funny? GOATS!” — Goat Simulator
 
-Persistent developer preferences for Claude Code.
+Persistent developer context for coding agents.
 
-Your coding style, architecture preferences, repo rules, and dev environments follow you across repositories. Claude receives the relevant ones automatically before it starts working. Totally local.
+Your coding style, architecture preferences, repo rules, and development conventions follow you across repositories and across Claude Code, Codex, and Cursor. Agents read the relevant context automatically and can remember durable preferences for you.
+
+Totally local.
 
 ## Install
 
@@ -14,101 +16,193 @@ Your coding style, architecture preferences, repo rules, and dev environments fo
 npx goatedcontext setup
 ```
 
-Requires Node 22.13+ (uses Node's built-in SQLite — no native build, no compiler).
+Requires Node 22.13+.
 
-Restart Claude Code.
+`setup` installs or upgrades the persistent `ctx` CLI, detects supported coding agents, and repairs their goatedcontext integrations. It is safe to rerun whenever you upgrade or something breaks.
 
+You never need to `npm install -g` manually.
+
+Check everything with:
 
 ```bash
-ctx status
-```
-
-To **upgrade**, run the exact same command — `npx goatedcontext setup` installs or updates the persistent `ctx` to the current version and refreshes the Claude integration. It's idempotent: rerun it anytime to upgrade, repair, or verify. You never need to `npm install -g` by hand.
-
-## Try it
-
-```powershell
-ctx remember --scope global --category architecture "Prefer simple solutions over premature abstraction."
-```
-
-Then open any repo and use Claude normally.
-
-Relevant preferences are injected automatically before Claude works. If nothing is relevant, nothing is injected. Universal directives can be marked always-on so they apply to every prompt:
-
-```powershell
-ctx remember --always "Never add dependencies without asking."
-ctx remember --when language=typescript "Prefer strict TypeScript."
-```
-
-`--when` makes a preference *conditional*: it is injected only when a deterministic runtime condition matches (`language=`, `file=`, `domain=`, `repo=`; repeat `--when` to AND them). See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full model.
-
-In that sense, GoatedContext works similar to my [AquaAgent](https://github.com/razzyshmazzy/AquaAgent) but minus the semantic embedding.
-
-## Useful
-
-```powershell
+ctx --version
+ctx agents
 ctx doctor
-ctx status
-ctx stats             # see how often goatedcontext has injected useful context
+```
+
+## Just talk normally
+
+You do not need to manually operate the memory CLI during normal coding.
+
+Tell your agent:
+
+> Always use Bun in this repo.
+
+Claude Code, Codex, or Cursor can recognize that as a durable preference and persist it through `ctx`.
+
+Then later, in another session:
+
+> Use npm for this one command.
+
+That is treated as a one-off instruction and is not stored.
+
+Or:
+
+> Actually use npm in this repo from now on.
+
+The agent can update the durable preference for you.
+
+Explicit durable preferences are remembered. Weakly inferred preferences are proposed instead. One-off task instructions are ignored. Secrets are never stored as preferences.
+
+## How context reaches agents
+
+goatedcontext uses two delivery layers.
+
+**Runtime context**
+
+Claude Code and Codex receive dynamic context at prompt time, including relevant and matching conditional preferences.
+
+**Static repo context**
+
+Repo-scoped, approved or locked, always-on rules are projected into a managed block in `AGENTS.md`.
+
+That gives Codex, Cursor, and other `AGENTS.md`-aware tools a durable repo-level instruction surface.
+
+```text
+ctx store
+  ├─ repo approved/locked always → AGENTS.md
+  └─ global/relevant/conditional → runtime adapters where supported
+```
+
+Cursor currently has no reliable prompt-time context-injection mechanism, so its dynamic runtime context is unavailable. goatedcontext does not broaden dynamic preferences into static rules to fake parity.
+
+`AGENTS.md` never becomes the source of truth. The flow is one-way:
+
+```text
+ctx → AGENTS.md
+```
+
+Handwritten content outside the managed block is preserved.
+
+## Agent memory
+
+`setup` also installs a native goatedcontext memory skill for supported agents.
+
+That skill teaches the agent when to:
+
+- remember an explicit durable preference
+- propose an inferred preference
+- ignore a one-off instruction
+- forget or replace an old preference
+- choose repo vs global scope
+- use always, relevant, or conditional applicability
+- never persist secrets
+
+Check installed integrations with:
+
+```powershell
+ctx agents
+```
+
+Typical output:
+
+```text
+Claude Code   installed   runtime ✓   memory skill ✓
+Codex         installed   runtime ✓   AGENTS.md ✓   memory skill ✓
+Cursor        installed   runtime unavailable   AGENTS.md ✓   memory skill ✓
+```
+
+## Manual controls
+
+The CLI is still available when you want explicit control or debugging.
+
+```powershell
 ctx prefs
 ctx prefs pending
 ctx prefs approve <id>
+
+ctx remember --scope global "Prefer simple solutions over premature abstraction."
+ctx remember --scope repo --always "Use Bun for development commands."
+ctx remember --when language=typescript "Prefer strict TypeScript."
+
 ctx conflicts
 ctx history
 ctx why <id>
+
+ctx export
+ctx import <file>
+
+ctx sync
+ctx agents
+ctx doctor
+ctx stats
 ```
 
-`ctx history` shows a compact, local, append-only log of recent changes (remembered, proposed, approved, rejected, locked/unlocked, forgotten, and environment add/remove) with provenance. Add `--repo`, `--limit <n>`, or `--json`. Secret values are never recorded.
+Conditional preferences support deterministic conditions including:
 
-`ctx export` writes a portable JSON bundle of your preferences, evidence, and repo links (never secrets) to stdout, or to a file with `--out`. `ctx import <file>` merges a bundle back in — idempotently, without duplicating rules or overwriting existing ones. Use `-` as the file to read from stdin.
+```text
+language=
+file=
+domain=
+repo=
+```
 
-`ctx install claude --repair` rewrites any missing or corrupted ctx files and restores the hook, leaving unrelated Claude config untouched. `ctx uninstall claude` removes only the ctx integration (skills, instruction block, hook) — your preferences and environments are kept.
+Repeat `--when` to combine conditions with AND.
 
-`ctx conflicts` lists active preferences that compete for the same decision (e.g. two package managers, or a rule and its negation), shows which one wins during retrieval, and never auto-resolves. Add `--global`, `--repo`, or `--json`.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full preference, precedence, conflict, delivery, and retrieval model.
 
-`ctx doctor` checks your install end to end (database, schema, Git, secret backend, Claude skills/hook, and whether `ctx` resolves on PATH) and prints a concrete fix for anything broken. Add `--json` for scripts.
-
-`ctx test-hook --task "..."` dry-runs the proactive-retrieval hook for a task without launching Claude, so you can see exactly which preferences would be injected. Add `--json` for scripts.
-
-## Other agents (Codex, Cursor)
-
-goatedcontext isn't Claude-only. The same store reaches other coding agents through
-their native integration points:
+## Agent management
 
 ```powershell
-ctx agents           # show which agents are installed + their capabilities
-ctx install codex    # a UserPromptSubmit hook (runtime) + this repo's AGENTS.md
-ctx install cursor   # this repo's AGENTS.md (Cursor is static-only)
-ctx sync             # (re)write THIS repo's AGENTS.md for any AGENTS.md-aware agent
+ctx install claude
+ctx install codex
+ctx install cursor
+
+ctx repair claude
+ctx repair codex
+ctx repair cursor
+
+ctx uninstall claude
+ctx uninstall codex
+ctx uninstall cursor
 ```
 
-Claude and Codex get **runtime** retrieval (task-relevant + conditional) via a
-prompt hook. Your repo's standing rules — only the repo-scoped, approved/locked,
-always-on ones — are projected **statically** into a managed block in `AGENTS.md`,
-read by Codex, Cursor, and any AGENTS.md-aware agent. Cursor has no reliable
-prompt-time injection hook, so Cursor gets exactly that static set (nothing is
-faked or broadened). `AGENTS.md` never contains your global or task-specific
-preferences. Commit `AGENTS.md` to share repo context with your team. See
-[ARCHITECTURE.md](./ARCHITECTURE.md) for the full model.
+Install and repair operations preserve unrelated agent configuration.
 
-### Agents remember for you
+`ctx setup` detects installed agents and converges their integrations automatically.
 
-`setup`/`install` also teach each agent *when to write preferences back* — so you
-never run `ctx remember` by hand. Just say it in normal conversation:
+On Windows, Codex is configured so its normal workspace sandbox can access the local ctx store without requiring Full Access. Its memory skill also uses `ctx.cmd` to avoid PowerShell execution-policy issues with npm's `.ps1` shim.
 
-> **You:** Always use Bun in this repo.
-> **Agent:** *(persists it to ctx, then continues)*
+## Debugging
 
-Explicit durable preferences are saved automatically (scoped conservatively);
-one-off task instructions are not; "forget that I prefer Postgres" removes it; and
-secrets are never stored. This guidance is installed as a native skill for each
-agent — run `ctx agents` to see which have it.
+```powershell
+ctx doctor
+ctx agents
+ctx stats
+ctx history
+ctx conflicts
+ctx test-hook --agent codex --task "..."
+```
+
+`ctx doctor` checks the local database, schema, Git integration, secret backend, agent integrations, memory skills, and relevant platform-specific configuration.
+
+`ctx test-hook` lets you inspect retrieval and delivery without launching an agent.
+
+## Retrieval
+
+goatedcontext remains intentionally cache-free at the retrieval layer.
+
+Eligible preferences are reduced in SQLite before semantic evaluation, while matching, conditions, conflicts, precedence, and delivery remain deterministic and immediately fresh across processes.
+
+Effective `always` and matching conditional preferences are not silently discarded because an arbitrary count was exceeded.
 
 ## Secrets & environments
 
-Reusable environment-variable bundles.
+Reusable environment-variable bundles are kept separate from normal preferences.
 
-On Windows, secrets use DPAPI and no encryption key is stored on disk. Secrets are injected only into child processes and are never returned by normal `ctx` retrieval.
+On Windows, secret values use DPAPI.
+
+Secrets are never returned through ordinary preference retrieval, runtime context injection, history, stats, or exports.
 
 ```powershell
 ctx env add supabase-test
@@ -122,21 +216,23 @@ In bash/zsh:
 ctx env run supabase-test -- bun test
 ```
 
-`ctx env set` reads the secret from stdin, so it does not need to appear in shell history.
+`ctx env set` reads the value from stdin so the secret does not need to appear in shell history.
 
 ## What it does
 
 ```text
-you correct Claude
-      ↓
-ctx proposes a preference
-      ↓
-you approve it
-      ↓
-Claude remembers it across repos
+you state a durable preference
+          ↓
+the coding agent recognizes it
+          ↓
+the agent writes it through ctx
+          ↓
+ctx becomes the local source of truth
+          ↓
+future agents receive the right context
 ```
 
-Repo rules override global ones. Preferences are proposed, never silently made permanent. Secrets are never stored as preferences.
+Repo preferences can override global preferences. Explicit durable preferences may be remembered directly; inferred preferences are proposed conservatively.
 
 ## More
 
@@ -144,7 +240,9 @@ Repo rules override global ones. Preferences are proposed, never silently made p
 
 ## Development
 
-Built with [Bun](https://bun.sh); published as a normal npm package that runs on Node ≥ 22.13 using Node's built-in `node:sqlite` (no Bun and no native addon needed at runtime).
+Built with [Bun](https://bun.sh) and published as a normal npm package.
+
+Development and tests use Bun. The published CLI runs on Node ≥ 22.13 using Node's built-in `node:sqlite`, with no native SQLite addon or compiler toolchain required.
 
 ```powershell
 git clone https://github.com/razzyshmazzy/goatedcontext
@@ -152,11 +250,10 @@ cd goatedcontext
 bun install
 bun test
 bun run typecheck
-bun run build   # bundles the Node CLI into dist/
-bun link        # optional: use your local build as `ctx`
+bun run build
 ```
 
-Releasing (maintainers): see [RELEASE.md](./RELEASE.md).
+For releases, see [RELEASE.md](./RELEASE.md).
 
 ## KonaGoat
 

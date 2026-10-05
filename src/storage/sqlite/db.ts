@@ -1,5 +1,5 @@
 import { openDb, type Database } from "./driver.ts";
-import { migrations } from "./migrations.ts";
+import { migrations, type Migration } from "./migrations.ts";
 import { withWriteTx } from "./tx.ts";
 import type { CtxPaths } from "../paths.ts";
 import { ensureHome } from "../config.ts";
@@ -99,7 +99,7 @@ function enableWal(db: Database): void {
  * A migration therefore can never be applied twice, and the DB is never left
  * partially migrated (each migration is atomic).
  */
-function runMigrations(db: Database): void {
+export function runMigrations(db: Database, list: Migration[] = migrations): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -108,7 +108,7 @@ function runMigrations(db: Database): void {
     );
   `);
 
-  const ordered = [...migrations].sort((a, b) => a.version - b.version);
+  const ordered = [...list].sort((a, b) => a.version - b.version);
 
   for (const migration of ordered) {
     withWriteTx(db, () => {

@@ -128,10 +128,16 @@ code that isn't already expecting it.
 `RetrievalEngine.retrieve()` (`src/core/retrieval/retrieval.ts`) is the central,
 adapter-agnostic entry point. Given `{ cwd, task, limit, includeProposed }` it:
 
-1. **Resolves the repo** for `cwd` (registering it on first sight).
-2. **Gathers candidates** — all global preferences plus this repo's preferences,
-   filtered to in-effect statuses (`locked`, `approved`) by default; proposals
-   are included only when explicitly requested.
+1. **Resolves the repo** for `cwd` (registering it on first sight). Git lookups are
+   bounded by a timeout and reused request-locally (see *Git subprocesses* below).
+2. **Gathers candidates in SQL** — `PreferenceService.listCandidates()` returns only
+   the rows eligible for this context: in-effect statuses (`locked`, `approved`;
+   proposals only when requested) and visible scope (global, or repo-scoped bound to
+   THIS repo). The scope/repo filter is pushed into SQLite via two targeted,
+   index-backed branches (globals, and this repo via `idx_prefs_repo`) unioned, so a
+   store with many repos never loads or maps the other repos' rows (0.3.0 D2). This
+   is a pure eligibility filter — identical in result to the previous
+   `list()`-then-JS-filter, just without materializing ineligible rows.
 3. **Infers the task's domains** (package-manager, database, ui-framework, …) and
    its distinctive terms, after removing stopwords AND generic engineering verbs
    (`add`, `change`, `create`, `fix`, …) so filler words no longer drive matches.
@@ -140,9 +146,13 @@ adapter-agnostic entry point. Given `{ cwd, task, limit, includeProposed }` it:
    repo/locked/approved bonuses — and **drops anything below a relevance
    threshold**. Weak incidental lexical overlap is not enough to be returned.
 5. **Resolves conflicts by domain** (see below) and reports superseded rules in
-   `overridden`.
-6. **Trims to a concise set** — capped at 15 (default 12), sorted by relevance.
-   There is **no forced minimum**: an unrelated task legitimately returns zero.
+   `overridden`. This produces the **effective preference set**.
+6. **Delivers the effective set.** EVERY effective `always` and matched `conditional`
+   rule is delivered — there is no arbitrary count cap (0.3.0 D1; the old
+   `MAX_ALWAYS`/`MAX_CONDITIONAL = 20` silently dropped valid matching rules by
+   write-age). Scored `relevant` rules keep the relevance top-K (≤15, default 12);
+   below-threshold rules were already dropped, so this is a relevance ranking, not an
+   arbitrary cut. An unrelated task legitimately returns zero.
 7. **Marks the returned preferences as used** (`last_used_at`, best-effort).
 8. **Attaches environments** applicable to the repo, with an `available` flag but
    never any secret values.
@@ -150,6 +160,40 @@ adapter-agnostic entry point. Given `{ cwd, task, limit, includeProposed }` it:
 Steps 2–6 run inside a **read transaction** (`BEGIN DEFERRED`) so retrieval sees a
 single consistent snapshot, never a half-applied concurrent write. The result is
 plain JSON, so any adapter — CLI, MCP, or another agent — consumes the same output.
+
+### No application-level retrieval cache (intentional)
+
+0.3.0 deliberately remains **cache-free at the retrieval layer**. Every `retrieve()`
+re-reads the DB inside a fresh read snapshot, so a write is visible to the very next
+read — in-process, across a long-lived connection, and cross-process (WAL). This is a
+correctness property (never stale), verified by `freshness-invalidation` and
+`freshness-longlived`. The 0.3.0 scaling win came from the SQL candidate reduction
+above, not from caching: measurement showed the cost was compute over too many
+candidates, not re-fetching, and warm ≈ cold. A cache would add cross-process
+staleness risk for no benefit. Connection pooling is likewise omitted (reopen ≈ 1.6 ms
+vs ≈ 60 ms process startup), as is the experimental lexical prefilter (it dropped
+domain-only relevance matches).
+
+### Delivery budget (explicit, observable)
+
+Effective rules are computed **independently** of any output budget. A caller may pass
+an explicit `DeliveryBudget { maxChars, maxPreferences }` (both default `null` =
+unlimited, which the CLI and prompt hook use — so nothing is ever silently dropped).
+When a budget is set, trimming is deterministic (a top-priority prefix; least-important
+rules omitted first) and **observable**: every result carries a `delivery` block
+distinguishing `matched` → `effective` → `delivered`, plus `omittedByRelevanceLimit`
+and `omittedByBudget`. Omission is never silent.
+
+### Git subprocesses (bounded + request-local)
+
+Repo detection shells out to git (repo root, origin URL). Each call runs under a hard
+timeout (`GIT_TIMEOUT_MS`, 5 s; internal `CTX_GIT_TIMEOUT_MS`/`CTX_GIT_BIN` overrides
+exist for tests) so a hung git on a stuck network mount can never block the prompt hot
+path — on timeout the child is killed and the call fails safe to the existing
+fallback (no repo / no remote; a repo with a slow remote still gets its deterministic
+path-based identity). Within one invocation a `GitProbe` memoizes each lookup so the
+same repo-root/origin query is not spawned twice; the probe is request-local, never a
+cross-request cache, so it can never serve stale repo state.
 
 ## Applicability (`relevant` vs `always` vs `conditional`)
 
@@ -245,11 +289,13 @@ evaluation separate is what lets different agent adapters feed the same evaluato
 ### Retrieval pipeline with three pools
 
 ```
-gather candidates (status + scope filtered)
+gather candidates in SQL (status + scope/repo filtered via listCandidates)
   → always pool      : included wholesale, bypassing relevance
   → conditional pool : evaluate each condition; keep only matches
   → relevant pool    : scored against the task, dropped below threshold
-  → combine → resolve conflicts / precedence → cap each pool → return
+  → combine → resolve conflicts / precedence → effective set
+  → deliver ALL effective always + matched conditional; relevant keeps top-K
+  → (optional explicit delivery budget; omission reported in `delivery`) → return
 ```
 
 Matched conditionals are **not special-cased** in precedence or conflict
@@ -258,11 +304,14 @@ other (repo beats global, exclusive domains admit one winner, polarity/subject
 conflicts resolve as usual). They remain subject to status (a rejected conditional
 never appears; a proposed one only with `--include-proposed`), scope and locking.
 
-Each pool has an **independent, deterministic cap** so none starves another:
-`always` and matched `conditional` are each capped at **20** (`MAX_ALWAYS` /
-`MAX_CONDITIONAL`, chosen by precedence, then age, then id), and `relevant` keeps
-its top-K (≤15, default 12). Output order is always-on, then matched conditionals,
-then task-relevant.
+**Every** effective `always` and matched `conditional` rule is delivered — 0.3.0
+removed the former hard count caps (`MAX_ALWAYS`/`MAX_CONDITIONAL = 20`), which
+silently dropped valid matching rules and picked survivors by write-age. `relevant`
+keeps its relevance top-K (≤15, default 12). Ordering is deterministic (always-on
+first, then matched conditionals, then task-relevant; within each, precedence then
+age then id), so the same inputs always yield the same set — now the *complete* set.
+If output size must be bounded, an explicit `DeliveryBudget` trims deterministically
+and reports the omission (see *Delivery budget* above); the default is unlimited.
 
 `ctx test-hook` is the debugging surface: it builds a (optionally explicit — `--file`,
 `--language`, `--domain`) runtime context, lists matched preferences with the

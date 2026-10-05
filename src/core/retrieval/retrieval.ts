@@ -1,6 +1,5 @@
 import type { Database } from "../../storage/sqlite/driver.ts";
 import type { Preference } from "../preferences/types.ts";
-import { ACTIVE_STATUSES } from "../preferences/types.ts";
 import type { PreferenceService } from "../preferences/service.ts";
 import type { RepoService, Repo } from "../repos/repo.ts";
 import type { EnvironmentService } from "../environments/service.ts";
@@ -23,22 +22,11 @@ const RELEVANCE_THRESHOLD = 0.25;
 const MAX_RESULTS = 15;
 const DEFAULT_LIMIT = 12;
 /**
- * Safety cap on how many `always`-on preferences a single prompt may inject,
- * independent of the relevance top-K. This keeps a pathological number of
- * always-on rules from flooding the context window. When more than this exist,
- * they are chosen DETERMINISTICALLY by precedence, then age, then id — never at
- * random — so the same prompt always yields the same set.
+ * Approximate per-rule rendered-size contribution used by the delivery budget's
+ * `maxChars` accounting. Mirrors `sanitizeInjectedText`'s value cap so the budget
+ * estimate tracks the injected block without importing the renderer.
  */
-const MAX_ALWAYS = 20;
-/**
- * Safety cap on how many `conditional` preferences a single prompt may inject,
- * mirroring `MAX_ALWAYS`. Conditions are evaluated deterministically and only
- * matches reach this cap; it exists so a pathological number of matching
- * conditionals cannot flood the window or starve the relevance budget. Chosen
- * equal to `MAX_ALWAYS` (20) for a consistent prompt budget, and applied
- * deterministically by precedence, then age, then id.
- */
-const MAX_CONDITIONAL = 20;
+const RENDER_CHAR_CAP = 500;
 /**
  * Nominal relevance assigned to `always`-on and matched `conditional` preferences.
  * Both bypass task scoring (one applies unconditionally, the other because its
@@ -54,6 +42,54 @@ const W_OVERLAP = 0.35;
 const W_REPO = 0.1;
 const W_LOCKED = 0.08;
 const W_APPROVED = 0.04;
+
+/**
+ * An EXPLICIT delivery budget (0.3.0). Effective preferences are computed
+ * independently of this budget (conflict/precedence resolution happens first); the
+ * budget only bounds how much of the already-resolved set is rendered, and any
+ * omission is reported in `RetrievalResult.delivery` — never silent.
+ *
+ * Both fields default to `null` (unlimited): the CLI and the prompt hook deliver
+ * EVERY effective `always` + matched `conditional` rule, which is the 0.3.0 D1 fix
+ * (the old hard count caps silently dropped valid matching rules). A caller that
+ * genuinely needs to bound injected size can pass a budget; trimming is then
+ * deterministic (least-important rules first) and observable.
+ */
+export interface DeliveryBudget {
+  /** Max total characters of rendered rule text across delivered prefs. null = unlimited. */
+  maxChars: number | null;
+  /** Max number of delivered preferences. null = unlimited. */
+  maxPreferences: number | null;
+}
+
+/** Unlimited by default: deliver the full effective set (D1 — no arbitrary cap). */
+export const DEFAULT_DELIVERY_BUDGET: DeliveryBudget = { maxChars: null, maxPreferences: null };
+
+/**
+ * Observable delivery accounting (0.3.0). Distinguishes the four stages the spec
+ * requires so omission is never silent: how many matched, how many were effective
+ * after conflict/precedence resolution, how many were delivered, and how many were
+ * omitted (by the relevance top-K limit vs. by an explicit delivery budget).
+ *
+ * Invariant: `matched - effective === overridden.length` and
+ * `effective - delivered === omittedByRelevanceLimit + omittedByBudget`.
+ */
+export interface DeliveryDiagnostics {
+  /** Applicability-matched, status/scope-eligible candidates entering conflict resolution. */
+  matched: number;
+  /** Winners after conflict/precedence resolution (the effective preference set). */
+  effective: number;
+  /** Preferences actually returned. */
+  delivered: number;
+  /** Effective `relevant` winners dropped because they fell outside the relevance top-K. */
+  omittedByRelevanceLimit: number;
+  /** Effective preferences dropped by an explicit delivery budget (0 when unlimited). */
+  omittedByBudget: number;
+  /** The budget in force for this retrieval. */
+  budget: DeliveryBudget;
+  /** Ids omitted by the delivery budget (explain only; deterministic, least-important first). */
+  omittedByBudgetIds?: string[];
+}
 
 export interface RetrievedPreference {
   id: string;
@@ -105,6 +141,8 @@ export interface RetrievalResult {
   environments: RetrievedEnvironment[];
   /** Preferences dropped because a higher-precedence rule superseded them. */
   overridden: { id: string; rule: string; supersededBy: string }[];
+  /** Observable delivery accounting (matched/effective/delivered/omitted). */
+  delivery: DeliveryDiagnostics;
   /** The normalized runtime context used for conditional evaluation (explain only). */
   runtimeContext?: RuntimeContextView;
   /** Evaluation result for every conditional candidate (explain only). */
@@ -134,6 +172,12 @@ export interface RetrievalOptions {
   languages?: string[];
   /** Explicit domain; overrides task-based domain inference when given. */
   domain?: string | null;
+  /**
+   * Optional explicit delivery budget. Omit (the default) to deliver the FULL
+   * effective set — every `always` + matched `conditional` rule, plus the relevance
+   * top-K. When supplied, trimming is deterministic and reported in `delivery`.
+   */
+  budget?: DeliveryBudget;
   /**
    * When true, populate `runtimeContext` and `conditionalEvaluations` in the
    * result (used by `ctx test-hook`). Off by default so the hot hook path adds
@@ -217,6 +261,7 @@ export class RetrievalEngine {
 
   retrieve(opts: RetrievalOptions): RetrievalResult {
     const limit = clampLimit(opts.limit ?? DEFAULT_LIMIT);
+    const budget = opts.budget ?? DEFAULT_DELIVERY_BUDGET;
     // The prompt hook (track === false) must stay a pure read: resolve the repo
     // without registering it, so concurrent hooks never write or contend. Other
     // callers (e.g. `ctx get`) keep registering the repo on first sight.
@@ -237,7 +282,7 @@ export class RetrievalEngine {
 
     // Gather + rank + resolve inside a read snapshot so a concurrent commit is
     // observed either fully-before or fully-after — never half-applied.
-    const { top, overridden, conditionalEvaluations } = withReadTx(this.db, () => {
+    const { top, overridden, delivery, conditionalEvaluations } = withReadTx(this.db, () => {
       const candidates = this.candidates(repo, opts.includeProposed ?? false);
 
       // Applicability split. All pools have already passed status + scope filtering
@@ -276,26 +321,50 @@ export class RetrievalEngine {
       const { winners, overridden } = resolveConflicts(combined.map((s) => s.pref));
       const winnerIds = new Set(winners.map((w) => w.id));
 
-      // Cap each pool independently so no pool can silently starve another.
+      // ---- effective set (D1) ----------------------------------------------
+      // Deliver EVERY effective `always` and matched `conditional` rule — the old
+      // hard caps (MAX_ALWAYS/MAX_CONDITIONAL = 20) silently dropped valid matching
+      // rules and chose the survivors by write-age, which is a correctness bug. The
+      // only remaining count limit is the relevance top-K for scored `relevant`
+      // rules, which is a genuine relevance ranking (below-threshold rules are
+      // already dropped), not an arbitrary cap on matching rules.
       const byPrecedenceAgeId = (a: Scored, b: Scored) =>
         precedenceRank(a.pref) - precedenceRank(b.pref) ||
         a.pref.createdAt.localeCompare(b.pref.createdAt) ||
         a.pref.id.localeCompare(b.pref.id);
 
-      const keptAlways = scoredAlways
+      const effectiveAlways = scoredAlways
         .filter((s) => winnerIds.has(s.pref.id))
-        .sort(byPrecedenceAgeId)
-        .slice(0, MAX_ALWAYS);
-      const keptConditional = scoredConditional
+        .sort(byPrecedenceAgeId);
+      const effectiveConditional = scoredConditional
         .filter((s) => winnerIds.has(s.pref.id))
-        .sort(byPrecedenceAgeId)
-        .slice(0, MAX_CONDITIONAL);
-      const keptRelevant = scoredRelevant
+        .sort(byPrecedenceAgeId);
+      const effectiveRelevant = scoredRelevant
         .filter((s) => winnerIds.has(s.pref.id))
         .sort(
           (a, b) => b.relevance - a.relevance || precedenceRank(a.pref) - precedenceRank(b.pref),
-        )
-        .slice(0, limit);
+        );
+      const keptRelevant = effectiveRelevant.slice(0, limit);
+      const omittedByRelevanceLimit = effectiveRelevant.length - keptRelevant.length;
+
+      // Effective rules are computed INDEPENDENTLY of the render budget. The budget,
+      // if any, only trims the already-resolved set, deterministically, from the
+      // least-important tail (relevant lowest-relevance first, then conditionals,
+      // then always), and records exactly what it dropped.
+      const effectiveCount = effectiveAlways.length + effectiveConditional.length + effectiveRelevant.length;
+      const matchedCount = scoredAlways.length + scoredConditional.length + scoredRelevant.length;
+      const ordered = [...effectiveAlways, ...effectiveConditional, ...keptRelevant];
+      const { kept, omittedIds } = applyDeliveryBudget(ordered, budget);
+
+      const delivery: DeliveryDiagnostics = {
+        matched: matchedCount,
+        effective: effectiveCount,
+        delivered: kept.length,
+        omittedByRelevanceLimit,
+        omittedByBudget: omittedIds.length,
+        budget,
+        ...(opts.explain ? { omittedByBudgetIds: omittedIds } : {}),
+      };
 
       const conditionalEvaluations: ConditionalEvaluation[] | undefined = opts.explain
         ? evaluations.map((e) => ({
@@ -310,7 +379,7 @@ export class RetrievalEngine {
 
       // Unconditional (always) rules lead, then matched conditionals, then the
       // task-relevant matches in relevance order.
-      return { top: [...keptAlways, ...keptConditional, ...keptRelevant], overridden, conditionalEvaluations };
+      return { top: kept, overridden, delivery, conditionalEvaluations };
     });
 
     // Best-effort write, outside the read snapshot. Skipped when track === false
@@ -334,6 +403,7 @@ export class RetrievalEngine {
       })),
       environments: this.environments(repo),
       overridden,
+      delivery,
       ...(opts.explain
         ? {
             runtimeContext: {
@@ -351,15 +421,10 @@ export class RetrievalEngine {
   }
 
   private candidates(repo: Repo | null, includeProposed: boolean): Preference[] {
-    const statuses: string[] = includeProposed
-      ? [...ACTIVE_STATUSES, "proposed", "observed"]
-      : [...ACTIVE_STATUSES];
-    return this.prefs.list().filter((p) => {
-      if (!statuses.includes(p.status)) return false;
-      if (p.scope === "global") return true;
-      if (p.scope === "repo") return repo != null && p.repoId === repo.id;
-      return false;
-    });
+    // D2: eligibility (status + scope/repo) is filtered in SQL. This is identical in
+    // result to the previous `prefs.list().filter(...)` full scan, but a many-repo or
+    // large store no longer loads and maps rows that cannot possibly match.
+    return this.prefs.listCandidates({ repoId: repo?.id ?? null, includeProposed });
   }
 
   /**
@@ -431,6 +496,37 @@ export class RetrievalEngine {
       variableNames: e.variableNames,
     }));
   }
+}
+
+/**
+ * Apply an explicit delivery budget to an already-ordered (most-important-first)
+ * scored set. Trimming is a clean suffix cut — once a rule would exceed the budget,
+ * it and everything after it is omitted — so the kept set is always the top-priority
+ * prefix and the result is fully deterministic. At least one rule is always kept
+ * even if it alone exceeds `maxChars`. With an unlimited budget (both null) this is
+ * a no-op and allocates nothing.
+ */
+function applyDeliveryBudget(
+  scored: Scored[],
+  budget: DeliveryBudget,
+): { kept: Scored[]; omittedIds: string[] } {
+  if (budget.maxChars == null && budget.maxPreferences == null) return { kept: scored, omittedIds: [] };
+  const kept: Scored[] = [];
+  const omittedIds: string[] = [];
+  let chars = 0;
+  for (let i = 0; i < scored.length; i++) {
+    const s = scored[i]!;
+    const cost = Math.min(s.pref.rule.length, RENDER_CHAR_CAP);
+    const overPref = budget.maxPreferences != null && kept.length >= budget.maxPreferences;
+    const overChars = budget.maxChars != null && kept.length > 0 && chars + cost > budget.maxChars;
+    if (overPref || overChars) {
+      for (let j = i; j < scored.length; j++) omittedIds.push(scored[j]!.pref.id);
+      break;
+    }
+    kept.push(s);
+    chars += cost;
+  }
+  return { kept, omittedIds };
 }
 
 const DEFAULT_IDF = Math.log(2);

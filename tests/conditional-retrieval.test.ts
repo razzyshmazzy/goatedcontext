@@ -232,20 +232,23 @@ test("rejected conditional never injects; proposed excluded by default; locked u
   t.cleanup();
 });
 
-// ---- caps -------------------------------------------------------------------
+// ---- delivery semantics (0.3.0 D1: no arbitrary cap) ------------------------
 
-test("matching conditionals are capped deterministically at MAX_CONDITIONAL (20)", () => {
+test("every matching conditional is delivered (no arbitrary cap), deterministically", () => {
   const t = makeTestContext();
   for (let i = 0; i < 40; i++) {
     t.ctx.preferences.remember({
-      rule: `TypeScript conditional rule number ${i} applies here.`,
+      rule: `TypeScript conditional rule tag${i} applies distinctly.`,
       scope: "global",
       condition: { language: "typescript" },
     });
   }
   const a = t.ctx.retrieval.retrieve({ cwd: CWD, task: "edit code", files: ["a.ts"], track: false });
   const conds = a.preferences.filter((p) => p.applicability === "conditional");
-  expect(conds).toHaveLength(20);
+  // 0.3.0: all 40 matching conditionals are delivered — the old MAX_CONDITIONAL(20)
+  // silently dropped matching rules; nothing is budget-dropped by default.
+  expect(conds).toHaveLength(40);
+  expect(a.delivery.omittedByBudget).toBe(0);
   // Deterministic: the same inputs yield the same set.
   const b = t.ctx.retrieval.retrieve({ cwd: CWD, task: "edit code", files: ["a.ts"], track: false });
   expect(b.preferences.map((p) => p.id)).toEqual(a.preferences.map((p) => p.id));

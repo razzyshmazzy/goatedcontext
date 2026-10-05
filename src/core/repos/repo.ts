@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { newId } from "../../utils/id.ts";
 import { nowIso } from "../../utils/time.ts";
-import { gitOriginUrl, gitToplevel } from "../../utils/git.ts";
+import { createGitProbe, type GitProbe } from "../../utils/git.ts";
 
 export interface Repo {
   id: string;
@@ -86,17 +86,20 @@ export function canonicalizeRemote(url: string): string | null {
  * path — stable in place, but treated as a new repo if the directory moves (a
  * documented MVP limitation).
  */
-export function detectRepoIdentity(cwd: string): {
+export function detectRepoIdentity(
+  cwd: string,
+  probe: GitProbe = createGitProbe(),
+): {
   root: string;
   identity: string;
   name: string;
   remoteUrl: string | null;
   hasRemote: boolean;
 } | null {
-  const root = gitToplevel(cwd);
+  const root = probe.toplevel(cwd);
   if (!root) return null;
 
-  const remoteUrl = gitOriginUrl(cwd);
+  const remoteUrl = probe.originUrl(cwd);
   const canonical = remoteUrl ? canonicalizeRemote(remoteUrl) : null;
 
   if (canonical) {
@@ -188,15 +191,15 @@ export class RepoService {
    * repo or contends on a write. A repo with no row has no repo-scoped preferences
    * by definition, so a read loses nothing by not registering it here.
    */
-  resolveReadOnly(cwd: string): Repo | null {
-    const detected = detectRepoIdentity(cwd);
+  resolveReadOnly(cwd: string, probe?: GitProbe): Repo | null {
+    const detected = detectRepoIdentity(cwd, probe);
     if (!detected) return null;
     return this.getByIdentity(detected.identity);
   }
 
   /** Resolve the repo for `cwd`, registering it on first sight. Null if not a git repo. */
-  resolve(cwd: string): Repo | null {
-    const detected = detectRepoIdentity(cwd);
+  resolve(cwd: string, probe?: GitProbe): Repo | null {
+    const detected = detectRepoIdentity(cwd, probe);
     if (!detected) return null;
 
     const existing = this.getByIdentity(detected.identity);

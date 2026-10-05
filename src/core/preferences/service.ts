@@ -11,6 +11,7 @@ import {
   type Status,
   type Polarity,
   type Applicability,
+  ACTIVE_STATUSES,
   RememberInputSchema,
   ProposeInputSchema,
 } from "./types.ts";
@@ -122,6 +123,22 @@ export interface ProposeResult {
   preference: Preference;
   /** True when evidence was merged into an existing proposal instead of creating one. */
   merged: boolean;
+}
+
+/** A portable preference record as it arrives from an export bundle (see transfer.ts). */
+export interface ImportRecord {
+  rule: string;
+  category: string;
+  domain: string | null;
+  polarity: Polarity;
+  scope: Scope;
+  status: Status;
+  applicability?: Applicability;
+  condition?: Condition | null;
+  confidence: number;
+  createdAt: string;
+  updatedAt: string;
+  evidence: { source: string; text: string; agentId: string | null; sessionId: string | null }[];
 }
 
 export interface TransitionOptions {
@@ -411,72 +428,41 @@ export class PreferenceService {
    * different dedup key → kept separately). Status/confidence/timestamps from the
    * record are preserved on newly-created rows; existing rows are never mutated.
    */
-  importOne(
-    rec: {
-      rule: string;
-      category: string;
-      domain: string | null;
-      polarity: Polarity;
-      scope: Scope;
-      status: Status;
-      applicability?: Applicability;
-      condition?: Condition | null;
-      confidence: number;
-      createdAt: string;
-      updatedAt: string;
-      evidence: { source: string; text: string; agentId: string | null; sessionId: string | null }[];
-    },
-    repoId: string | null,
-  ): { id: string; created: boolean } {
+  importOne(rec: ImportRecord, repoId: string | null): { id: string; created: boolean } {
+    return withWriteTx(this.db, () => this.importOneTx(rec, repoId));
+  }
+
+  /**
+   * Import MANY records in a SINGLE write transaction (0.3.0 D5). The per-record
+   * behavior is byte-identical to calling `importOne` for each — dedup, evidence
+   * merge and conflict preservation all work the same because a SELECT inside a
+   * transaction already sees that transaction's own prior INSERTs. The only change
+   * is transactional granularity: the old path committed N times (the import
+   * bottleneck); this commits once. Rollback is now all-or-nothing, which is a
+   * STRONGER guarantee than the old partial-import-on-error behavior — and bundles
+   * are fully schema-validated before any insert, so a mid-batch throw is a genuine
+   * storage fault where atomic rollback is the safer outcome.
+   */
+  importMany(
+    items: { rec: ImportRecord; repoId: string | null }[],
+  ): { id: string; created: boolean }[] {
+    if (items.length === 0) return [];
+    return withWriteTx(this.db, () => items.map(({ rec, repoId }) => this.importOneTx(rec, repoId)));
+  }
+
+  /** The body of a single import, assuming it already runs inside a write transaction. */
+  private importOneTx(rec: ImportRecord, repoId: string | null): { id: string; created: boolean } {
     this.validateScope(rec.scope, repoId);
     const applicability: Applicability = rec.applicability ?? "relevant";
     const condition = enforceConditionInvariant(applicability, rec.condition ?? null);
     const key = dedupKey(rec.scope, repoId, rec.rule, rec.polarity, condition);
 
-    return withWriteTx(this.db, () => {
-      const existing = this.db
-        .query<PreferenceRow, [string]>("SELECT * FROM preferences WHERE dedup_key = ? LIMIT 1")
-        .get(key);
-      if (existing) {
-        for (const e of rec.evidence) {
-          this.insertEvidence(existing.id, {
-            source: e.source,
-            repoId,
-            text: e.text,
-            agentId: e.agentId,
-            sessionId: e.sessionId,
-          });
-        }
-        return { id: existing.id, created: false };
-      }
-
-      const id = newId();
-      this.db
-        .query(
-          `INSERT INTO preferences
-             (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
-              applicability, condition_json, confidence, version, created_at, updated_at, last_used_at, dedup_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
-        )
-        .run(
-          id,
-          rec.rule,
-          this.sim.normalize(rec.rule),
-          rec.category,
-          rec.domain,
-          rec.polarity,
-          rec.scope,
-          repoId,
-          rec.status,
-          applicability,
-          condition ? conditionToCanonicalJson(condition) : null,
-          rec.confidence,
-          rec.createdAt,
-          rec.updatedAt,
-          key,
-        );
+    const existing = this.db
+      .query<PreferenceRow, [string]>("SELECT * FROM preferences WHERE dedup_key = ? LIMIT 1")
+      .get(key);
+    if (existing) {
       for (const e of rec.evidence) {
-        this.insertEvidence(id, {
+        this.insertEvidence(existing.id, {
           source: e.source,
           repoId,
           text: e.text,
@@ -484,8 +470,44 @@ export class PreferenceService {
           sessionId: e.sessionId,
         });
       }
-      return { id, created: true };
-    });
+      return { id: existing.id, created: false };
+    }
+
+    const id = newId();
+    this.db
+      .query(
+        `INSERT INTO preferences
+           (id, rule, normalized, category, domain, polarity, scope, repo_id, status,
+            applicability, condition_json, confidence, version, created_at, updated_at, last_used_at, dedup_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?)`,
+      )
+      .run(
+        id,
+        rec.rule,
+        this.sim.normalize(rec.rule),
+        rec.category,
+        rec.domain,
+        rec.polarity,
+        rec.scope,
+        repoId,
+        rec.status,
+        applicability,
+        condition ? conditionToCanonicalJson(condition) : null,
+        rec.confidence,
+        rec.createdAt,
+        rec.updatedAt,
+        key,
+      );
+    for (const e of rec.evidence) {
+      this.insertEvidence(id, {
+        source: e.source,
+        repoId,
+        text: e.text,
+        agentId: e.agentId,
+        sessionId: e.sessionId,
+      });
+    }
+    return { id, created: true };
   }
 
   // ---- evidence -----------------------------------------------------------
@@ -601,6 +623,58 @@ export class PreferenceService {
       prefs = prefs.filter((p) => p.repoId === filter.repoId);
     }
     return prefs;
+  }
+
+  /**
+   * Retrieval candidate set, filtered in SQL (0.3.0 D2). Returns exactly the rows
+   * that are even ELIGIBLE to be considered for the given repo context — active
+   * status (optionally plus proposed/observed) and visible scope (global, or
+   * repo-scoped bound to THIS repo). This pushes the status + scope/repo filter
+   * that `RetrievalEngine.candidates()` previously did in JS over a full `SELECT *`
+   * down into SQLite, so a many-repo store no longer materializes + maps every
+   * other repo's rows on every retrieval.
+   *
+   * SEMANTICS ARE IDENTICAL to the old `list().filter(...)` path: the WHERE clause
+   * mirrors it term-for-term and the `ORDER BY updated_at DESC, id ASC` matches
+   * `list()` exactly (same SQLite collation), so the ordered candidate stream — and
+   * therefore every downstream scoring/conflict/precedence decision — is unchanged.
+   * Only semantically-safe eligibility is pushed down; similarity, conditions,
+   * domain matching, conflicts and precedence all remain in JS.
+   */
+  listCandidates(opts: { repoId?: string | null; includeProposed?: boolean } = {}): Preference[] {
+    const statuses: string[] = opts.includeProposed
+      ? [...ACTIVE_STATUSES, "proposed", "observed"]
+      : [...ACTIVE_STATUSES];
+    const ph = statuses.map(() => "?").join(", ");
+    const repoId = opts.repoId ?? null;
+
+    // Two TARGETED branches unioned, rather than one `(scope='global' OR …)` query:
+    // with a single OR query the planner drives off the low-selectivity `status`
+    // index and still scans every repo's rows. The UNION ALL lets each branch pick
+    // the selective index — `idx_prefs_scope` for globals, and crucially
+    // `idx_prefs_repo (repo_id=?)` for the repo branch, so OTHER repos' rows are
+    // never scanned (verified with EXPLAIN QUERY PLAN; uses existing indexes, no
+    // schema change). The compound `ORDER BY` reproduces `list()`'s order exactly.
+    if (repoId) {
+      return this.db
+        .query<PreferenceRow, unknown[]>(
+          `SELECT * FROM preferences WHERE scope = 'global' AND status IN (${ph})
+           UNION ALL
+           SELECT * FROM preferences WHERE scope = 'repo' AND repo_id = ? AND status IN (${ph})
+           ORDER BY updated_at DESC, id ASC`,
+        )
+        .all(...statuses, repoId, ...statuses)
+        .map(rowToPref);
+    }
+    // No repo: repo-scoped rows can never match, so only globals are eligible —
+    // exactly what the old JS filter returned for a null repo.
+    return this.db
+      .query<PreferenceRow, unknown[]>(
+        `SELECT * FROM preferences WHERE scope = 'global' AND status IN (${ph})
+         ORDER BY updated_at DESC, id ASC`,
+      )
+      .all(...statuses)
+      .map(rowToPref);
   }
 
   pending(): Preference[] {

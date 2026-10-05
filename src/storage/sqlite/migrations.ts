@@ -177,4 +177,19 @@ export const migrations: Migration[] = [
       ALTER TABLE preferences ADD COLUMN condition_json TEXT;
     `,
   },
+  {
+    version: 6,
+    name: "dedup_key_general_index",
+    sql: `
+      -- A GENERAL (non-unique) index on dedup_key. The v2 index
+      -- (idx_prefs_dedup_unique) is PARTIAL — it only covers proposed/observed rows,
+      -- because it enforces the at-most-one-pending-proposal-per-key constraint. As a
+      -- result, a dedup_key lookup over approved/locked rows (every ctx import
+      -- record does one) fell back to a full table scan, making a large import
+      -- O(n^2). This additive, non-unique index turns that lookup into an index seek
+      -- with no behavior change (indexes never alter results). Kept ALONGSIDE the
+      -- partial unique index, which still enforces the proposal-dedup constraint.
+      CREATE INDEX IF NOT EXISTS idx_prefs_dedup ON preferences(dedup_key);
+    `,
+  },
 ];

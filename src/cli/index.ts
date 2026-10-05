@@ -39,6 +39,7 @@ import {
   resolveRepoLeaves,
 } from "../core/preferences/conditions.ts";
 import { detectRepoIdentity } from "../core/repos/repo.ts";
+import { createGitProbe } from "../utils/git.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
 
 /** Args after a `--`/`--exec` separator, captured by the entry point for `env run`. */
@@ -104,10 +105,13 @@ function makeRepoResolver(ctx: CtxContext, cwd: string): RepoResolver {
     if (v.length === 0) throw new CtxError("repo condition must not be empty.");
     if (v.startsWith("remote:") || v.startsWith("path:")) return v;
 
-    const detected = detectRepoIdentity(cwd);
+    // One request-local probe so the detect-then-resolve pair below reuses a single
+    // repo-root/origin lookup instead of spawning git twice over.
+    const probe = createGitProbe();
+    const detected = detectRepoIdentity(cwd, probe);
     if (detected && detected.name === v) {
       // Register (or fetch) the current repo so the stored identity matches its row.
-      const r = ctx.repos.resolve(cwd);
+      const r = ctx.repos.resolve(cwd, probe);
       return r?.identity ?? detected.identity;
     }
 

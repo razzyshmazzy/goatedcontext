@@ -1,0 +1,148 @@
+{
+  "env": {
+    "platform": "win32",
+    "node": "v26.3.0",
+    "bun": "1.4.2",
+    "cwd": "C:\\Users\\Admin\\OneDrive\\Documents\\GitHub\\goatedcontext"
+  },
+  "retrievalScaling": [
+    {
+      "prefs": 1000,
+      "activeCandidates": 811,
+      "sqlCandidates": 416,
+      "resultCount": 61,
+      "coldMs": 12.316,
+      "warm": {
+        "median": 8.697,
+        "p95": 10.945,
+        "p99": 13.642
+      },
+      "iters": 150
+    },
+    {
+      "prefs": 10000,
+      "activeCandidates": 8054,
+      "sqlCandidates": 4093,
+      "resultCount": 247,
+      "coldMs": 67.532,
+      "warm": {
+        "median": 74.455,
+        "p95": 86.116,
+        "p99": 91.654
+      },
+      "iters": 150
+    },
+    {
+      "prefs": 50000,
+      "activeCandidates": 40092,
+      "sqlCandidates": 20067,
+      "resultCount": 450,
+      "coldMs": 303.931,
+      "warm": {
+        "median": 322.028,
+        "p95": 348.656,
+        "p99": 348.779
+      },
+      "iters": 40
+    }
+  ],
+  "candidateReduction": [
+    {
+      "prefs": 10002,
+      "repos": 100,
+      "candidateCount": 4015,
+      "parityOk": true,
+      "rowsLoadedOld": 10002,
+      "rowsLoadedNew": 4015,
+      "rowsReductionPct": 59.9,
+      "oldCandidateBuildMs": {
+        "median": 123.985,
+        "p95": 138.067,
+        "p99": 143.405
+      },
+      "newCandidateBuildMs": {
+        "median": 54.174,
+        "p95": 63.203,
+        "p99": 64.241
+      },
+      "candidateBuildSpeedup": 2.29,
+      "retrieveMs": {
+        "median": 78.524,
+        "p95": 91.808,
+        "p99": 98.217
+      }
+    },
+    {
+      "prefs": 50002,
+      "repos": 100,
+      "candidateCount": 20129,
+      "parityOk": true,
+      "rowsLoadedOld": 50002,
+      "rowsLoadedNew": 20129,
+      "rowsReductionPct": 59.7,
+      "oldCandidateBuildMs": {
+        "median": 487.514,
+        "p95": 501.805,
+        "p99": 507.753
+      },
+      "newCandidateBuildMs": {
+        "median": 221.329,
+        "p95": 246.755,
+        "p99": 277.489
+      },
+      "candidateBuildSpeedup": 2.2,
+      "retrieveMs": {
+        "median": 330.363,
+        "p95": 390.814,
+        "p99": 399.083
+      }
+    }
+  ],
+  "dbOpenCost": {
+    "reopenMs": {
+      "median": 1.573,
+      "p95": 2.818,
+      "p99": 2.88
+    },
+    "note": "steady-state reopen of an already-migrated WAL db (no migration lock)"
+  },
+  "exportImport": {
+    "prefs": 10000,
+    "exportMs": 148.9,
+    "importMs": 421.5,
+    "bundlePrefs": 10002
+  },
+  "startupLatency": {
+    "version": {
+      "median": 59.249,
+      "p95": 65.961
+    },
+    "prefs": {
+      "median": 72.497,
+      "p95": 79.433
+    },
+    "get": {
+      "median": 138.55,
+      "p95": 166.794
+    },
+    "doctor": {
+      "median": 108.977,
+      "p95": 113.152
+    },
+    "agents": {
+      "median": 169.04,
+      "p95": 187.069
+    },
+    "hookCodex": {
+      "median": 108.441,
+      "p95": 111.389
+    }
+  },
+  "dbSizeGrowth": {
+    "rows": 50000,
+    "fullBytes": 34197504,
+    "afterDeleteBytes": 34197504,
+    "afterVacuumBytes": 122880,
+    "note": "file stays large after DELETE (expected SQLite behavior); VACUUM reclaims it"
+  }
+}

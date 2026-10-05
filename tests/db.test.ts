@@ -6,7 +6,7 @@ test("database initializes with the latest migration applied", () => {
   const row = db
     .query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_migrations")
     .get();
-  expect(row?.v).toBe(5);
+  expect(row?.v).toBe(6);
   db.close();
 });
 
@@ -26,6 +26,25 @@ test("v2 columns and indexes exist", () => {
   for (const c of ["agent_id", "session_id", "text_hash"]) {
     expect(evCols).toContain(c);
   }
+  db.close();
+});
+
+test("v6 adds a general dedup_key index (import dedup lookup is an index seek, not a scan)", () => {
+  const db = openMemoryDatabase();
+  const indexes = db
+    .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='preferences'")
+    .all()
+    .map((r) => r.name);
+  expect(indexes).toContain("idx_prefs_dedup"); // general (non-unique) index from v6
+  expect(indexes).toContain("idx_prefs_dedup_unique"); // v2 partial-unique index still present
+  // The approved/locked dedup lookup now seeks the index instead of scanning.
+  const plan = db
+    .query<{ detail: string }, [string]>("EXPLAIN QUERY PLAN SELECT * FROM preferences WHERE dedup_key = ? LIMIT 1")
+    .all("k")
+    .map((r) => r.detail)
+    .join(" ");
+  expect(plan).toContain("idx_prefs_dedup");
+  expect(plan).not.toContain("SCAN preferences");
   db.close();
 });
 
