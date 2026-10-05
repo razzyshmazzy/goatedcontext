@@ -6,7 +6,7 @@ test("database initializes with the latest migration applied", () => {
   const row = db
     .query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_migrations")
     .get();
-  expect(row?.v).toBe(6);
+  expect(row?.v).toBe(7);
   db.close();
 });
 
@@ -63,8 +63,21 @@ test("all core tables exist after initialization", () => {
     "environments",
     "environment_variables",
     "events",
+    "decision_signals",
   ]) {
     expect(names).toContain(t);
+  }
+  db.close();
+});
+
+test("v7 adds the decision_signals ledger with its evidence indexes", () => {
+  const db = openMemoryDatabase();
+  const indexes = db
+    .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='decision_signals'")
+    .all()
+    .map((r) => r.name);
+  for (const idx of ["idx_signals_domain", "idx_signals_domain_choice", "idx_signals_repo", "idx_signals_created"]) {
+    expect(indexes).toContain(idx);
   }
   db.close();
 });

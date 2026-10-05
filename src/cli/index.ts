@@ -1146,10 +1146,113 @@ export function buildProgram(deps: CliDeps): Command {
       });
     });
 
+  // ---- signals (evidence ledger, NOT preferences) -------------------------
+  // `signal` mutates the ledger; `signals` reads aggregated evidence. Signals are
+  // never authoritative — the agent reasons over them and may `ctx propose`, but a
+  // signal never becomes a preference automatically (no count threshold anywhere).
+  const signal = program
+    .command("signal")
+    .description("Record non-authoritative evidence of a developer decision (never a preference).");
+
+  signal
+    .command("add")
+    .description("Record one decision signal, e.g. `ctx signal add --domain backend --choice supabase`.")
+    .requiredOption("--domain <domain>", "Decision domain (e.g. backend, package-manager, frontend-framework)")
+    .requiredOption("--choice <choice>", "The chosen option (e.g. supabase, bun, react)")
+    .option("--repo", "Link to the repo at --cwd (default: link when --cwd is a git repo)")
+    .option("--no-repo", "Record as a repo-less (cross-project) observation")
+    .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
+    .option("--context <text>", "Optional short provenance note (capped; never secrets)")
+    .option("--agent-id <id>", "Provenance: which agent recorded this")
+    .option("--session-id <id>", "Provenance: session identifier")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        // Default: link to the current repo when --cwd is inside one, unless --no-repo.
+        let repoId: string | null = null;
+        if (opts.repo !== false) repoId = ctx.repos.resolve(opts.cwd)?.id ?? null;
+        const { signal: s, created } = ctx.signals.add({
+          domain: opts.domain,
+          choice: opts.choice,
+          repoId,
+          context: opts.context ?? null,
+          ...provenance(opts),
+        });
+        if (opts.json) return printJson({ ...s, created });
+        line(
+          created
+            ? `Recorded signal: ${s.domain}=${s.choiceRaw}${s.repoId ? " (this repo)" : ""}.`
+            : `Signal already recorded in this context: ${s.domain}=${s.choiceRaw}.`,
+        );
+      });
+    });
+
+  signal
+    .command("forget")
+    .description("Delete one recorded signal by id.")
+    .argument("<id>", "Signal id")
+    .option("--json", "Output JSON")
+    .action((id, opts) => {
+      withContext(deps, (ctx) => {
+        const removed = ctx.signals.forget(id);
+        if (opts.json) return printJson({ removed });
+        line(removed ? `Removed signal ${shortId(id)}.` : `No signal with id ${shortId(id)}.`);
+      });
+    });
+
+  signal
+    .command("clear")
+    .description("Delete all signals, or just one domain's (--domain).")
+    .option("--domain <domain>", "Only clear this domain")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        const removed = ctx.signals.clear(opts.domain);
+        if (opts.json) return printJson({ removed });
+        line(`Cleared ${removed} signal(s)${opts.domain ? ` in domain "${opts.domain}"` : ""}.`);
+      });
+    });
+
+  program
+    .command("signals")
+    .description("Show aggregated, non-authoritative decision evidence (for the agent to reason over).")
+    .option("--domain <domain>", "Only this decision domain")
+    .option("--raw", "List raw signal rows instead of aggregated evidence")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        if (opts.raw) {
+          const rows = ctx.signals.list(opts.domain ? { domain: opts.domain } : {});
+          if (opts.json) return printJson(rows);
+          if (rows.length === 0) return line("No signals recorded.");
+          for (const s of rows) {
+            line(`${s.createdAt.replace("T", " ").replace(/\..*$/, "")}  ${s.domain}=${s.choiceRaw}  repo=${s.repoId ? shortId(s.repoId) : "-"}  session=${s.sessionId ?? "-"}  (${shortId(s.id)})`);
+          }
+          return;
+        }
+        const evidence = ctx.signals.aggregate(opts.domain);
+        if (opts.json) return printJson(evidence);
+        if (evidence.length === 0) return line("No signals recorded.");
+        for (const d of evidence) {
+          line(`${d.domain}${d.contradictory ? "  (no single stable choice yet)" : ""}:`);
+          for (const c of d.choices) {
+            line(
+              `  ${c.label}: ${c.observations} observation${c.observations === 1 ? "" : "s"}` +
+                ` across ${c.distinctRepos} repo${c.distinctRepos === 1 ? "" : "s"}` +
+                (c.distinctSessions ? ` / ${c.distinctSessions} session${c.distinctSessions === 1 ? "" : "s"}` : "") +
+                ` (last ${c.lastSeen.slice(0, 10)})`,
+            );
+          }
+        }
+        line("");
+        line("Evidence only — not a preference. Decide whether to `ctx propose` based on the pattern.");
+      });
+    });
+
   // ---- export -------------------------------------------------------------
   program
     .command("export")
-    .description("Export preferences, evidence and repo links as a portable JSON bundle. Never exports secrets.")
+    .description("Export preferences, evidence and repo links as a portable JSON bundle. Never exports secrets or signals.")
     .option("--out <file>", "Write the bundle to a file instead of stdout")
     .action((opts) => {
       withContext(deps, (ctx) => {

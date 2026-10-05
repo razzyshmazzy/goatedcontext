@@ -195,6 +195,49 @@ path-based identity). Within one invocation a `GitProbe` memoizes each lookup so
 same repo-root/origin query is not spawned twice; the probe is request-local, never a
 cross-request cache, so it can never serve stale repo state.
 
+## Memory layers: preferences, proposals, signals
+
+ctx separates authoritative instructions from mere evidence, so it can learn how a
+developer works without treating every one-off instruction as permanent memory:
+
+| Layer | What it is | How it is created | Does it steer the agent? |
+|---|---|---|---|
+| **Preference** | An authoritative behavioral instruction. | `ctx remember` (explicit durable intent). | **Yes** — retrieved + injected, conflict-resolved. |
+| **Proposal** | An inferred *candidate* preference awaiting review. | `ctx propose` (a recurring pattern the agent noticed). | Only once approved (`proposed`/`observed` are never injected). |
+| **Signal** | Non-authoritative *evidence* of one developer decision (`domain=backend, choice=supabase`). | `ctx signal add` at the moment of a meaningful choice. | **No** — never injected, never auto-promoted. |
+
+Flow: *explicit durable* → **preference**; *a repeated local pattern in one
+conversation* → possible **proposal**; *decisions recurring across sessions/repos* →
+**signals** → (agent judgment) → possible **proposal** → normal preference lifecycle.
+
+### The signals ledger (`decision_signals`, 0.3.2)
+
+The memory protocol teaches the agent to judge durable intent **semantically** (no
+keyword matching) and, when the developer makes a meaningful but *not*-stated-durable
+choice, to record a compact signal. Signals are the one thing conversation context
+can't supply: the same choice made once in each of several *different* repositories.
+
+- **Schema:** `id, domain, choice, choice_raw, repo_id?, session_id?, agent_id?,
+  context?, created_at`. Only the compact `(domain, choice)` decision plus provenance —
+  **never transcripts, source code, or secrets**. No FK to `repos` (like the events
+  log), so cross-repo evidence survives a repo row being deleted.
+- **Dedup:** a repeat of the same `(domain, choice, repo, session)` on the same day is
+  collapsed; a different repo, session, or day is preserved as separate evidence.
+- **Aggregation:** `ctx signals [--domain] [--json]` returns per-choice
+  `observations / distinctRepos / distinctSessions / first+lastSeen`, strongest first,
+  with minority/contradictory choices kept. **Breadth (distinct repos) is surfaced
+  because it is far stronger evidence than a raw count** — one choice in five repos
+  beats eight in one.
+- **No automatic promotion.** There is **no count threshold anywhere** — a signal never
+  becomes a preference on its own. The LLM decides whether evidence warrants a
+  `ctx propose`. An explicit approved/locked preference always wins over any signal.
+- **Not a semantic cache.** Signals are structured evidence captured *at the moment a
+  decision is made*. ctx does **not** cache prompts/embeddings, scan old conversations,
+  or reconstruct history from transcripts — see the retrieval cache note above.
+- **Local-only / not exported.** Signals are deliberately excluded from `ctx export`
+  (they are machine-local evidence, not portable preferences). Promote one into a
+  preference first if you want it to travel.
+
 ## Applicability (`relevant` vs `always` vs `conditional`)
 
 Every preference has an **`applicability`** that decides HOW it reaches the agent.

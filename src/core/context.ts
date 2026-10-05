@@ -7,6 +7,7 @@ import { PreferenceService } from "./preferences/service.ts";
 import { RepoService } from "./repos/repo.ts";
 import { EnvironmentService } from "./environments/service.ts";
 import { EventService } from "./events/service.ts";
+import { SignalService } from "./signals/service.ts";
 import { RetrievalEngine } from "./retrieval/retrieval.ts";
 import { StatsStore } from "./stats/stats.ts";
 
@@ -25,6 +26,8 @@ export class CtxContext {
   readonly repos: RepoService;
   readonly environments: EnvironmentService;
   readonly events: EventService;
+  /** Non-authoritative ledger of developer decisions (evidence, never instructions). */
+  readonly signals: SignalService;
   readonly retrieval: RetrievalEngine;
   /** Local-only aggregate effectiveness stats (a plain JSON file, never in SQLite). */
   readonly stats: StatsStore;
@@ -38,6 +41,7 @@ export class CtxContext {
     this.repos = new RepoService(db);
     this.environments = new EnvironmentService(db, secrets);
     this.events = new EventService(db);
+    this.signals = new SignalService(db);
     this.stats = new StatsStore(paths.home);
     this.retrieval = new RetrievalEngine(
       db,

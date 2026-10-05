@@ -54,6 +54,8 @@ The agent can update the durable preference for you.
 
 Explicit durable preferences are remembered. Weakly inferred preferences are proposed instead. One-off task instructions are ignored. Secrets are never stored as preferences.
 
+goatedcontext can also learn recurring development choices across projects without treating every one-off instruction as permanent memory.
+
 ## How context reaches agents
 
 goatedcontext uses two delivery layers.

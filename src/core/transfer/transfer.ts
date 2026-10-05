@@ -9,7 +9,11 @@ import type { CtxContext } from "../context.ts";
  *
  * HARD RULE: secret values are NEVER exported. Preference rules and evidence are
  * plain developer text (no secrets), and environments — which reference secrets —
- * are intentionally excluded entirely.
+ * are intentionally excluded entirely. DECISION SIGNALS (the local evidence ledger)
+ * are also intentionally excluded: they are non-authoritative, local-only evidence of
+ * machine-specific activity, not portable preferences, so a bundle carries only the
+ * authoritative preference state. (Promote a signal into a preference first if you
+ * want it to travel.)
  *
  * The bundle is machine-portable: it carries no local row ids. Repo-scoped
  * preferences link to a repo by its stable `identity` (e.g. `remote:github.com/acme/app`),

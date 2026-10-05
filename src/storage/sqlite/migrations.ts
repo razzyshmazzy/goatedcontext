@@ -192,4 +192,35 @@ export const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_prefs_dedup ON preferences(dedup_key);
     `,
   },
+  {
+    version: 7,
+    name: "decision_signals",
+    sql: `
+      -- Non-authoritative EVIDENCE of developer decisions (0.3.2). A signal records a
+      -- meaningful development CHOICE at the moment it happens (domain=backend,
+      -- choice=supabase) so the agent can later reason about recurring patterns across
+      -- repos/sessions and, by its own judgment, PROPOSE a preference. Signals are NOT
+      -- preferences: they never directly instruct the agent and are never injected as
+      -- authoritative context. No transcripts, no source code, no secrets — only the
+      -- compact (domain, choice) decision plus provenance. Deliberately has NO foreign
+      -- key to repos (mirrors the events log): a signal is durable cross-repo evidence
+      -- that must survive a repo row being removed, keeping distinct-repo counts honest.
+      CREATE TABLE decision_signals (
+        id          TEXT PRIMARY KEY,
+        domain      TEXT NOT NULL,   -- normalized decision domain, e.g. 'backend'
+        choice      TEXT NOT NULL,   -- normalized choice, e.g. 'supabase'
+        choice_raw  TEXT NOT NULL,   -- the choice as originally given (for display)
+        repo_id     TEXT,            -- local repo id where the decision happened (nullable)
+        session_id  TEXT,            -- host session id when available (nullable)
+        agent_id    TEXT,            -- which agent recorded it (nullable)
+        context     TEXT,            -- optional short provenance note (capped; never secrets)
+        created_at  TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_signals_domain ON decision_signals(domain);
+      CREATE INDEX idx_signals_domain_choice ON decision_signals(domain, choice);
+      CREATE INDEX idx_signals_repo ON decision_signals(repo_id);
+      CREATE INDEX idx_signals_created ON decision_signals(created_at);
+    `,
+  },
 ];
