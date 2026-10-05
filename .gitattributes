@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Generated/text source files are canonical LF on EVERY OS (checkout included), so
+# committed generated artifacts (e.g. skills/**/SKILL.md) match the generator's LF
+# output byte-for-byte even on Windows where core.autocrlf would otherwise emit CRLF.
+*.md   text eol=lf
+*.ts   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
