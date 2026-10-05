@@ -134,6 +134,45 @@ function npmSanitizedBase(): NodeJS.ProcessEnv {
 }
 const BASE = npmSanitizedBase();
 
+/**
+ * The minimum system env vars `cmd.exe` / `npm.cmd` need to run on Windows. The
+ * isolated env is passed to the child WHOLESALE (it replaces, not merges with, the
+ * parent env — see `spawnPortable`), and Windows runs `.cmd` shims through
+ * `cmd.exe` (`shell: true`). Without these, that `cmd.exe` cannot initialize or
+ * resolve `npm.cmd` (needs `PATHEXT`), so `npm install -g` exits 1 before any
+ * product logic runs — the Windows-only CI failure. POSIX needs none of these.
+ */
+const WIN_SYSTEM_VARS = [
+  "SystemRoot",
+  "windir",
+  "ComSpec",
+  "PATHEXT",
+  "TEMP",
+  "TMP",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "USERPROFILE",
+] as const;
+
+/**
+ * Copy the required Windows system vars from the REAL environment (case-insensitively,
+ * since Windows env keys vary in case), preserving their canonical names. Real values
+ * are copied when present; the only synthesized default is `PATHEXT` (so `.cmd`
+ * resolution always works). Never inserts an empty-string var. Returns `{}` off Windows.
+ */
+function windowsSystemEnv(): NodeJS.ProcessEnv {
+  if (!isWin) return {};
+  const out: NodeJS.ProcessEnv = {};
+  for (const name of WIN_SYSTEM_VARS) {
+    const hit = Object.entries(process.env).find(([k]) => k.toLowerCase() === name.toLowerCase());
+    const value = hit?.[1];
+    if (value) out[name] = value;
+    else if (name === "PATHEXT") out[name] = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC";
+    // Otherwise leave it unset rather than inject an empty string.
+  }
+  return out;
+}
+
 // The machine's REAL npm global bin dir (computed with a sanitized env), stripped
 // from the test PATH so the isolated prefix is truly isolated — otherwise a real
 // `ctx` on the tester's PATH would masquerade as an existing install.
@@ -161,8 +200,15 @@ const TOOL_DIRS = [NPM, NODE].filter(Boolean).map((p) => dirname(p as string));
 function isoEnv(prefix: string, home: string): NodeJS.ProcessEnv {
   const binDir = binDirFor(prefix);
   const path = [binDir, ...TOOL_DIRS, cleanPath()].filter(Boolean).join(delimiter);
+  // On Windows the isolated env is built from an EXPLICIT allow-list so the handful
+  // of system vars cmd.exe/npm.cmd require are always present under their canonical
+  // names (the blanket `...BASE` spread was observed to drop them on CI, breaking
+  // `npm install -g` before product logic ran). `HOME` points at the isolated test
+  // home too, so npm's config/cache never escape the sandbox. POSIX is unchanged:
+  // it needs none of these and the full BASE already carries PATH + HOME.
+  const systemBase: NodeJS.ProcessEnv = isWin ? { ...windowsSystemEnv(), HOME: home } : { ...BASE };
   return {
-    ...BASE,
+    ...systemBase,
     npm_config_prefix: prefix, // both `npm prefix -g` and `npm install -g` target here
     CTX_HOME: home,
     CTX_SECRET_BACKEND: "file",
@@ -227,6 +273,27 @@ function scratch(): { prefix: string; home: string; claudeHome: string; cleanup:
   };
 }
 
+test("Windows: the isolated env preserves every system var cmd.exe/npm.cmd need", () => {
+  if (!isWin) return; // Windows-only guard: these vars don't exist on POSIX.
+  const s = scratch();
+  try {
+    const env = isoEnv(s.prefix, s.home);
+    // Case-insensitive presence check (Windows env keys vary in case).
+    const value = (name: string) =>
+      Object.entries(env).find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1];
+    const missing = WIN_SYSTEM_VARS.filter((name) => !value(name));
+    expect(missing).toEqual([]); // every required cmd.exe/npm.cmd var is present and non-empty
+    // Isolation is still intact: HOME points at the test home, the npm prefix/CTX_HOME
+    // are the isolated ones, and no npm_* lifecycle var leaked back in.
+    expect(value("HOME")).toBe(s.home);
+    expect(env.npm_config_prefix).toBe(s.prefix);
+    expect(env.CTX_HOME).toBe(s.home);
+    expect(Object.keys(env).some((k) => /^npm_(?!config_prefix$)/i.test(k))).toBe(false);
+  } finally {
+    s.cleanup();
+  }
+});
+
 test(
   "diagnostic: the isolated npm environment can actually run npm",
   () => {
@@ -244,9 +311,7 @@ test(
       // those don't exist at all, and the only vars this test genuinely depends on
       // are PATH (to resolve/run npm) and HOME (npm's cache/config). Asserting the
       // Windows set on Ubuntu/macOS was the cross-platform CI regression.
-      const requiredVars = isWin
-        ? ["SystemRoot", "windir", "ComSpec", "PATHEXT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE"]
-        : ["PATH", "HOME"];
+      const requiredVars = isWin ? [...WIN_SYSTEM_VARS] : ["PATH", "HOME"];
       const missing = requiredVars.filter((k) => !envHas(k));
       const npmVersion = captureChild("npm", ["--version"], { env });
       // Only shout when something is actually wrong, so normal runs stay quiet but
