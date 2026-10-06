@@ -555,6 +555,14 @@ export function renderSetup(result: SetupResult): string[] {
     }
     for (const l of extraAgentLines) out.push(l);
     out.push("");
+    // Universal interfaces are always ready once ctx is installed — any other agent can
+    // use one of these with no goatedcontext adapter. Stated plainly, without overclaiming
+    // that an unknown agent is auto-connected.
+    out.push("Universal interfaces (any agent):");
+    out.push("  MCP          ready   (ctx mcp)");
+    out.push("  Agent CLI    ready   (ctx agent context --json)");
+    out.push("  AGENTS.md    ready   (ctx sync)");
+    out.push("");
     // Only tell the user to restart Claude when Claude was actually configured.
     if (claudeConfigured) out.push("Restart Claude Code.");
     if (result.globalInstall === "upgraded" || result.globalInstall === "repaired")

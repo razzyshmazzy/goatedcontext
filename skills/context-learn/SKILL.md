@@ -210,7 +210,14 @@ single cheap command:
     ctx agent signal add --origin user --domain <domain> --choice <choice>
 
 e.g. `--domain backend --choice supabase`, `--domain package-manager --choice bun`,
-`--domain comment-language --choice greek`. Record only meaningful DECISIONS (backend,
+`--domain comment-language --choice greek`. The `--domain` is the decision CATEGORY and
+the `--choice` is the specific technology — never put the technology in the domain (write
+`--domain database --choice postgres`, NOT `--domain postgres`). Pick the nearest stable
+canonical category so ctx surfaces it consistently for every agent: common ones are
+database, backend, frontend, package-manager, testing, state-management, infrastructure,
+architecture, formatting. A genuinely new category (e.g. `shader-toolchain`) is fine — it
+stays a valid, retrievable custom domain; run `ctx domains` to see the canonical list and
+any custom domains already in the store. Record only meaningful DECISIONS (backend,
 framework, database, package manager, language, testing, styling, architecture) — never
 routine activity (files opened, functions written, commands run). A signal must be a
 real DEVELOPER decision (the user chose it, or you chose it for their task): pass
@@ -288,4 +295,4 @@ task context, in preferences OR signals. Secret VALUES belong only in `ctx env`.
   NOT retry in a loop. If the preference was explicit, mention briefly at the end —
   "I followed that preference here, but couldn't persist it to ctx." — no stack traces.
 
-<!-- ctx-memory-protocol: v7 -->
+<!-- ctx-memory-protocol: v8 -->

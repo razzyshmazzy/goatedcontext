@@ -7,8 +7,23 @@ import { withFileLock } from "../../utils/fs.ts";
 
 const LATEST_VERSION = migrations.reduce((m, x) => Math.max(m, x.version), 0);
 
-/** How long a connection waits for a lock before giving up (ms). */
+/**
+ * How long a connection waits for a lock before giving up (ms). The 10s default was
+ * chosen so that a competing writer WAITS through a normal write burst rather than
+ * failing with SQLITE_BUSY. `CTX_BUSY_TIMEOUT_MS` overrides it (a non-negative integer)
+ * for power users and for deterministic lock-contention tests — the default is
+ * unchanged, so the WAL audit still pins 10000.
+ */
 const BUSY_TIMEOUT_MS = 10000;
+
+function busyTimeoutMs(): number {
+  const raw = process.env.CTX_BUSY_TIMEOUT_MS;
+  if (raw != null && raw.trim() !== "") {
+    const n = Number.parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return BUSY_TIMEOUT_MS;
+}
 
 function sleepSync(ms: number): void {
   const sab = new Int32Array(new SharedArrayBuffer(4));
@@ -32,7 +47,7 @@ export function openDatabase(paths: CtxPaths): Database {
   ensureHome(paths);
   const db = openDb(paths.dbFile, { create: true });
   // Always safe, cheap, lock-free settings first.
-  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
+  db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs()};`);
   db.exec("PRAGMA foreign_keys = ON;");
 
   // Steady state (already WAL + migrated) is the overwhelmingly common case and

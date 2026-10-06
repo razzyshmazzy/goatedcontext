@@ -71,6 +71,9 @@ const FAKE_CAPS: FakeCaps = {
   fileContextAvailable: false,
   sessionInjection: false,
   memorySkill: true,
+  nativeHooks: true,
+  mcp: false,
+  permissionIntegration: false,
 };
 
 test("a fourth agent installs/repairs/uninstalls its memory skill via shared primitives (no core edits)", () => {

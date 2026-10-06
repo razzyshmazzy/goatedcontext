@@ -134,14 +134,20 @@ test(
       expect(human.stdout).toContain("Claude Code");
       expect(human.stdout).toContain("Codex");
       expect(human.stdout).toContain("Cursor");
-      expect(human.stdout).toContain("runtime unavailable"); // Cursor
+      // 0.4.0: Cursor now has runtime support via a sessionStart hook (not "unavailable").
+      expect(human.stdout).toContain("session hook");
+      expect(human.stdout).toContain("Universal interfaces");
 
       const json = JSON.parse((await run(["agents", "--cwd", repo, "--json"], env)).stdout);
-      const cursor = json.find((a: { id: string }) => a.id === "cursor");
+      const cursor = json.native.find((a: { id: string }) => a.id === "cursor");
       expect(cursor.capabilities.runtimePromptInjection).toBe(false);
-      const codex = json.find((a: { id: string }) => a.id === "codex");
+      const codex = json.native.find((a: { id: string }) => a.id === "codex");
       expect(codex.capabilities.staticAgentsMd).toBe(true);
       expect(codex.capabilities.runtimePromptInjection).toBe(true);
+      // 0.4.0: the universal interfaces are always advertised, regardless of native agents.
+      expect(json.universal.mcp.ready).toBe(true);
+      expect(json.universal.cli.ready).toBe(true);
+      expect(json.universal.agentsMd.ready).toBe(true);
     } finally {
       rmSync(h, { recursive: true, force: true });
       rmSync(repo, { recursive: true, force: true });
@@ -273,8 +279,8 @@ test(
       const agents = JSON.parse(
         (await run(["agents", "--codex-home", codexHome, "--cursor-home", cursorHome, "--cwd", repo, "--json"], env)).stdout,
       );
-      const codex = agents.find((a: { id: string }) => a.id === "codex");
-      const cursor = agents.find((a: { id: string }) => a.id === "cursor");
+      const codex = agents.native.find((a: { id: string }) => a.id === "codex");
+      const cursor = agents.native.find((a: { id: string }) => a.id === "cursor");
       expect(codex.memorySkill.health).toBe("current");
       expect(cursor.memorySkill.health).toBe("current");
       expect(codex.capabilities.memorySkill).toBe(true);

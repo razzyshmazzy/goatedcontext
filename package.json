@@ -1,7 +1,7 @@
 {
   "name": "goatedcontext",
-  "version": "0.3.7",
-  "description": "Local, shared developer memory for AI coding agents. Your coding preferences persist across repos and reach Claude Code, OpenAI Codex, and Cursor.",
+  "version": "0.4.0",
+  "description": "Local, shared developer memory for any AI coding agent. Works with any agent that speaks MCP, can invoke a subprocess, or reads AGENTS.md. Native zero-config integrations for Claude Code, OpenAI Codex, and Cursor.",
   "type": "module",
   "license": "MIT",
   "author": "razzyshmazzy",
@@ -18,7 +18,10 @@
     "claude-code",
     "codex",
     "cursor",
+    "mcp",
+    "model-context-protocol",
     "ai",
+    "ai-agents",
     "context",
     "developer-preferences",
     "cli",
@@ -33,6 +36,7 @@
     "dist",
     "README.md",
     "ARCHITECTURE.md",
+    "INTEGRATING.md",
     "LICENSE"
   ],
   "engines": {
@@ -43,6 +47,8 @@
     "build": "bun run scripts/build.mjs",
     "test": "bun test",
     "bench": "bun run scripts/bench/diagnostics.ts",
+    "stress": "bun run scripts/stress.ts",
+    "smoke:mcp": "bun run scripts/smoke/mcp.ts",
     "typecheck": "tsc --noEmit",
     "prepack": "bun run build",
     "prepublishOnly": "bun run typecheck && bun test && bun run build"
@@ -52,6 +58,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@types/bun": "^1.1.0",
     "typescript": "^5.5.0"
   }

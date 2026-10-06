@@ -12,6 +12,20 @@ import {
   type SkillRemoveAction,
   type SkillHealth,
 } from "../../core/assets/skill-install.ts";
+import {
+  cursorHooksFile,
+  upsertCursorHook,
+  removeCursorHook,
+  detectCursorHook,
+  type CursorHookAction,
+} from "./hooks.ts";
+import {
+  cursorMcpFile,
+  upsertCursorMcp,
+  removeCursorMcp,
+  detectCursorMcp,
+  type CursorMcpAction,
+} from "./mcp.ts";
 
 /**
  * Install the goatedcontext Cursor MEMORY skill.
@@ -84,4 +98,67 @@ export function uninstallCursorSkill(opts: CursorInstallOptions = {}): CursorUni
 export function cursorSkillHealth(opts: CursorInstallOptions = {}): SkillHealth {
   const platform = opts.platform ?? process.platform;
   return skillHealth(cursorHome(opts), CTX_MEMORY_SKILL_NAME, renderMemorySkill({ command: ctxCommand(platform) }));
+}
+
+// ---- 0.4.0 runtime: sessionStart hook + MCP server --------------------------
+
+/** The sessionStart hook command for Cursor (platform-aware launcher). */
+export function cursorSessionHookCommand(platform: NodeJS.Platform = process.platform): string {
+  return `${ctxCommand(platform)} hook cursor-session`;
+}
+
+export interface CursorRuntimeResult {
+  home: string;
+  hooksFile: string;
+  hookAction: CursorHookAction;
+  mcpFile: string;
+  mcpAction: CursorMcpAction;
+}
+
+/**
+ * Install/refresh Cursor's RUNTIME integration: a `sessionStart` hook that injects the
+ * bootstrap context block, and an `mcp.json` stdio server entry for per-task retrieval
+ * and memory writes. Surgical + idempotent; doubles as repair. Only ctx-owned entries
+ * are touched.
+ */
+export function installCursorRuntime(opts: CursorInstallOptions = {}): CursorRuntimeResult {
+  const home = cursorHome(opts);
+  const platform = opts.platform ?? process.platform;
+  mkdirSync(home, { recursive: true });
+  const lockFile = join(home, ".ctx-install.lock");
+  return withFileLock(lockFile, () => {
+    const hookAction = upsertCursorHook(cursorHooksFile(home), cursorSessionHookCommand(platform));
+    const mcpAction = upsertCursorMcp(cursorMcpFile(home), ctxCommand(platform), ["mcp"]);
+    return {
+      home,
+      hooksFile: cursorHooksFile(home),
+      hookAction,
+      mcpFile: cursorMcpFile(home),
+      mcpAction,
+    };
+  });
+}
+
+/** Remove ONLY ctx-owned Cursor runtime entries (hook + MCP server). */
+export function uninstallCursorRuntime(opts: CursorInstallOptions = {}): CursorRuntimeResult {
+  const home = cursorHome(opts);
+  const hooksFile = cursorHooksFile(home);
+  const mcpFile = cursorMcpFile(home);
+  if (!existsSync(home)) {
+    return { home, hooksFile, hookAction: "absent", mcpFile, mcpAction: "absent" };
+  }
+  const lockFile = join(home, ".ctx-install.lock");
+  return withFileLock(lockFile, () => ({
+    home,
+    hooksFile,
+    hookAction: removeCursorHook(hooksFile),
+    mcpFile,
+    mcpAction: removeCursorMcp(mcpFile),
+  }));
+}
+
+/** Whether Cursor's ctx runtime (sessionStart hook + MCP server) is currently configured. */
+export function cursorRuntimeStatus(opts: CursorInstallOptions = {}): { hook: boolean; mcp: boolean } {
+  const home = cursorHome(opts);
+  return { hook: detectCursorHook(cursorHooksFile(home)), mcp: detectCursorMcp(cursorMcpFile(home)) };
 }

@@ -24,6 +24,7 @@ Typical package contents:
 - `dist/index.js`
 - `README.md`
 - `ARCHITECTURE.md`
+- `INTEGRATING.md`
 - `LICENSE`
 - `package.json`
 
@@ -84,12 +85,20 @@ Run these before publishing:
 bun run build
 bun run typecheck
 bun test
+bun run smoke:mcp        # SDK-driven MCP end-to-end against the built bundle
+bun run stress           # multiprocess SQLite torture (32 readers + 8/4/4 writers)
 npm publish --dry-run
 ```
 
 All must succeed.
 
 `prepublishOnly` also runs the full validation gate automatically, and `prepack` rebuilds `dist/`.
+
+`bun run smoke:mcp` is a MAINTAINER/repo command (it runs under Bun and uses the MCP SDK
+as a client). It does NOT make installed users depend on Bun: by default it validates the
+shipped `node dist/index.js mcp` bundle — exactly the Node artifact end users run. There is
+no hand-built JSON-RPC and no hard-coded MCP protocol version anywhere; the SDK negotiates
+the protocol.
 
 A release is not ready if:
 
@@ -256,17 +265,38 @@ Do not require Codex Full Access merely for goatedcontext memory writes — the 
 
 ### Cursor
 
-Verify:
+Verify `ctx agents` / `ctx doctor` show the 0.4.0 runtime integration:
 
 ```text
+session hook ✓    (~/.cursor/hooks.json sessionStart)
+MCP               (~/.cursor/mcp.json goatedcontext server)
 AGENTS.md ✓
 memory skill ✓
-runtime unavailable
 ```
 
-until Cursor exposes a reliable supported prompt-time injection mechanism.
+Cursor has no per-prompt injection hook (`beforeSubmitPrompt` is block-only), so standing
+rules are injected at `sessionStart` and per-task retrieval is via the MCP `get_context`
+tool. Do not fake a per-prompt hook, and do not broaden dynamic preferences into static
+rules. Note: user-level `sessionStart` hooks are unavailable to Cursor CLOUD agents (local
+editor only); project-scoped `.cursor/hooks.json` + MCP remain the path there.
 
-Do not fake runtime parity by broadening dynamic preferences into static rules.
+### MCP (universal transport)
+
+For the repo/pre-publish gate, `bun run smoke:mcp` already drives the built bundle through
+the MCP SDK (initialize → tools/list → get_context reflecting a CLI-written preference →
+clean shutdown).
+
+To validate the INSTALLED package over MCP after publish, point the same SDK-based smoke at
+the globally installed launcher (from a checkout of this repo, which has the dev MCP SDK):
+
+```bash
+CTX_SMOKE_CMD=ctx bun run smoke:mcp        # POSIX
+CTX_SMOKE_CMD=ctx.cmd bun run smoke:mcp    # Windows
+```
+
+Expected: `SMOKE PASS`. Do not hand-pipe raw JSON-RPC and do not hard-code an MCP protocol
+version — the SDK negotiates it. Any MCP-capable host (Cursor, Claude Code, a custom client)
+can equivalently add the stdio server `{ "command": "ctx", "args": ["mcp"] }`.
 
 ## Memory acceptance test
 
@@ -396,18 +426,19 @@ Canonical sequence:
 2. build
 3. typecheck
 4. run full tests
-5. npm publish --dry-run
-6. review git diff/status
-7. commit
-8. push
-9. npm publish
-10. test npx goatedcontext@<version> from a clean directory
-11. run npx goatedcontext@<version> setup
-12. open a fresh shell if needed
-13. verify ctx --version
-14. run ctx agents
-15. run ctx doctor
-16. perform feature-specific acceptance tests
+5. bun run smoke:mcp and bun run stress
+6. npm publish --dry-run
+7. review git diff/status
+8. commit
+9. push
+10. npm publish
+11. test npx goatedcontext@<version> from a clean directory
+12. run npx goatedcontext@<version> setup
+13. open a fresh shell if needed
+14. verify ctx --version
+15. run ctx agents
+16. run ctx doctor
+17. perform feature-specific acceptance tests (incl. CTX_SMOKE_CMD=ctx bun run smoke:mcp)
 ```
 
 A release is not complete merely because `npm publish` succeeded.

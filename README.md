@@ -4,6 +4,9 @@
 
 Local developer memory shared across repos and between coding agents.
 
+**Your coding preferences are not owned by one agent.** They live in a local store and
+reach whichever agent you're using.
+
 > "You know what's funny? GOATS!" — Goat Simulator
 
 ## What it is
@@ -11,6 +14,25 @@ Local developer memory shared across repos and between coding agents.
 So I frequently switch between repos but most of my stack is the same, so I made goatedcontext to remember that. goatedcontext stores preferences locally, and hands the relevant ones to whichever agent you're using. it's runtime-based.
 
 It is **not** a context-window extension, a transcript RAG system, or a vector database. There are no embeddings and no server. It stores structured developer preferences and compact decision evidence in a local SQLite file, and gives the relevant subset to supported agents at prompt time. That's the whole idea.
+
+## Works with any agent
+
+goatedcontext works with any agent that can **speak MCP**, **invoke a subprocess**, or **read AGENTS.md**. Claude Code, Codex, and Cursor have native, zero-config integrations.
+
+| Agent | Integration |
+|-------|-------------|
+| Claude Code | native (prompt hook + memory skill + permissions) |
+| Codex | native (prompt hook + AGENTS.md + sandbox writable root) |
+| Cursor | native (sessionStart hook + MCP server + AGENTS.md + memory skill) |
+| local / custom / terminal / homegrown agents | **MCP server**, **`ctx agent` CLI**, or **AGENTS.md** — no goatedcontext adapter required |
+
+Supporting a new agent requires **no goatedcontext code change** — only one of the universal interfaces. This is universal *compatibility*, not a claim that `npx goatedcontext setup` auto-connects every agent in existence. See [INTEGRATING.md](INTEGRATING.md) (10-minute integration, with a Python example).
+
+```bash
+ctx mcp                                              # stdio MCP server (get_context + memory tools)
+ctx agent context --task "set up the backend" --json # stable JSON envelope for any subprocess-capable agent
+ctx sync                                             # static AGENTS.md projection (weakest fallback)
+```
 
 ## Example
 

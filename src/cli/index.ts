@@ -2,17 +2,26 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
 import { CtxContext } from "../core/context.ts";
+import { buildContextEnvelope } from "../core/agents/envelope.ts";
+import { renderContextBlock } from "../core/render/context-block.ts";
+import { classifyDomain, isCanonicalDomain, CANONICAL_DOMAINS, DOMAIN_ALIASES } from "../core/signals/domains.ts";
 import { CtxError, ValidationError } from "../utils/errors.ts";
 import { shortId } from "../utils/id.ts";
 import { installClaude, repairClaude, uninstallClaude } from "../adapters/claude/installer.ts";
 import { installCodex, uninstallCodex } from "../adapters/codex/installer.ts";
-import { installCursorSkill, uninstallCursorSkill } from "../adapters/cursor/installer.ts";
+import {
+  installCursorSkill,
+  uninstallCursorSkill,
+  installCursorRuntime,
+  uninstallCursorRuntime,
+} from "../adapters/cursor/installer.ts";
 import { syncProject, unsyncProject } from "../core/project/sync.ts";
 import { planDelivery } from "../core/agents/delivery.ts";
 import { capabilitiesFor, type AgentId } from "../core/agents/capabilities.ts";
 import { agentStatuses } from "../core/agents/registry.ts";
+import { universalInterfaces } from "../core/agents/universal.ts";
 import { CTX_INSTRUCTION_BEGIN } from "../adapters/claude/skills.ts";
 import { detectPromptHook, formatHookContext } from "../adapters/claude/hook.ts";
 import { simulateAgent } from "../adapters/test-hook.ts";
@@ -93,6 +102,24 @@ function resolveOrigin(opts: { origin?: string; agentId?: string }, action: stri
 
 /** Origin classes a caller may pass on the CLI. */
 const CLI_ORIGINS = ["user", "project", "external"] as const;
+
+/**
+ * Strict schema for `ctx agent context --stdin` (spec §3). Agents that do not want to
+ * shell-escape arbitrary user prompts pass a single newline-terminated JSON object on
+ * stdin instead. `.strict()` rejects unknown keys so a malformed/oversized payload is a
+ * hard validation error (nonzero exit, message to stderr) — never silently accepted,
+ * never eval'd.
+ */
+const StdinContextSchema = z
+  .object({
+    task: z.string().optional(),
+    cwd: z.string().optional(),
+    files: z.array(z.string()).optional(),
+    languages: z.array(z.string()).optional(),
+    domain: z.string().nullable().optional(),
+    includeProposed: z.boolean().optional(),
+  })
+  .strict();
 
 /**
  * AGENT write path (`ctx agent remember|propose|signal add`): `--origin` is MANDATORY
@@ -644,6 +671,92 @@ export function buildProgram(deps: CliDeps): Command {
   };
   registerPropose(program, "human");
 
+  // ---- agent context: the universal retrieval contract (stable JSON envelope) ---
+  // The one machine-oriented retrieval path every non-native agent uses; the MCP
+  // get_context tool reuses the SAME envelope builder, so CLI and MCP can never
+  // diverge (§15). Read-only (track:false) so frequent calls never contend on the
+  // write lock. JSON on stdout only; diagnostics/errors go to stderr via the harness.
+  const registerAgentContext = (parent: Command) => {
+    parent
+      .command("context")
+      .description("Universal retrieval: the stable JSON envelope of relevant developer context for a task.")
+      .option("--task <text>", "Description of the current task")
+      .option("--cwd <dir>", "Working directory", process.cwd())
+      .option("--file <path>", "Active file (repeatable); enables file/language conditions.", collect, [])
+      .option("--language <lang>", "Active language (repeatable); overrides inference.", collect, [])
+      .option("--domain <domain>", "Explicit decision-domain override")
+      .option("--include-proposed", "Also include non-authoritative candidate proposals")
+      .option("--budget-chars <n>", "Max rendered chars delivered (omission reported, never silent)", (v) => parseInt(v, 10))
+      .option("--budget-prefs <n>", "Max preferences delivered (omission reported, never silent)", (v) => parseInt(v, 10))
+      .option("--format <fmt>", "json | text", "json")
+      .option("--json", "Alias for --format json")
+      .option("--stdin", "Read one JSON object {task,cwd,files,languages,domain,includeProposed} on stdin")
+      .action(async (opts) => {
+        // Resolve inputs from CLI flags, or a single strict JSON object on stdin (§3).
+        let task: string | undefined = opts.task;
+        let cwd: string = opts.cwd;
+        let files: string[] = (opts.file as string[]) ?? [];
+        let languages: string[] = (opts.language as string[]) ?? [];
+        let domain: string | null | undefined = opts.domain ?? undefined;
+        let includeProposed = Boolean(opts.includeProposed);
+
+        if (opts.stdin) {
+          const raw = await readStdin();
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            throw new ValidationError("--stdin expected a single JSON object; could not parse stdin as JSON.");
+          }
+          const input = StdinContextSchema.parse(parsed);
+          if (input.task !== undefined) task = input.task;
+          if (input.cwd !== undefined) cwd = input.cwd;
+          if (input.files !== undefined) files = input.files;
+          if (input.languages !== undefined) languages = input.languages;
+          if (input.domain !== undefined) domain = input.domain;
+          if (input.includeProposed !== undefined) includeProposed = input.includeProposed;
+        }
+
+        const format = opts.json ? "json" : String(opts.format ?? "json");
+        if (format !== "json" && format !== "text") {
+          throw new ValidationError(`--format must be "json" or "text" (got "${format}").`);
+        }
+
+        const budget =
+          opts.budgetChars != null || opts.budgetPrefs != null
+            ? {
+                maxChars: opts.budgetChars != null ? Number(opts.budgetChars) : null,
+                maxPreferences: opts.budgetPrefs != null ? Number(opts.budgetPrefs) : null,
+              }
+            : undefined;
+
+        withContext(deps, (ctx) => {
+          const result = ctx.retrieval.retrieve({
+            cwd,
+            task,
+            files,
+            languages,
+            domain,
+            includeProposed,
+            budget,
+            track: false, // read-only: frequent agent calls must not contend on the write lock
+            explain: true, // populate consideredDomains + diagnostics for the envelope/meta
+          });
+          if (format === "text") {
+            // Text mode renders the canonical AUTHORITATIVE block only (proposals never
+            // render as preferences). Empty output = no relevant context.
+            const authoritative = result.preferences.filter(
+              (p) => p.status === "approved" || p.status === "locked",
+            );
+            const block = renderContextBlock({ ...result, preferences: authoritative });
+            if (block) line(block);
+            return;
+          }
+          printJson(buildContextEnvelope(result, { includeProposed, isCanonicalDomain }));
+        });
+      });
+  };
+
   // ---- agent: the provenance-required, auto-allowed memory-write surface ---
   // These are the ONLY write commands the installed Claude/Codex permission rules
   // auto-approve. Each requires an explicit --origin and fails closed without it, so a
@@ -655,6 +768,7 @@ export function buildProgram(deps: CliDeps): Command {
     .description("Agent-integration memory writes (provenance required; the auto-allowed write path).");
   registerRemember(agent, "agent");
   registerPropose(agent, "agent");
+  registerAgentContext(agent);
 
   // ---- prefs --------------------------------------------------------------
   const prefs = program
@@ -935,13 +1049,20 @@ export function buildProgram(deps: CliDeps): Command {
   program
     .command("hook")
     .description("Internal: proactive-retrieval hook invoked by an agent. Reads hook JSON on stdin.")
-    .argument("<event>", "Hook event (claude-prompt | codex-prompt)")
+    .argument("<event>", "Hook event (claude-prompt | codex-prompt | cursor-session)")
     .option("--debug", "Write diagnostics to <ctx home>/hook.log")
     .action(async (event, opts) => {
       // Fail OPEN: this must never make the agent unusable. Any error → no output,
       // exit 0, so the agent proceeds with the user's original prompt untouched.
       const debug = opts.debug || (deps.env ?? process.env).CTX_HOOK_DEBUG;
       try {
+        // Cursor's sessionStart hook: distinct input (workspace_roots, no prompt) and a
+        // JSON response `{additional_context}` — handled separately from the plain-stdout
+        // Claude/Codex prompt hooks.
+        if (event === "cursor-session") {
+          await runCursorSessionHook(deps, Boolean(debug));
+          return;
+        }
         if (event !== "claude-prompt" && event !== "codex-prompt") return;
         const raw = await readStdin();
         if (!raw.trim()) return;
@@ -979,6 +1100,24 @@ export function buildProgram(deps: CliDeps): Command {
         // swallow — fail open
       }
     });
+
+  // ---- mcp (universal MCP transport over stdio) ---------------------------
+  // Serves the small MCP tool surface (get_context + memory writes) backed by the SAME
+  // core services as the CLI. The SDK is imported LAZILY so normal `ctx` invocations
+  // never load it. No daemon: the process lives only while the host keeps the stream
+  // open. `ctx agent mcp` is registered as an alias further below.
+  const runMcp = async () => {
+    const { runMcpServer } = await import("../mcp/server.ts");
+    await runMcpServer(deps.env ?? process.env);
+  };
+  program
+    .command("mcp")
+    .description("Run the goatedcontext MCP server over stdio (get_context + memory tools).")
+    .action(runMcp);
+  agent
+    .command("mcp")
+    .description("Alias of `ctx mcp`: run the MCP server over stdio.")
+    .action(runMcp);
 
   // ---- test-hook (debug delivery for any agent without launching it) ------
   program
@@ -1319,6 +1458,103 @@ export function buildProgram(deps: CliDeps): Command {
       });
     });
 
+  // ---- context-budget (token-growth instrumentation; measurement only) ----
+  // Reports how much memory a task actually delivers, so accumulated-preference growth
+  // is MEASURABLE. Pure instrumentation (spec §30): it never drops or rewrites memory.
+  // Authoritative overflow (by relevance or an explicit budget) is surfaced, never silent.
+  program
+    .command("context-budget")
+    .description("Measure the delivered context for a task: counts, rendered chars, approx tokens, overflow.")
+    .option("--task <text>", "Description of the current task")
+    .option("--cwd <dir>", "Working directory", process.cwd())
+    .option("--include-proposed", "Also account for non-authoritative candidate proposals")
+    .option("--budget-chars <n>", "Simulate a rendered-char budget", (v) => parseInt(v, 10))
+    .option("--budget-prefs <n>", "Simulate a preference-count budget", (v) => parseInt(v, 10))
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      const includeProposed = Boolean(opts.includeProposed);
+      const budget =
+        opts.budgetChars != null || opts.budgetPrefs != null
+          ? {
+              maxChars: opts.budgetChars != null ? Number(opts.budgetChars) : null,
+              maxPreferences: opts.budgetPrefs != null ? Number(opts.budgetPrefs) : null,
+            }
+          : undefined;
+      withContext(deps, (ctx) => {
+        const result = ctx.retrieval.retrieve({
+          cwd: opts.cwd,
+          task: opts.task,
+          includeProposed,
+          budget,
+          track: false,
+          explain: true,
+        });
+        const env = buildContextEnvelope(result, { includeProposed, isCanonicalDomain });
+        const d = env.meta.diagnostics;
+        if (opts.json) return printJson({ domains: env.meta.domains, diagnostics: d });
+        const row = (label: string, value: number | string) =>
+          line(`${(label + ":").padEnd(22)}${String(value).padStart(8)}`);
+        line("goatedcontext context budget");
+        line("");
+        row("Candidate prefs", d.candidate);
+        row("Effective prefs", d.effective);
+        row("Delivered prefs", d.delivered);
+        row("Authoritative", d.authoritative);
+        row("Observed patterns", d.observedPatterns);
+        row("Rendered chars", d.renderedChars);
+        row("Approx tokens", d.approxTokens);
+        row("Omitted (relevance)", d.omittedByRelevance);
+        row("Omitted (budget)", d.omittedByBudget);
+        line("");
+        line(
+          d.overflow
+            ? "OVERFLOW: some effective preferences were not delivered (see omitted counts) — surfaced, never silently dropped."
+            : "No overflow: every effective preference was delivered.",
+        );
+      });
+    });
+
+  // ---- domains (inspection/debug only) ------------------------------------
+  // A small read-only window onto the canonical decision-domain vocabulary, the tiny
+  // alias layer, and whatever custom domains the store has actually observed. ctx does
+  // NOT ask users to manage domains — the agent picks a category at write time and the
+  // core normalizes/classifies it. Custom (non-canonical) domains are valid and listed.
+  program
+    .command("domains")
+    .description("Inspect canonical decision domains, aliases, and observed custom domains.")
+    .option("--json", "Output JSON")
+    .action((opts) => {
+      withContext(deps, (ctx) => {
+        const observedRaw = new Set<string>();
+        for (const s of ctx.signals.list()) observedRaw.add(s.domain);
+        for (const p of ctx.preferences.list()) if (p.domain) observedRaw.add(p.domain);
+        const obsCanonical = new Set<string>();
+        const obsCustom = new Set<string>();
+        for (const raw of observedRaw) {
+          const c = classifyDomain(raw);
+          (c.canonical ? obsCanonical : obsCustom).add(c.domain);
+        }
+        const canonical = [...CANONICAL_DOMAINS].sort();
+        if (opts.json) {
+          return printJson({
+            canonical,
+            aliases: DOMAIN_ALIASES,
+            observed: { canonical: [...obsCanonical].sort(), custom: [...obsCustom].sort() },
+          });
+        }
+        line("Canonical decision domains (recommended; recognized for automatic cross-repo surfacing):");
+        for (const d of canonical) line(`  ${d}`);
+        line("");
+        line("Aliases (normalized spelling → canonical):");
+        for (const [k, v] of Object.entries(DOMAIN_ALIASES)) line(`  ${k} → ${v}`);
+        line("");
+        const custom = [...obsCustom].sort();
+        line(
+          `Observed custom domains (valid and retrievable; surface only when a task names them): ${custom.length ? custom.join(", ") : "(none)"}`,
+        );
+      });
+    });
+
   // ---- signals (evidence ledger, NOT preferences) -------------------------
   // `signal` mutates the ledger; `signals` reads aggregated evidence. Signals are
   // never authoritative — the agent reasons over them and may `ctx propose`, but a
@@ -1621,10 +1857,10 @@ export function buildProgram(deps: CliDeps): Command {
       });
     });
 
-  // ---- agents (show supported agents + capabilities) ----------------------
+  // ---- agents (native integrations + universal interfaces) ----------------
   program
     .command("agents")
-    .description("Show the supported coding agents, whether each is installed, and its capabilities.")
+    .description("Show native agent integrations, the universal interfaces, and their status.")
     .option("--cwd <dir>", "Working directory (Cursor/AGENTS.md projection is repo-scoped)", process.cwd())
     .option("--claude-home <dir>", "Override the Claude config dir (~/.claude)")
     .option("--codex-home <dir>", "Override the Codex config dir ($CODEX_HOME or ~/.codex)")
@@ -1638,12 +1874,20 @@ export function buildProgram(deps: CliDeps): Command {
         codexHome: opts.codexHome,
         cursorHome: opts.cursorHome,
       });
-      if (opts.json) return printJson(statuses);
+      const universal = universalInterfaces();
+      if (opts.json) {
+        // 0.4.0: distinguish native integrations from universal interfaces. `native`
+        // preserves the prior per-agent status shape; `universal` is the new section.
+        return printJson({ native: statuses, universal });
+      }
+      line("Native integrations (zero-config when detected):");
       for (const s of statuses) {
         const parts: string[] = [];
         parts.push(s.installed ? "installed" : s.detected ? "detected" : "not installed");
         if (s.capabilities.runtimePromptInjection) parts.push(s.installed ? "runtime ✓" : "runtime available");
+        else if (s.capabilities.sessionInjection) parts.push(s.installed ? "session hook ✓" : "session hook available");
         else parts.push("runtime unavailable");
+        if (s.capabilities.mcp) parts.push("MCP");
         if (s.capabilities.staticAgentsMd) parts.push(s.staticPresent ? "AGENTS.md ✓" : "AGENTS.md available");
         // Sandbox writable root (Codex only): shown when the agent is configured.
         if (s.writableRootConfigured !== null && s.installed)
@@ -1659,10 +1903,16 @@ export function buildProgram(deps: CliDeps): Command {
         // Narrow ctx command permissions (seamless writes) — shown where applicable.
         if (s.permissionsConfigured !== null && s.installed)
           parts.push(s.permissionsConfigured ? "permissions ✓" : "permissions (missing)");
-        line(`${s.label.padEnd(13)} ${parts.join("   ")}`);
+        line(`  ${s.label.padEnd(13)} ${parts.join("   ")}`);
       }
       line("");
-      line("Missing agents are normal. Configure one with: ctx install <claude|codex|cursor>");
+      line("Universal interfaces (any agent — no goatedcontext adapter required):");
+      for (const u of [universal.mcp, universal.cli, universal.agentsMd]) {
+        line(`  ${u.label.padEnd(13)} ${u.ready ? "ready" : "unavailable"}   ${u.description}`);
+      }
+      line("");
+      line("Missing native agents are normal — any other agent can use the universal interfaces above.");
+      line("Configure a native integration with: ctx install <claude|codex|cursor>");
     });
 
   return program;
@@ -1723,19 +1973,58 @@ function installCodexTarget(deps: CliDeps, opts: Record<string, unknown>): void 
 function installCursorTarget(deps: CliDeps, opts: Record<string, unknown>): void {
   withContext(deps, (ctx) => {
     const skill = installCursorSkill({ home: opts.cursorHome as string | undefined });
+    const runtime = installCursorRuntime({ home: opts.cursorHome as string | undefined });
     let synced: ReturnType<typeof syncProject> | null = null;
     try {
       synced = syncProject(ctx, (opts.cwd as string) ?? process.cwd());
     } catch {
-      /* not in a repo — the global memory skill still installed fine */
+      /* not in a repo — the global memory skill + runtime still installed fine */
     }
-    if (opts.json) return printJson({ cursorSkill: skill, repoSync: synced });
+    if (opts.json) return printJson({ cursorSkill: skill, cursorRuntime: runtime, repoSync: synced });
     line(opts.repair ? "Repaired Cursor adapter." : "Installed Cursor adapter.");
     line(`  memory skill:  ${skill.skillFile} (${skill.skillAction})`);
+    line(`  sessionStart:  ${runtime.hooksFile} (${runtime.hookAction})`);
+    line(`  MCP server:    ${runtime.mcpFile} (${runtime.mcpAction})`);
     if (synced) line(`  repo AGENTS:   ${synced.agentsFile} (${synced.agentsAction}, ${synced.ruleCount} repo rule(s))`);
     line("");
-    line("Cursor has no reliable prompt-time hook: it READS the repo AGENTS.md and learns to WRITE preferences from the user skill. (User skills are local-editor only — not cloud agents.)");
+    line("Cursor reads the repo AGENTS.md (static), injects standing rules at sessionStart, and");
+    line("uses the goatedcontext MCP server for per-task retrieval and memory writes.");
+    line("Note: user-level sessionStart hooks are unavailable to Cursor CLOUD agents (local editor only);");
+    line("project-scoped .cursor/hooks.json and MCP remain the path there.");
   });
+}
+
+/**
+ * Cursor `sessionStart` hook body. Reads the hook JSON on stdin (`workspace_roots`, …)
+ * and emits `{"additional_context": "…"}` on stdout — Cursor requires JSON here. We
+ * inject only the STANDING (always-on) preferences appropriate at session start, plus a
+ * clear instruction to call the ctx MCP `get_context` tool for task-specific context.
+ * Fail OPEN: on ANY error we print `{}` and exit 0 so the Cursor session is never blocked.
+ */
+async function runCursorSessionHook(deps: CliDeps, debug: boolean): Promise<void> {
+  const instruction =
+    "goatedcontext is available via the MCP server 'goatedcontext'. Before substantial coding or " +
+    "design decisions, call its get_context tool with the current task to retrieve task-specific " +
+    "developer preferences and past decision evidence. Persist durable memory only from the user's " +
+    "own expressed intent (the remember/propose/record_decision tools, origin=user).";
+  try {
+    const raw = await readStdin();
+    const payload = raw.trim() ? (JSON.parse(raw) as { workspace_roots?: unknown }) : {};
+    const roots = Array.isArray(payload.workspace_roots) ? payload.workspace_roots : [];
+    const cwd = (typeof roots[0] === "string" && roots[0].length > 0 ? roots[0] : process.cwd()) as string;
+    const block = withContext(deps, (ctx) => {
+      const result = ctx.retrieval.retrieve({ cwd, track: false });
+      // Session start has no task, so only ALWAYS-on rules are meaningful; observed
+      // patterns and relevant rules are task-specific and come via MCP get_context.
+      const always = result.preferences.filter((p) => p.applicability === "always");
+      return renderContextBlock({ ...result, preferences: always, observedPatterns: [] });
+    });
+    const additional_context = block ? `${block}\n\n${instruction}` : instruction;
+    process.stdout.write(JSON.stringify({ additional_context }) + "\n");
+  } catch (err) {
+    if (debug) hookDebug(deps, `cursor-session error: ${(err as Error).message}`);
+    process.stdout.write("{}\n"); // fail open — never block the Cursor session
+  }
 }
 
 function uninstallCodexTarget(deps: CliDeps, opts: Record<string, unknown>): void {
@@ -1753,16 +2042,19 @@ function uninstallCodexTarget(deps: CliDeps, opts: Record<string, unknown>): voi
 
 function uninstallCursorTarget(deps: CliDeps, opts: Record<string, unknown>): void {
   const skill = uninstallCursorSkill({ home: opts.cursorHome as string | undefined });
+  const runtime = uninstallCursorRuntime({ home: opts.cursorHome as string | undefined });
   withContext(deps, (ctx) => {
     let unsynced: ReturnType<typeof unsyncProject> | null = null;
     try {
       unsynced = unsyncProject(ctx, (opts.cwd as string) ?? process.cwd());
     } catch {
-      /* not in a repo — the global skill removal still applied */
+      /* not in a repo — the global skill/runtime removal still applied */
     }
-    if (opts.json) return printJson({ cursorSkill: skill, repoUnsync: unsynced });
+    if (opts.json) return printJson({ cursorSkill: skill, cursorRuntime: runtime, repoUnsync: unsynced });
     line("Removed the ctx Cursor adapter. Your preferences and environments are untouched.");
     line(`  memory skill:  (${skill.skillAction})`);
+    line(`  sessionStart:  (${runtime.hookAction})`);
+    line(`  MCP server:    (${runtime.mcpAction})`);
     if (unsynced) line(`  AGENTS.md:     ${unsynced.agentsFile} (${unsynced.agentsAction})`);
   });
 }

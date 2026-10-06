@@ -14,7 +14,7 @@ import { codexHome, codexHooksFile, detectCodexHook } from "../../adapters/codex
 import { codexSkillHealth, detectCodexRules } from "../../adapters/codex/installer.ts";
 import { codexConfigFile, codexWritableRootConfigured } from "../../adapters/codex/config.ts";
 import { resolvePaths } from "../../storage/paths.ts";
-import { cursorSkillHealth } from "../../adapters/cursor/installer.ts";
+import { cursorSkillHealth, cursorRuntimeStatus } from "../../adapters/cursor/installer.ts";
 import { AGENTS_BEGIN, AGENTS_END } from "../project/projection.ts";
 import { skillHealth, type SkillHealth } from "../assets/skill-install.ts";
 import { hasManagedBlock } from "../../utils/managed-block.ts";
@@ -233,16 +233,27 @@ function cursorStatus(opts: AgentStatusOptions): AgentStatus {
   const staticPresent = repoAgentsBlockPresent(cwd);
   const memHealth = cursorSkillHealth({ home: globalDir });
   const memorySkill = { installed: memHealth !== "missing", health: memHealth };
-  // Cursor has two channels: the repo AGENTS.md (static READ) and the global memory
-  // skill (WRITE). "installed" = either is present; "healthy" requires the write
-  // skill current and, when in a repo, the static block present.
-  const installed = staticPresent || memorySkill.installed;
-  const healthy = memHealth === "current" && (repoRoot ? staticPresent : true);
-  const notes = ["runtime injection unavailable (Cursor hooks cannot inject context)"];
+  // 0.4.0 runtime: a sessionStart hook (standing-rule bootstrap) + an MCP server entry
+  // (per-task retrieval + writes). Cursor now has FOUR channels: repo AGENTS.md (static
+  // READ), the memory skill (WRITE guidance), the sessionStart hook, and MCP.
+  const runtime = cursorRuntimeStatus({ home: globalDir });
+  const installed = staticPresent || memorySkill.installed || runtime.hook || runtime.mcp;
+  // Healthy = write skill current + runtime wired (hook + MCP) + static present when in a repo.
+  const healthy =
+    memHealth === "current" && runtime.hook && runtime.mcp && (repoRoot ? staticPresent : true);
+  const notes: string[] = [];
+  notes.push(
+    runtime.hook && runtime.mcp
+      ? "runtime: sessionStart hook + MCP server configured"
+      : "runtime available via sessionStart hook + MCP (run: ctx install cursor)",
+  );
   if (memHealth === "stale") notes.push("memory skill stale (repair: ctx repair cursor)");
   if (memHealth === "missing") notes.push("memory skill missing (run: ctx install cursor)");
+  if (!runtime.hook) notes.push("sessionStart hook not installed (run: ctx install cursor)");
+  if (!runtime.mcp) notes.push("MCP server not configured (run: ctx install cursor)");
   if (!staticPresent && repoRoot) notes.push("repo AGENTS.md not projected (run: ctx sync)");
   if (!repoRoot) notes.push("not inside a git repo — the repo AGENTS.md projection is repo-scoped");
+  notes.push("sessionStart hook is local-editor only; unavailable to Cursor cloud agents");
   return {
     id: "cursor",
     label: LABELS.cursor,

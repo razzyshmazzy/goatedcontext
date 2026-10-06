@@ -3,9 +3,11 @@
 This document explains how `ctx` is put together and, importantly, *why* it is
 shaped the way it is. The guiding principle:
 
-> **The core product is the `ctx` CLI and context engine. Agent integrations
-> (Claude Code, Codex, and Cursor today; MCP a possible future one) are adapters
-> around that core.**
+> **The core product is the `ctx` context engine. Everything else is a thin
+> transport over it: native hooks (Claude Code, Codex, Cursor), a universal MCP
+> server, the universal agent CLI, and a static AGENTS.md projection. Native
+> integrations are optimizations; the universal transports are the product, so
+> supporting a new agent needs no core change.**
 
 ## Core vs. adapters
 
@@ -38,6 +40,39 @@ shaped the way it is. The guiding principle:
   CLI*. No business logic is duplicated in an adapter.
 - **`src/storage/`** — SQLite (with migrations) for metadata, and a `SecretStore`
   abstraction for secret values.
+
+## Universal transport layer (0.4.0)
+
+Every way an agent reaches ctx is a thin transport over the **same** core — one
+retrieval engine, one provenance model, one signal model. No transport holds its own
+copy of state, and none re-implements retrieval/scope/conflict/ranking/budget logic.
+
+```
+                         ctx core (RetrievalEngine, PreferenceService, SignalService)
+                                              │
+        ┌──────────────────┬──────────────────┼───────────────────┬──────────────────┐
+        │                  │                  │                   │                  │
+   native hooks       universal MCP      universal CLI      static projection   (same guards)
+  (Claude/Codex/        `ctx mcp`      `ctx agent context`     AGENTS.md
+     Cursor)          stdio JSON-RPC    JSON envelope / stdin  (`ctx sync`)
+```
+
+- **One retrieval → one envelope.** `ctx agent context` and the MCP `get_context` tool
+  both build the stable v1 envelope from a single `RetrievalResult` via
+  `core/agents/envelope.ts`, so CLI and MCP cannot diverge.
+- **One provenance model.** Durable writes (CLI `ctx agent remember/propose/signal add`
+  and MCP `remember/propose/record_decision`) pass through the same
+  `assertUserOriginated` guard and fail closed without `origin=user`.
+- **No daemon.** The CLI is short-lived per invocation. The MCP server is a stdio child
+  that lives only for the host session; it holds one SQLite connection and runs each read
+  in its own transaction, so a write committed by any other process is visible to the next
+  request (WAL). There is no background writer, telemetry, socket, or HTTP service.
+- **Capabilities, not brand names.** `core/agents/capabilities.ts` describes each native
+  agent by capability flags; `core/agents/universal.ts` describes the agent-neutral
+  interfaces. Shared core never branches on an agent id.
+- **MCP SDK is a thin edge.** `@modelcontextprotocol/sdk` speaks the protocol in
+  `src/mcp/server.ts`; every tool delegates straight to a core service. It is a
+  build-time dependency, bundled into the single `dist/index.js` artifact.
 
 **Runtime.** ctx is developed and tested with Bun but published as a normal npm
 package that runs on Node ≥ 22.13 (`npx goatedcontext setup`). The only

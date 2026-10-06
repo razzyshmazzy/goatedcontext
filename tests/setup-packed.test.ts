@@ -19,6 +19,8 @@ import { openDatabase } from "../src/storage/sqlite/db.ts";
 import { resolvePaths } from "../src/storage/paths.ts";
 import { PreferenceService } from "../src/core/preferences/service.ts";
 import { captureChild, persistentPath, whichSync } from "../src/utils/runtime.ts";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 // Real, public-path upgrade tests: they drive the ACTUAL `runSetup` with the real
 // npm install + real fresh-process verification, isolated to a throwaway npm
@@ -607,6 +609,84 @@ test(
       s.cleanup();
       rmSync(main.dir, { recursive: true, force: true });
       rmSync(npx.root, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT,
+);
+
+test(
+  "0.4.0 packed acceptance: universal CLI + MCP + generic writes from the INSTALLED tarball; Cursor paths are persistent",
+  async () => {
+    if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
+    const s = scratch();
+    const env = isoEnv(s.prefix, s.home);
+    const main = packTarball(ROOT, env);
+    const cursorHome = mkdtempSync(join(tmpdir(), "ctx-packed-cursor-"));
+    try {
+      const result = runSetup({ env, version: PKG_VERSION, claudeHome: s.claudeHome, installSpec: main.tarball });
+      expect(result.ok).toBe(true);
+      const launcher = join(binDirFor(s.prefix), LAUNCHER);
+      const dist = join(globalPackageDirFor(s.prefix), "dist", "index.js");
+      expect(existsSync(dist)).toBe(true); // the self-contained bundle shipped in the tarball
+
+      // doctor: no failing checks from the installed package.
+      const doc = JSON.parse(captureChild(launcher, ["doctor", "--json"], { env }).stdout);
+      expect(doc.ok).toBe(true);
+      // The universal-interface checks are present. (mcp-launchable's ok/warn depends on
+      // PATH resolution, which the isolated test prefix doesn't always replicate; the REAL
+      // launchability proof is the SDK client connecting to the packed bundle below.)
+      expect(doc.checks.find((c: { id: string }) => c.id === "mcp-launchable")).toBeTruthy();
+      expect(doc.checks.find((c: { id: string }) => c.id === "agent-cli")?.status).toBe("ok");
+
+      // Universal CLI: the stable JSON envelope.
+      const before = JSON.parse(captureChild(launcher, ["agent", "context", "--task", "x", "--json"], { env }).stdout);
+      expect(before.version).toBe(1);
+
+      // Generic writes through the installed binary, then re-read.
+      expect(captureChild(launcher, ["agent", "remember", "Prefer tabs.", "--origin", "user", "--always"], { env }).code).toBe(0);
+      expect(
+        captureChild(launcher, ["agent", "signal", "add", "--origin", "user", "--domain", "database", "--choice", "postgres", "--no-repo"], { env }).code,
+      ).toBe(0);
+      const after = JSON.parse(captureChild(launcher, ["agent", "context", "--task", "x", "--json"], { env }).stdout);
+      expect(after.context.authoritativePreferences.map((p: { rule: string }) => p.rule)).toContain("Prefer tabs.");
+
+      // MCP from the INSTALLED bundle, under plain Node (exactly how the launcher runs it).
+      const transport = new StdioClientTransport({
+        command: NODE as string,
+        args: [dist, "mcp"],
+        env: { ...(env as Record<string, string>) },
+      });
+      const client = new Client({ name: "packed-test", version: "1.0.0" });
+      await client.connect(transport);
+      try {
+        const { tools } = await client.listTools();
+        expect(tools.map((t) => t.name).sort()).toEqual([
+          "explain_preference", "get_context", "list_preferences", "propose", "record_decision", "remember",
+        ]);
+        const res = await client.callTool({ name: "get_context", arguments: { task: "x" } });
+        const text = ((res.content ?? []) as Array<{ type: string; text?: string }>).find((c) => c.type === "text")?.text ?? "";
+        const envelope = JSON.parse(text);
+        expect(envelope.version).toBe(1);
+        // The write made via the CLI above is visible to the packed MCP server (shared SQLite).
+        expect(envelope.context.authoritativePreferences.map((p: { rule: string }) => p.rule)).toContain("Prefer tabs.");
+      } finally {
+        await client.close();
+      }
+
+      // Cursor install from the installed binary: mcp.json points at the PERSISTENT launcher,
+      // never the source checkout, node_modules, or an npx cache. `--cwd` is a non-repo temp
+      // dir so the sync step no-ops (never writes AGENTS.md into the test's working directory).
+      expect(captureChild(launcher, ["install", "cursor", "--cursor-home", cursorHome, "--cwd", s.home], { env }).code).toBe(0);
+      const mcpRaw = readFileSync(join(cursorHome, "mcp.json"), "utf8");
+      expect(mcpRaw).not.toContain(ROOT);
+      expect(mcpRaw.toLowerCase()).not.toContain("_npx");
+      expect(mcpRaw).not.toContain("node_modules");
+      const mcpParsed = JSON.parse(mcpRaw);
+      expect(mcpParsed.mcpServers.goatedcontext.args).toEqual(["mcp"]);
+    } finally {
+      s.cleanup();
+      rmSync(main.dir, { recursive: true, force: true });
+      rmSync(cursorHome, { recursive: true, force: true });
     }
   },
   TIMEOUT,

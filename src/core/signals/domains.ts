@@ -101,6 +101,61 @@ export function canonicalDomain(raw: string): string {
 }
 
 /**
+ * The RECOMMENDED canonical decision-domain vocabulary (0.4.0).
+ *
+ * This is deliberately NOT a closed ontology and NOT a validation gate: an agent may
+ * record ANY domain (e.g. `robotics-control`) and ctx stores and retrieves it
+ * unchanged. The canonical set means one thing only — these are the domains ctx
+ * RECOGNIZES for automatic cross-repo surfacing (the task matcher in `analysis.ts`
+ * plus the alias/trigger tables above resolve to exactly these tokens). Recording a
+ * decision under a canonical domain therefore maximizes cross-agent consistency and
+ * the chance ctx surfaces it on a future related task; a custom domain stays valid and
+ * retrievable but only surfaces when a task names it explicitly.
+ *
+ * The set is derived from the classifier's own domains (canonicalized) plus every
+ * alias target, so it can never silently drift out of sync — an invariant test
+ * (`domains.test.ts`) asserts exactly that. The agent, not ctx core, performs the
+ * semantic category selection at write time; ctx only normalizes and classifies.
+ */
+export const CANONICAL_DOMAINS: ReadonlySet<string> = new Set<string>([
+  "package-manager",
+  "database",
+  "frontend", // the classifier's "ui-framework" canonicalizes here
+  "backend", // trigger-only in the classifier; a first-class canonical decision domain
+  "state-management",
+  "dependency-policy",
+  "testing",
+  "architecture",
+  "error-handling",
+  "formatting",
+  "infrastructure",
+  "response-language",
+]);
+
+/** A domain plus whether it is in the recommended canonical vocabulary. */
+export interface DomainClassification {
+  /** The canonical (alias-resolved) form of the input. */
+  domain: string;
+  /** True when `domain` is a recognized canonical decision domain (surfaced automatically). */
+  canonical: boolean;
+}
+
+/**
+ * Classify a raw/normalized domain: resolve it to canonical form and report whether
+ * that form is in the recommended vocabulary. NEVER rejects — an unknown domain is a
+ * valid custom domain (`canonical: false`), preserving forward compatibility.
+ */
+export function classifyDomain(raw: string): DomainClassification {
+  const domain = canonicalDomain(raw);
+  return { domain, canonical: CANONICAL_DOMAINS.has(domain) };
+}
+
+/** Whether a raw/normalized domain resolves to a recognized canonical decision domain. */
+export function isCanonicalDomain(raw: string): boolean {
+  return CANONICAL_DOMAINS.has(canonicalDomain(raw));
+}
+
+/**
  * Given canonical domains, return every RAW domain spelling that canonicalizes to
  * one of them (including the canonical token itself). Used to build an indexed
  * `WHERE domain IN (…)` query so the hot retrieval path reads only matching-domain

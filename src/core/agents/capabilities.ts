@@ -28,6 +28,13 @@ export interface AgentCapabilities {
   sessionInjection: boolean;
   /** Can we install a native skill teaching the ctx memory-WRITE protocol? */
   memorySkill: boolean;
+  // ---- 0.4.0 universal-transport capabilities (additive) --------------------
+  /** Does ctx install a native runtime HOOK for this agent (prompt- or session-level)? */
+  nativeHooks: boolean;
+  /** Does ctx natively configure this agent to use the ctx MCP server (stdio)? */
+  mcp: boolean;
+  /** Does ctx install host permission rules so agent memory writes are seamless? */
+  permissionIntegration: boolean;
 }
 
 /**
@@ -45,6 +52,9 @@ export const CLAUDE_CAPABILITIES: AgentCapabilities = {
   fileContextAvailable: false,
   sessionInjection: false,
   memorySkill: true,
+  nativeHooks: true,
+  mcp: false, // Claude Code supports MCP, but ctx does not auto-configure it (hook-native)
+  permissionIntegration: true,
 };
 
 /**
@@ -60,6 +70,9 @@ export const CODEX_CAPABILITIES: AgentCapabilities = {
   fileContextAvailable: false,
   sessionInjection: false,
   memorySkill: true,
+  nativeHooks: true,
+  mcp: false, // Codex supports MCP, but ctx is hook-native here
+  permissionIntegration: true,
 };
 
 /**
@@ -70,14 +83,21 @@ export const CODEX_CAPABILITIES: AgentCapabilities = {
  * is false by design.
  */
 export const CURSOR_CAPABILITIES: AgentCapabilities = {
+  // `beforeSubmitPrompt` cannot inject per-prompt context (block-only), so prompt-time
+  // injection stays false. Session-level injection + MCP are wired in 0.4.0 (below).
   runtimePromptInjection: false,
   staticAgentsMd: true,
   staticCursorRules: false,
   cwdAvailable: false,
   promptAvailable: false,
+  // A `sessionStart` hook CAN return `additional_context` (verified, local editor), so
+  // once-per-session bootstrap injection is supported; per-prompt retrieval is via MCP.
+  sessionInjection: true,
   fileContextAvailable: false,
-  sessionInjection: false,
   memorySkill: true,
+  nativeHooks: true, // ~/.cursor/hooks.json sessionStart (0.4.0)
+  mcp: true, // ~/.cursor/mcp.json stdio goatedcontext server (0.4.0)
+  permissionIntegration: false, // Cursor terminal allowlist is injection-unsafe; use MCP instead
 };
 
 /**
@@ -95,6 +115,9 @@ export const AGENTS_FILE_CAPABILITIES: AgentCapabilities = {
   fileContextAvailable: false,
   sessionInjection: false,
   memorySkill: false,
+  nativeHooks: false,
+  mcp: false,
+  permissionIntegration: false,
 };
 
 export function capabilitiesFor(id: AgentId): AgentCapabilities {

@@ -249,6 +249,24 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
           fix: "Schema table missing. Run `ctx init`, or re-create ~/.ctx if the file is not a ctx database.",
         });
       }
+
+      // WAL journal mode (persisted on-disk; the multiprocess-concurrency guarantee).
+      // busy_timeout is a per-connection runtime pragma, not on-disk, so it is pinned by
+      // the live wal-audit test rather than this read-only inspection.
+      try {
+        const jm = db.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get();
+        const wal = jm?.journal_mode?.toLowerCase() === "wal";
+        add({
+          section: "Database",
+          id: "wal",
+          label: "WAL journal mode",
+          status: wal ? "ok" : "warn",
+          detail: jm?.journal_mode ?? "unknown",
+          fix: wal ? undefined : "Run any `ctx` command to (re)enable WAL.",
+        });
+      } catch {
+        /* non-fatal: integrity/readable checks already cover a broken DB */
+      }
     } catch (err) {
       add({
         section: "Database",
@@ -489,6 +507,28 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
       });
     }
   }
+
+  // ---- universal interfaces (0.4.0) ---------------------------------------
+  // Always validated (not gated by skipAdapter): these are the agent-neutral transports
+  // any agent can use. The Agent CLI is the running binary; MCP launchability is proven
+  // by the persistent `ctx` launcher resolving on PATH (so `ctx mcp` is spawnable).
+  add({
+    section: "Universal",
+    id: "agent-cli",
+    label: "Agent CLI",
+    status: "ok",
+    detail: "ctx agent context --json",
+  });
+  const launcher = process.platform === "win32" ? "ctx.cmd" : "ctx";
+  const resolvedLauncher = which(launcher, env.PATH);
+  add({
+    section: "Universal",
+    id: "mcp-launchable",
+    label: "MCP server launchable",
+    status: resolvedLauncher ? "ok" : "warn",
+    detail: resolvedLauncher ? `${launcher} mcp` : `${launcher} not found on PATH`,
+    fix: resolvedLauncher ? undefined : "Run `npx goatedcontext setup` to install the persistent ctx launcher.",
+  });
 
   const ok = !checks.some((c) => c.status === "fail");
   const hasWarnings = checks.some((c) => c.status === "warn");
