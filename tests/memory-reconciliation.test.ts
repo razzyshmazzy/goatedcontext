@@ -87,7 +87,7 @@ test("§4 teaches exception recording, no preference change, and conditional ref
   expect(signals).toContain("--constraint free-tier --exception");
   expect(signals).toContain("reasons matter, not just counts");
   expect(signals).toContain("CONDITIONAL preference");
-  expect(signals).toContain('ctx propose "Prefer Firebase when it fits cost/storage constraints');
+  expect(signals).toContain('ctx agent propose --origin user "Prefer Firebase when it fits cost/storage');
   // Contradictory exceptions: keep distinct reasons, propose nothing.
   expect(signals).toContain("If exceptions disagree");
   expect(signals).toContain("propose nothing — there is no single stable alternative");

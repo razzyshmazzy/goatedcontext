@@ -47,10 +47,10 @@ test("global-scope acknowledgement guidance permits cross-project wording", () =
 
 // 3. An explicit durable preference takes the ONE-command fast path.
 test("explicit durable guidance directs exactly ONE ctx remember on the fast path", () => {
-  expect(body).toContain("run exactly ONE `ctx remember`");
-  expect(body).toContain("ctx remember --scope <global|repo>");
+  expect(body).toContain("run exactly ONE `ctx agent remember --origin user`");
+  expect(body).toContain("ctx agent remember --origin user --scope <global|repo>");
   // Inferred vs explicit split is preserved (one propose for inferred).
-  expect(body).toContain("ctx propose --evidence");
+  expect(body).toContain("ctx agent propose --origin user --evidence");
 });
 
 // 4. A one-off instruction stores NOTHING — no write command in that section.
@@ -76,14 +76,14 @@ test("Claude, Codex, and Cursor share the identical canonical policy body", () =
   expect(claude).toBe(body.trim());
   // The discovery description front-loads the trigger + the one-command action.
   expect(MEMORY_PROTOCOL_DESCRIPTION).toContain("state, change, or revoke");
-  expect(MEMORY_PROTOCOL_DESCRIPTION).toContain("one `ctx remember`");
+  expect(MEMORY_PROTOCOL_DESCRIPTION).toContain("one `ctx agent remember --origin user`");
   expect(MEMORY_PROTOCOL_DESCRIPTION).not.toContain("\n"); // single line for YAML folding
 });
 
 // 7. Windows invocation uses ctx.cmd.
 test("Windows render invokes ctx.cmd for every memory command", () => {
   const win = renderMemorySkill({ command: "ctx.cmd" });
-  for (const c of ["ctx.cmd remember", "ctx.cmd propose", "ctx.cmd prefs", "ctx.cmd why", "ctx.cmd forget"]) {
+  for (const c of ["ctx.cmd agent remember", "ctx.cmd agent propose", "ctx.cmd agent signal add", "ctx.cmd prefs", "ctx.cmd why", "ctx.cmd signals"]) {
     expect(win).toContain(c);
   }
 });
@@ -91,6 +91,6 @@ test("Windows render invokes ctx.cmd for every memory command", () => {
 // 8. POSIX invocation uses plain ctx (and never ctx.cmd).
 test("POSIX render invokes plain ctx and never ctx.cmd", () => {
   const posix = renderMemorySkill({ command: "ctx" });
-  expect(posix).toContain("ctx remember --scope");
+  expect(posix).toContain("ctx agent remember --origin user --scope");
   expect(posix).not.toContain("ctx.cmd");
 });

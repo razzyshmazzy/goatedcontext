@@ -33,9 +33,12 @@ test("Claude: clean install adds narrow allow + deny rules; detect confirms", ()
     const file = join(s.dir, "settings.json");
     expect(upsertClaudePermissions(file, "linux")).toBe("created");
     const obj = JSON.parse(readFileSync(file, "utf8"));
-    expect(obj.permissions.allow).toContain("Bash(ctx remember:*)");
-    expect(obj.permissions.allow).toContain("Bash(ctx signal add:*)");
+    // Writes are the AGENT surface only; bare write commands are NOT auto-allowed.
+    expect(obj.permissions.allow).toContain("Bash(ctx agent remember:*)");
+    expect(obj.permissions.allow).toContain("Bash(ctx agent signal add:*)");
     expect(obj.permissions.allow).toContain("Bash(ctx prefs:*)");
+    expect(obj.permissions.allow).not.toContain("Bash(ctx remember:*)");
+    expect(obj.permissions.allow).not.toContain("Bash(ctx signal add:*)");
     expect(obj.permissions.deny).toContain("Bash(ctx prefs approve:*)");
     expect(obj.permissions.deny).toContain("Bash(ctx prefs reject:*)");
     expect(detectClaudePermissions(file, "linux")).toBe(true);
@@ -74,7 +77,7 @@ test("Claude: preserves unrelated settings, hooks, and permission entries", () =
     expect(obj.model).toBe("sonnet");
     expect(obj.hooks.UserPromptSubmit).toBeTruthy();
     expect(obj.permissions.allow).toContain("Bash(git status:*)"); // user rule preserved
-    expect(obj.permissions.allow).toContain("Bash(ctx remember:*)"); // ours added
+    expect(obj.permissions.allow).toContain("Bash(ctx agent remember:*)"); // ours added
     expect(obj.permissions.defaultMode).toBe("acceptEdits"); // unrelated perm key kept
   } finally {
     s.cleanup();
@@ -88,7 +91,7 @@ test("Claude: repair restores a missing ctx rule", () => {
     upsertClaudePermissions(file, "linux");
     // Simulate drift: a user removed our allow rule.
     const obj = JSON.parse(readFileSync(file, "utf8"));
-    obj.permissions.allow = obj.permissions.allow.filter((r: string) => r !== "Bash(ctx remember:*)");
+    obj.permissions.allow = obj.permissions.allow.filter((r: string) => r !== "Bash(ctx agent remember:*)");
     writeFileSync(file, JSON.stringify(obj));
     expect(detectClaudePermissions(file, "linux")).toBe(false);
     expect(upsertClaudePermissions(file, "linux")).toBe("updated");
@@ -145,10 +148,44 @@ test("Claude: Windows installs BOTH ctx and ctx.cmd rules", () => {
     const file = join(s.dir, "settings.json");
     upsertClaudePermissions(file, "win32");
     const obj = JSON.parse(readFileSync(file, "utf8"));
-    expect(obj.permissions.allow).toContain("Bash(ctx remember:*)");
-    expect(obj.permissions.allow).toContain("Bash(ctx.cmd remember:*)");
+    expect(obj.permissions.allow).toContain("Bash(ctx agent remember:*)");
+    expect(obj.permissions.allow).toContain("Bash(ctx.cmd agent remember:*)");
     expect(obj.permissions.deny).toContain("Bash(ctx.cmd prefs approve:*)");
     expect(detectClaudePermissions(file, "win32")).toBe(true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("Claude: SECURITY MIGRATION — a stale 0.3.5/0.3.6 config loses the bare-write rules", () => {
+  const s = scratch("ctx-perm-claude-");
+  try {
+    const file = join(s.dir, "settings.json");
+    // Seed exactly what 0.3.5/0.3.6 installed: bare write rules + reads + an unrelated rule.
+    writeFileSync(
+      file,
+      JSON.stringify({
+        permissions: {
+          allow: [
+            "Bash(git status:*)",
+            "Bash(ctx remember:*)",
+            "Bash(ctx propose:*)",
+            "Bash(ctx signal add:*)",
+            "Bash(ctx prefs:*)",
+          ],
+          deny: ["Bash(ctx prefs approve:*)"],
+        },
+      }),
+    );
+    expect(upsertClaudePermissions(file, "linux")).toBe("updated");
+    const allow = JSON.parse(readFileSync(file, "utf8")).permissions.allow as string[];
+    // The dangerous bare-write rules are GONE.
+    expect(allow).not.toContain("Bash(ctx remember:*)");
+    expect(allow).not.toContain("Bash(ctx propose:*)");
+    expect(allow).not.toContain("Bash(ctx signal add:*)");
+    // The new agent-path rules are present; the unrelated user rule is preserved.
+    expect(allow).toContain("Bash(ctx agent remember:*)");
+    expect(allow).toContain("Bash(git status:*)");
   } finally {
     s.cleanup();
   }
@@ -163,8 +200,11 @@ test("Codex: clean install writes a goatedcontext-owned rules file", () => {
     const body = readFileSync(codexRulesFile(s.dir), "utf8");
     expect(body).toContain("goatedcontext-managed:v");
     expect(body).toContain('prefix_rule(');
-    expect(body).toContain('pattern = ["ctx", "remember"]');
-    expect(body).toContain('pattern = ["ctx", "signal", "add"]');
+    // Writes are the AGENT surface; bare write prefixes are not present.
+    expect(body).toContain('pattern = ["ctx", "agent", "remember"]');
+    expect(body).toContain('pattern = ["ctx", "agent", "signal", "add"]');
+    expect(body).not.toContain('pattern = ["ctx", "remember"]');
+    expect(body).not.toContain('pattern = ["ctx", "signal", "add"]');
     expect(body).toContain('decision = "allow"');
     // Gated commands render as prompt, not allow.
     expect(body).toContain('pattern = ["ctx", "prefs", "approve"]');
@@ -218,8 +258,8 @@ test("Codex: Windows rules include ctx.cmd patterns", () => {
   try {
     upsertCodexRules(s.dir, "win32");
     const body = readFileSync(codexRulesFile(s.dir), "utf8");
-    expect(body).toContain('pattern = ["ctx", "remember"]');
-    expect(body).toContain('pattern = ["ctx.cmd", "remember"]');
+    expect(body).toContain('pattern = ["ctx", "agent", "remember"]');
+    expect(body).toContain('pattern = ["ctx.cmd", "agent", "remember"]');
   } finally {
     s.cleanup();
   }

@@ -93,7 +93,7 @@ Cursor is more limited: it has no reliable prompt-time injection hook, so it rea
 
 `setup` adds a narrow allow rule so agents can run the safe `ctx` commands without asking you to approve each one. It does **not** use `--dangerously-skip-permissions` (Claude) or Full Access (Codex), and never whitelists a shell.
 
-Only these are auto-approved: `remember`, `propose`, `signal add`, `prefs`, `why`, `signals`, `history`, `conflicts`. Everything else still prompts — including `env`, `import`, `setup`, `install`, `uninstall`, `forget`, `signal clear`, and `prefs approve`/`reject`.
+Memory writes go through a dedicated agent path — `ctx agent remember`, `ctx agent propose`, `ctx agent signal add` — that requires a `--origin` and fails without it. Those, plus the read commands `prefs`, `why`, `signals`, `history`, `conflicts`, are what's auto-approved. The bare `ctx remember`/`ctx propose`/`ctx signal add` you'd type yourself are **not** auto-approved, so an agent can't silently run a memory-write it found in a repo file or tool output — that falls back to a normal approval prompt. Everything else still prompts too: `env`, `import`, `setup`, `install`, `uninstall`, `forget`, `signal clear`, `prefs approve`/`reject`.
 
 Both hosts match safely: Claude splits on shell operators (`&&`, `;`, `|`, …) and checks each part, and Codex matches on argv tokens, so chaining another command onto an allowed `ctx` prefix does not get auto-approved. A managed/enterprise policy can still override a local allow — `ctx doctor` reports whether the rule is present, not that your org will honor it.
 

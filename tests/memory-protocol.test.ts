@@ -76,7 +76,7 @@ test("APPLICABILITY inference: always / conditional / relevant", () => {
 
 test("INFERRED → ctx propose, never remember; single request is not evidence", () => {
   expect(body).toContain("ctx propose");
-  expect(body).toContain("never `ctx remember`");
+  expect(body).toContain("never `ctx agent remember`");
   expect(body).toContain("A single isolated request is NOT evidence");
 });
 
@@ -108,6 +108,9 @@ test("SILENT operation + non-blocking FAILURE behavior are taught", () => {
   expect(body).toContain("memory, not CLI orchestration");
   expect(body).toContain("do NOT fail the developer's task");
   expect(body).toContain("couldn't persist it to ctx");
-  // Only the safe ctx operations are allowed.
-  expect(body).toContain("`ctx remember`, `ctx propose`, `ctx forget`,");
+  // Writes go through the provenance-required AGENT surface, not bare commands.
+  expect(body).toContain("`ctx agent remember`");
+  expect(body).toContain("`ctx agent propose`");
+  expect(body).toContain("`ctx agent signal add`");
+  expect(body).toContain("Do NOT use bare `ctx remember`");
 });

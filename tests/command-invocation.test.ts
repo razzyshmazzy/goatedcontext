@@ -13,7 +13,7 @@ import { CLAUDE_SKILLS } from "../src/adapters/claude/skills.ts";
 // the platform. Only the INVOCATION differs; the semantic policy is identical.
 
 const POSIX_CMDS = ["ctx remember", "ctx propose", "ctx prefs", "ctx why", "ctx forget"];
-const WIN_CMDS = ["ctx.cmd remember", "ctx.cmd propose", "ctx.cmd prefs", "ctx.cmd why", "ctx.cmd forget"];
+const WIN_CMDS = ["ctx.cmd agent remember", "ctx.cmd agent propose", "ctx.cmd agent signal add", "ctx.cmd prefs", "ctx.cmd why", "ctx.cmd signals"];
 
 test("ctxCommand resolves per platform", () => {
   expect(ctxCommand("win32")).toBe("ctx.cmd");
@@ -37,7 +37,7 @@ test("Windows render contains explicit ctx.cmd commands AND the canonical ctx po
   expect(skill).toContain("execution policy");
   // The canonical policy body is still present (semantics unchanged).
   expect(skill).toContain("# goatedcontext memory protocol");
-  expect(skill).toContain("ctx remember --scope");
+  expect(skill).toContain("ctx agent remember --origin user --scope");
 });
 
 test("default render (no command) is the platform-blind `ctx` body — parity preserved", () => {

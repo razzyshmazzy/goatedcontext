@@ -68,8 +68,8 @@ test("conversation-local repetition is judgment-based with NO fixed count thresh
   expect(inferred).toContain("One repeated\nrequest can be strong evidence");
   expect(inferred).toContain("five can be weak");
   // Repeated local pattern → propose, never remember.
-  expect(inferred).toContain('ctx propose "Prefer comments in Greek."');
-  expect(inferred).toContain("never `ctx remember`");
+  expect(inferred).toContain('ctx agent propose --origin user "Prefer comments in Greek."');
+  expect(inferred).toContain("never `ctx agent");
 });
 
 // ── signals = evidence, not instructions (§8/§9/§15/§16/§25 of the spec) ─────────
@@ -78,7 +78,7 @@ test("signals are evidence, never auto-promoted, and explicit preferences win", 
   const signals = section(4);
   expect(signals).toContain("EVIDENCE, not an instruction");
   expect(signals).toContain("ctx NEVER promotes one to a preference automatically");
-  expect(signals).toContain("ctx signal add --domain");
+  expect(signals).toContain("ctx agent signal add --origin user --domain");
   expect(signals).toContain("ctx signals --domain");
   // Breadth beats raw count; no automatic threshold.
   expect(signals).toContain("Breadth beats raw count");

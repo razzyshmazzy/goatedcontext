@@ -49,23 +49,44 @@ export function upsertClaudePermissions(
   if (allow === null || deny === null) return "error";
 
   const want = claudePermissionRules(platform);
+  // SECURITY MIGRATION: prune any ctx-OWNED rule that is not in the current desired set
+  // — in particular the RETIRED bare-write rules (`Bash(ctx remember:*)` etc.) a
+  // 0.3.5/0.3.6 install left behind. Leaving them would keep the bypass open. We only
+  // ever remove strings WE own (see allClaudeOwnedRules); unrelated user rules are kept.
+  const owned = allClaudeOwnedRules();
+  const wantAllow = new Set(want.allow);
+  const wantDeny = new Set(want.deny);
   let changed = false;
+
+  const prunedAllow = allow.filter((r) => {
+    const drop = owned.allow.has(r) && !wantAllow.has(r);
+    if (drop) changed = true;
+    return !drop;
+  });
+  const prunedDeny = deny.filter((r) => {
+    const drop = owned.deny.has(r) && !wantDeny.has(r);
+    if (drop) changed = true;
+    return !drop;
+  });
+
   for (const rule of want.allow) {
-    if (!allow.includes(rule)) {
-      allow.push(rule);
+    if (!prunedAllow.includes(rule)) {
+      prunedAllow.push(rule);
       changed = true;
     }
   }
   for (const rule of want.deny) {
-    if (!deny.includes(rule)) {
-      deny.push(rule);
+    if (!prunedDeny.includes(rule)) {
+      prunedDeny.push(rule);
       changed = true;
     }
   }
   if (!changed) return "unchanged";
 
-  permissions.allow = allow;
-  permissions.deny = deny;
+  if (prunedAllow.length > 0) permissions.allow = prunedAllow;
+  else delete permissions.allow;
+  if (prunedDeny.length > 0) permissions.deny = prunedDeny;
+  else delete permissions.deny;
   writeFileAtomic(settingsFile, JSON.stringify(settings, null, 2) + "\n", 0o644);
   return hadPermissions ? "updated" : "created";
 }

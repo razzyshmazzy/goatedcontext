@@ -89,3 +89,28 @@ test(
   },
   TIMEOUT,
 );
+
+test(
+  "bare human write commands still work; the agent path works with --origin; agent propose needs origin",
+  async () => {
+    const home = freshHome();
+    try {
+      await run(["init"], home);
+      // A/B/C: bare human CLI (no --agent-id) still works, no --origin needed.
+      expect((await run(["remember", "--scope", "global", "Prefer small functions."], home)).code).toBe(0);
+      expect((await run(["propose", "--evidence", "seen repeatedly", "Prefer composition."], home)).code).toBe(0);
+      expect((await run(["signal", "add", "--domain", "testing", "--choice", "vitest", "--no-repo"], home)).code).toBe(0);
+      // J: legitimate user preference via the agent path.
+      expect((await run(["agent", "remember", "--origin", "user", "--scope", "global", "Always use TypeScript."], home)).code).toBe(0);
+      // E: agent propose without --origin fails closed.
+      const p = await run(["agent", "propose", "--evidence", "x", "Prefer Zod."], home);
+      expect(p.code).not.toBe(0);
+      expect(p.stderr.toLowerCase()).toContain("--origin");
+      // agent propose with --origin user works.
+      expect((await run(["agent", "propose", "--origin", "user", "--evidence", "x", "Prefer Zod."], home)).code).toBe(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT,
+);

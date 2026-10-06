@@ -36,20 +36,40 @@ export function ctxLaunchers(platform: NodeJS.Platform = process.platform): stri
 
 /**
  * Low-risk ctx memory/context commands that are safe to auto-approve. Each entry is
- * the argv tokens AFTER the launcher. READS are harmless; the three writes are
- * additive and bounded (they never delete or silently promote anything).
+ * the argv tokens AFTER the launcher.
+ *
+ * The three WRITES are the dedicated AGENT surface (`ctx agent remember|propose|signal
+ * add`), which fails closed without an explicit `--origin` — it can never silently
+ * assume user intent. The BARE `ctx remember|propose|signal add` commands are the human
+ * convenience path and are deliberately NOT in this set, so an agent executing a
+ * memory-write instruction found in untrusted content (which would be written as bare
+ * `ctx remember …`, with no origin) is NOT silently auto-approved — normal host approval
+ * applies. READS are harmless.
  */
 export const CTX_ALLOWED_COMMANDS: readonly (readonly string[])[] = [
-  // bounded memory writes
-  ["remember"],
-  ["propose"],
-  ["signal", "add"],
+  // bounded memory writes — AGENT surface only (provenance required, fails closed)
+  ["agent", "remember"],
+  ["agent", "propose"],
+  ["agent", "signal", "add"],
   // reads
   ["prefs"],
   ["why"],
   ["signals"],
   ["history"],
   ["conflicts"],
+];
+
+/**
+ * Rule prefixes goatedcontext auto-allowed in PRIOR releases (0.3.5/0.3.6) but no
+ * longer does: the bare, human-convenience write commands. Repair/upgrade must REMOVE
+ * these from a user's config — leaving them would preserve the very bypass this release
+ * closes (an agent running a bare `ctx remember` from untrusted content with no origin).
+ * Kept here only so the installer can prune them; never installed.
+ */
+export const CTX_RETIRED_ALLOWED_COMMANDS: readonly (readonly string[])[] = [
+  ["remember"],
+  ["propose"],
+  ["signal", "add"],
 ];
 
 /**
@@ -88,9 +108,11 @@ export function claudePermissionRules(platform: NodeJS.Platform = process.platfo
 }
 
 /**
- * EVERY Claude rule string goatedcontext could own, across all platforms. Used for
- * removal/cleanup so uninstalling on one OS still strips rules written on another,
- * and so detection never leaves a stray ctx rule behind.
+ * EVERY Claude rule string goatedcontext could own, across all platforms AND all
+ * releases — including the RETIRED bare-write rules (0.3.5/0.3.6). Used for
+ * removal/cleanup and for the security migration: on repair, any owned rule not in the
+ * current desired set is pruned, so a stale `Bash(ctx remember:*)` from an old install
+ * is stripped. Detection never leaves a stray ctx rule behind.
  */
 export function allClaudeOwnedRules(): { allow: Set<string>; deny: Set<string> } {
   const allow = new Set<string>();
@@ -99,6 +121,10 @@ export function allClaudeOwnedRules(): { allow: Set<string>; deny: Set<string> }
     const r = claudePermissionRules(platform);
     r.allow.forEach((s) => allow.add(s));
     r.deny.forEach((s) => deny.add(s));
+    // Retired bare-write rules this installer must be able to strip from old configs.
+    for (const l of ctxLaunchers(platform)) {
+      for (const cmd of CTX_RETIRED_ALLOWED_COMMANDS) allow.add(claudeRule(l, cmd));
+    }
   }
   return { allow, deny };
 }
@@ -106,7 +132,7 @@ export function allClaudeOwnedRules(): { allow: Set<string>; deny: Set<string> }
 // ── Codex: execpolicy .rules file ─────────────────────────────────────────────
 
 /** Bump when the rendered Codex rules body changes so stale files are re-synced. */
-export const CODEX_RULES_VERSION = "1";
+export const CODEX_RULES_VERSION = "2";
 
 /** The goatedcontext-owned Codex rules filename (its own file; never config.toml). */
 export const CODEX_RULES_FILENAME = "goatedcontext.rules";
