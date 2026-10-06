@@ -87,6 +87,10 @@ test("conflict resolution scales: exactly ONE winner per exclusive domain across
   }
 });
 
+// 100 sequential retrievals over a 3,000-preference field: ~43ms/call here, so ~4.3s
+// locally and comfortably over the 5000ms default on slower macOS/Windows CI runners.
+// The loop is a deliberate determinism oracle (byte-stable across runs), not a timing
+// test, so it gets a generous explicit timeout rather than fewer iterations.
 test("repeated identical retrieval is byte-stable across 100 runs (no hidden state drift / cache oracle baseline)", () => {
   const t = makeTestContext();
   try {
@@ -99,7 +103,7 @@ test("repeated identical retrieval is byte-stable across 100 runs (no hidden sta
   } finally {
     t.cleanup();
   }
-});
+}, 15_000);
 
 // ── 0.3.0 D1 regression: EVERY effective matching rule is delivered (no cap) ──
 
