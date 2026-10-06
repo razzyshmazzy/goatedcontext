@@ -48,6 +48,7 @@ export class CtxContext {
       this.preferences,
       this.repos,
       this.environments,
+      this.signals,
     );
   }
 

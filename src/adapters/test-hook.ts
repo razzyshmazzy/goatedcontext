@@ -50,6 +50,10 @@ export interface AgentSimulation {
   /** The delivery partition over this repo's active candidates, by preference. */
   plan: { static: PlanEntry[]; runtime: PlanEntry[]; unsupported: PlanEntry[] };
   environments: { name: string; scope: string; riskLevel: string; available: boolean; variableNames: string[] }[];
+  /** Non-authoritative signal evidence that would be delivered at runtime (empty if unsupported). */
+  observedPatterns: RetrievalResult["observedPatterns"];
+  /** Signal-evidence selection accounting (considered/delivered/omitted + budget). */
+  signalEvidence: RetrievalResult["signalEvidence"];
 }
 
 export interface SimulateOptions {
@@ -110,6 +114,8 @@ export function simulateAgent(ctx: CtxContext, opts: SimulateOptions): AgentSimu
       conditionalEvaluations: [],
       plan,
       environments: [],
+      observedPatterns: [],
+      signalEvidence: undefined,
     };
   }
 
@@ -152,6 +158,10 @@ export function simulateAgent(ctx: CtxContext, opts: SimulateOptions): AgentSimu
       available: e.available,
       variableNames: e.variableNames,
     })),
+    // Signals are runtime evidence only: an agent without runtime injection (Cursor)
+    // never receives them, so the simulation reports none for it.
+    observedPatterns: capabilities.runtimePromptInjection ? result.observedPatterns ?? [] : [],
+    signalEvidence: result.signalEvidence,
   };
 }
 

@@ -204,7 +204,7 @@ developer works without treating every one-off instruction as permanent memory:
 |---|---|---|---|
 | **Preference** | An authoritative behavioral instruction. | `ctx remember` (explicit durable intent). | **Yes** — retrieved + injected, conflict-resolved. |
 | **Proposal** | An inferred *candidate* preference awaiting review. | `ctx propose` (a recurring pattern the agent noticed). | Only once approved (`proposed`/`observed` are never injected). |
-| **Signal** | Non-authoritative *evidence* of one developer decision (`domain=backend, choice=supabase`). | `ctx signal add` at the moment of a meaningful choice. | **No** — never injected, never auto-promoted. |
+| **Signal** | Non-authoritative *evidence* of one developer decision (`domain=backend, choice=supabase`). | `ctx signal add` at the moment of a meaningful choice. | **As evidence only** — surfaced automatically when the task matches its decision domain (0.3.4), but clearly marked *observed, not required*, never injected as an instruction, and never auto-promoted. |
 
 Flow: *explicit durable* → **preference**; *a repeated local pattern in one
 conversation* → possible **proposal**; *decisions recurring across sessions/repos* →
@@ -275,6 +275,62 @@ can't supply: the same choice made once in each of several *different* repositor
 - **Local-only / not exported.** Signals are deliberately excluded from `ctx export`
   (they are machine-local evidence, not portable preferences). Promote one into a
   preference first if you want it to travel.
+
+### Automatic signal surfacing (0.3.4)
+
+Signals only help if the agent *sees* them at the decision point — having to run
+`ctx signals` by hand means cross-repo learning is missed. So relevant evidence is now
+surfaced **automatically** at retrieval time, without becoming a preference and without
+a threshold. The full learning loop:
+
+```
+one-off decision        → ctx signal add                       (evidence)
+repeated / cross-repo    → surfaced automatically when relevant  (still evidence)
+agent judges the pattern → ctx propose                          (candidate preference)
+developer states it      → ctx remember                         (authoritative)
+```
+
+The flow lives entirely in shared core; thin adapters never query signals:
+
+> `ctx store` → preferences retrieval → **relevant signal aggregation** → canonical
+> `RetrievalResult.observedPatterns` → adapter renderer.
+
+- **Domain-gated.** `taskSignalDomains()` (in `signals/domains.ts`) returns the
+  canonical decision domains the current task is about, reusing the existing task
+  classifier (`inferDomains`) plus a tiny, explicit **alias layer** (`db → database`,
+  `ui-framework/frontend-framework → frontend`, `server → backend`, …) and a handful of
+  task-intent triggers for the gaps the classifier doesn't cover (there is no `backend`
+  domain in the classifier; "initialize this project" names no package manager). If the
+  task matches no signal domain, **no evidence is fetched or injected** — the hot path
+  does zero signal work. This is **not** a second retrieval system, an ontology, or an
+  embedding: every mapping is a literal string.
+- **Bounded query.** `SignalService.aggregateCanonical({ domains, currentRepoId })`
+  reads only rows whose raw domain canonicalizes into the matched set, via an indexed
+  `WHERE domain IN (…)` (`idx_signals_domain`) — never a full-ledger scan — and groups
+  by *canonical* domain. It is a live `SELECT` (no cache), so evidence is always fresh.
+- **Pure selection.** `selectRelevantSignalEvidence(runtimeContext, evidence,
+  authoritativePrefs, budget)` (in `signals/evidence.ts`) is a pure, deterministic
+  function: it matches the task domains, preserves contradictions, keeps ordinary vs
+  exception evidence distinct, ranks for presentation (primary domain → cross-repo
+  breadth → volume → name), and applies a small **output budget**
+  (`maxDomains / maxChoicesPerDomain / maxExceptionsPerDomain / maxChars`). It mutates
+  nothing.
+- **Cross-repo breadth, not raw repetition.** The renderer emphasizes *distinct repos*
+  ("selected across 3 repositories"), distinguishes current-repo from cross-repo
+  observations, and never lets 20 hits in one repo masquerade as a broad default
+  ("observed in 1 repository").
+- **Preference interaction.** A current approved/locked preference governing the same
+  domain **suppresses ordinary competing signals** (they must not read as competing
+  instructions) but **keeps exception evidence**, which carries conditional knowledge
+  the preference alone doesn't ("usually Firebase, but Supabase in 2 repos when
+  free-tier storage was insufficient"). Historical reasons are flagged as possibly
+  stale — the agent verifies current external facts itself; ctx is not a facts database.
+- **Runtime only.** Evidence is delivered through the runtime renderer
+  (`renderContextBlock`), so Claude and Codex receive it; it is **never** written to
+  `AGENTS.md` and never reaches Cursor's static projection. It is dynamic evidence, not
+  a standing repo rule.
+- **Never promoted.** Surfacing is not promotion. There is no background scanner and no
+  count threshold; the model decides, at the decision point, whether to `ctx propose`.
 
 ## Applicability (`relevant` vs `always` vs `conditional`)
 

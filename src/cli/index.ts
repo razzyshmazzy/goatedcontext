@@ -913,6 +913,29 @@ export function buildProgram(deps: CliDeps): Command {
           }
         }
         line("");
+        const se = result.signalEvidence;
+        const patterns = result.observedPatterns ?? [];
+        line("Signal evidence (non-authoritative — observed decisions, never instructions)");
+        line(`  considered domains: ${se && se.consideredDomains.length ? se.consideredDomains.join(", ") : "(none)"}`);
+        line(`  delivered:          ${patterns.length}`);
+        line(`  omitted by budget:  ${se ? se.omittedByBudget : 0}`);
+        if (patterns.length === 0) {
+          line("  (no signal evidence delivered)");
+        } else {
+          for (const p of patterns) {
+            const pref = p.hasExplicitPreference ? " [explicit preference governs — ordinary signals suppressed]" : "";
+            const tag = p.contradictory ? " (no stable default)" : "";
+            line(`  - ${p.domain}${tag}${pref}`);
+            for (const c of p.choices) {
+              line(`      choice: ${c.label} — ${c.distinctRepos} repo(s)${c.seenInCurrentRepo ? " incl. this repo" : ""}, ${c.observations} obs`);
+            }
+            for (const e of p.exceptions) {
+              const why = e.reasons.length ? ` — ${e.reasons.join("; ")}` : "";
+              line(`      exception: ${e.label}${e.preferredChoice ? ` (vs ${e.preferredChoice})` : ""} — ${e.distinctRepos} repo(s)${why}`);
+            }
+          }
+        }
+        line("");
         if (result.block) {
           line("Native runtime output:");
           line("----------------------------------------");

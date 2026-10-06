@@ -3,6 +3,13 @@ import { newId } from "../../utils/id.ts";
 import { nowIso } from "../../utils/time.ts";
 import { CtxError } from "../../utils/errors.ts";
 import { withWriteTx } from "../../storage/sqlite/tx.ts";
+import { normalizeChoice, normalizeConstraint, normalizeDomain } from "./normalize.ts";
+import { canonicalDomain, expandCanonicalToRaw } from "./domains.ts";
+
+// Canonicalization helpers live in a dependency-free module (normalize.ts) so the
+// canonical-domain layer can reuse them without a cycle; re-exported here so every
+// existing `import { normalizeDomain } from ".../signals/service.ts"` keeps working.
+export { normalizeChoice, normalizeConstraint, normalizeDomain };
 
 /**
  * The SIGNALS layer (0.3.2): a lightweight, local-only ledger of developer
@@ -83,31 +90,6 @@ function rowToSignal(r: SignalRow): Signal {
   };
 }
 
-/**
- * Normalize a decision domain to a stable kebab token: lowercased, spaces/underscores
- * → `-`, punctuation dropped. "Package Manager" → "package-manager". Deterministic and
- * dependency-free — NOT an embedding. This is only canonicalization, not semantics.
- */
-export function normalizeDomain(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_]+/g, "-")
-    .replace(/[^a-z0-9-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
-/** Normalize a choice to a canonical string: lowercased, whitespace collapsed. */
-export function normalizeChoice(raw: string): string {
-  return raw.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-/** Normalize a constraint category to a kebab token (same canonicalization as domains). */
-export function normalizeConstraint(raw: string): string {
-  return normalizeDomain(raw);
-}
-
 export interface AddSignalInput {
   domain: string;
   choice: string;
@@ -136,6 +118,13 @@ export interface ChoiceEvidence {
   distinctRepos: number;
   /** How many distinct sessions (when the host supplied a session id). */
   distinctSessions: number;
+  /**
+   * Whether this choice was observed in the CURRENT repo. Only set by
+   * `aggregateCanonical` (which is given the current repo id); `undefined` for the
+   * generic `aggregate`. Lets the renderer distinguish "used here before" from
+   * cross-repo breadth without ever exposing the raw repo id.
+   */
+  seenInCurrentRepo?: boolean;
   firstSeen: string;
   lastSeen: string;
 }
@@ -157,6 +146,8 @@ export interface ExceptionEvidence {
   reasons: string[];
   /** Distinct normalized constraint categories seen (e.g. "free-tier", "compliance"). */
   constraints: string[];
+  /** Whether this exception was observed in the CURRENT repo (set by `aggregateCanonical`). */
+  seenInCurrentRepo?: boolean;
   firstSeen: string;
   lastSeen: string;
 }
@@ -268,13 +259,69 @@ export class SignalService {
    * the evidence warrants. This returns FACTS, never a verdict.
    */
   aggregate(domain?: string): DomainEvidence[] {
-    const signals = this.list(domain ? { domain } : {});
+    return this.aggregateInternal(this.list(domain ? { domain } : {}), (s) => s.domain, null);
+  }
+
+  /**
+   * CANONICAL-domain aggregation, used by automatic signal surfacing. It differs
+   * from `aggregate` in two ways:
+   *  - rows are grouped by CANONICAL domain (so `db`/`database` and
+   *    `frontend`/`frontend-framework` merge into one evidence bucket); and
+   *  - when a `currentRepoId` is supplied, each choice carries `seenInCurrentRepo`
+   *    so the renderer can tell "used here before" from pure cross-repo breadth,
+   *    WITHOUT the raw id ever leaving this layer.
+   *
+   * When `domains` is given, only rows whose raw domain canonicalizes into that set
+   * are read — via an indexed `WHERE domain IN (…)` over every alias spelling — so
+   * the hot retrieval path reads a bounded slice of the ledger, never a full scan.
+   */
+  aggregateCanonical(
+    opts: { domains?: string[]; currentRepoId?: string | null } = {},
+  ): DomainEvidence[] {
+    const rows =
+      opts.domains && opts.domains.length > 0
+        ? this.listByRawDomains(expandCanonicalToRaw(opts.domains))
+        : this.list();
+    return this.aggregateInternal(rows, (s) => canonicalDomain(s.domain), opts.currentRepoId ?? null);
+  }
+
+  /** Rows whose raw domain is one of `rawDomains` (indexed IN query), newest first. */
+  private listByRawDomains(rawDomains: string[]): Signal[] {
+    if (rawDomains.length === 0) return [];
+    const placeholders = rawDomains.map(() => "?").join(", ");
+    return this.db
+      .query<SignalRow, string[]>(
+        `SELECT * FROM decision_signals WHERE domain IN (${placeholders})
+         ORDER BY created_at DESC, rowid DESC`,
+      )
+      .all(...rawDomains)
+      .map(rowToSignal);
+  }
+
+  /**
+   * Aggregate evidence per domain. Cross-repo / cross-session breadth is surfaced
+   * EXPLICITLY (distinctRepos/distinctSessions) because breadth is far stronger
+   * evidence than a raw count: one choice in five repos beats eight in one. Minority
+   * and contradictory choices are never hidden — the agent decides what, if anything,
+   * the evidence warrants. This returns FACTS, never a verdict. `domainKey` selects
+   * the grouping (raw vs canonical); `currentRepoId` (nullable) enables the
+   * per-choice `seenInCurrentRepo` flag.
+   */
+  private aggregateInternal(
+    signals: Signal[],
+    domainKey: (s: Signal) => string,
+    currentRepoId: string | null,
+  ): DomainEvidence[] {
     const byDomain = new Map<string, Signal[]>();
     for (const s of signals) {
-      const arr = byDomain.get(s.domain) ?? [];
+      const k = domainKey(s);
+      if (!k) continue;
+      const arr = byDomain.get(k) ?? [];
       arr.push(s);
-      byDomain.set(s.domain, arr);
+      byDomain.set(k, arr);
     }
+    const seenHere = (chRows: Signal[]): boolean | undefined =>
+      currentRepoId != null ? chRows.some((r) => r.repoId === currentRepoId) : undefined;
 
     const out: DomainEvidence[] = [];
     for (const [dom, rows] of byDomain) {
@@ -299,12 +346,14 @@ export class SignalService {
         const repos = new Set(chRows.filter((r) => r.repoId).map((r) => r.repoId!));
         const sessions = new Set(chRows.filter((r) => r.sessionId).map((r) => r.sessionId!));
         const sorted = [...chRows].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        const seen = seenHere(chRows);
         choices.push({
           choice: ch,
           label: chRows[0]!.choiceRaw, // newest-first list → most recent spelling
           observations: chRows.length,
           distinctRepos: repos.size,
           distinctSessions: sessions.size,
+          ...(seen !== undefined ? { seenInCurrentRepo: seen } : {}),
           firstSeen: sorted[0]!.createdAt,
           lastSeen: sorted[sorted.length - 1]!.createdAt,
         });
@@ -319,6 +368,7 @@ export class SignalService {
         const reasons = [...new Set(chRows.map((r) => r.reason).filter((x): x is string => !!x))];
         const constraints = [...new Set(chRows.map((r) => r.constraintTag).filter((x): x is string => !!x))];
         const preferred = chRows.map((r) => r.preferredChoice).find((x): x is string => !!x) ?? null;
+        const seen = seenHere(chRows);
         exceptions.push({
           choice: ch,
           label: chRows[0]!.choiceRaw,
@@ -328,6 +378,7 @@ export class SignalService {
           distinctSessions: sessions.size,
           reasons,
           constraints,
+          ...(seen !== undefined ? { seenInCurrentRepo: seen } : {}),
           firstSeen: sorted[0]!.createdAt,
           lastSeen: sorted[sorted.length - 1]!.createdAt,
         });

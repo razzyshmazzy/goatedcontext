@@ -16,6 +16,14 @@ import { withReadTx } from "../../storage/sqlite/tx.ts";
 import type { Condition } from "../preferences/conditions.ts";
 import { buildRuntimeContext, type RuntimeContext } from "./runtime-context.ts";
 import { evaluateCondition } from "./evaluate.ts";
+import type { SignalService } from "../signals/service.ts";
+import { taskSignalDomains } from "../signals/domains.ts";
+import {
+  selectRelevantSignalEvidence,
+  DEFAULT_SIGNAL_EVIDENCE_BUDGET,
+  type ObservedPattern,
+  type SignalEvidenceBudget,
+} from "../signals/evidence.ts";
 
 /** Minimum relevance to be returned. Below this, a preference is dropped. */
 const RELEVANCE_THRESHOLD = 0.25;
@@ -143,10 +151,25 @@ export interface RetrievalResult {
   overridden: { id: string; rule: string; supersededBy: string }[];
   /** Observable delivery accounting (matched/effective/delivered/omitted). */
   delivery: DeliveryDiagnostics;
+  /**
+   * NON-authoritative observed decision patterns relevant to this task (0.3.4):
+   * compact cross-repo signal EVIDENCE the agent may reason over. Never instructions,
+   * never a preference, never promoted. Empty when the task matches no signal domain.
+   * Optional on the type so existing result constructors stay valid; the engine always
+   * sets it (possibly `[]`).
+   */
+  observedPatterns?: ObservedPattern[];
   /** The normalized runtime context used for conditional evaluation (explain only). */
   runtimeContext?: RuntimeContextView;
   /** Evaluation result for every conditional candidate (explain only). */
   conditionalEvaluations?: ConditionalEvaluation[];
+  /** Signal-evidence selection accounting (explain only). */
+  signalEvidence?: {
+    consideredDomains: string[];
+    delivered: number;
+    omittedByBudget: number;
+    budget: SignalEvidenceBudget;
+  };
 }
 
 export interface RetrievalOptions {
@@ -179,8 +202,13 @@ export interface RetrievalOptions {
    */
   budget?: DeliveryBudget;
   /**
-   * When true, populate `runtimeContext` and `conditionalEvaluations` in the
-   * result (used by `ctx test-hook`). Off by default so the hot hook path adds
+   * Optional override of the signal-evidence OUTPUT budget (presentation only). Omit
+   * for the default small budget; the simulator/tests pass one for determinism checks.
+   */
+  signalEvidenceBudget?: SignalEvidenceBudget;
+  /**
+   * When true, populate `runtimeContext`, `conditionalEvaluations` and `signalEvidence`
+   * in the result (used by `ctx test-hook`). Off by default so the hot hook path adds
    * no overhead.
    */
   explain?: boolean;
@@ -257,11 +285,13 @@ export class RetrievalEngine {
     private readonly prefs: PreferenceService,
     private readonly repos: RepoService,
     private readonly envs: EnvironmentService,
+    private readonly signals: SignalService,
   ) {}
 
   retrieve(opts: RetrievalOptions): RetrievalResult {
     const limit = clampLimit(opts.limit ?? DEFAULT_LIMIT);
     const budget = opts.budget ?? DEFAULT_DELIVERY_BUDGET;
+    const signalBudget = opts.signalEvidenceBudget ?? DEFAULT_SIGNAL_EVIDENCE_BUDGET;
     // The prompt hook (track === false) must stay a pure read: resolve the repo
     // without registering it, so concurrent hooks never write or contend. Other
     // callers (e.g. `ctx get`) keep registering the repo on first sight.
@@ -282,7 +312,7 @@ export class RetrievalEngine {
 
     // Gather + rank + resolve inside a read snapshot so a concurrent commit is
     // observed either fully-before or fully-after — never half-applied.
-    const { top, overridden, delivery, conditionalEvaluations } = withReadTx(this.db, () => {
+    const { top, overridden, delivery, conditionalEvaluations, observedPatterns, signalEvidence } = withReadTx(this.db, () => {
       const candidates = this.candidates(repo, opts.includeProposed ?? false);
 
       // Applicability split. All pools have already passed status + scope filtering
@@ -377,9 +407,51 @@ export class RetrievalEngine {
           }))
         : undefined;
 
+      // ---- signal evidence (0.3.4) -----------------------------------------
+      // Automatic, NON-authoritative cross-repo evidence for the task's decision
+      // domains. Gated on the task matching a signal domain, so an unrelated prompt
+      // does zero signal work (and no query). Read-only: computed in the SAME read
+      // snapshot as the preferences, so it is consistent and always fresh (no cache).
+      // Authoritative = the active approved/locked pool (used only to suppress
+      // ordinary competing signals, never to mutate anything).
+      const taskDomains = taskSignalDomains(runtimeContext);
+      let observedPatterns: ObservedPattern[] = [];
+      let signalEvidence: RetrievalResult["signalEvidence"] | undefined;
+      if (taskDomains.size > 0) {
+        const domainEvidence = this.signals.aggregateCanonical({
+          domains: [...taskDomains],
+          currentRepoId: repo?.id ?? null,
+        });
+        const authoritative = candidates.filter(
+          (p) => p.status === "approved" || p.status === "locked",
+        );
+        const sel = selectRelevantSignalEvidence(
+          runtimeContext,
+          domainEvidence,
+          authoritative,
+          signalBudget,
+        );
+        observedPatterns = sel.patterns;
+        if (opts.explain) {
+          signalEvidence = {
+            consideredDomains: sel.consideredDomains,
+            delivered: sel.patterns.length,
+            omittedByBudget: sel.omittedByBudget,
+            budget: signalBudget,
+          };
+        }
+      } else if (opts.explain) {
+        signalEvidence = {
+          consideredDomains: [],
+          delivered: 0,
+          omittedByBudget: 0,
+          budget: signalBudget,
+        };
+      }
+
       // Unconditional (always) rules lead, then matched conditionals, then the
       // task-relevant matches in relevance order.
-      return { top: kept, overridden, delivery, conditionalEvaluations };
+      return { top: kept, overridden, delivery, conditionalEvaluations, observedPatterns, signalEvidence };
     });
 
     // Best-effort write, outside the read snapshot. Skipped when track === false
@@ -404,6 +476,7 @@ export class RetrievalEngine {
       environments: this.environments(repo),
       overridden,
       delivery,
+      observedPatterns,
       ...(opts.explain
         ? {
             runtimeContext: {
@@ -415,6 +488,7 @@ export class RetrievalEngine {
               domain: runtimeContext.domain,
             },
             conditionalEvaluations: conditionalEvaluations ?? [],
+            ...(signalEvidence ? { signalEvidence } : {}),
           }
         : {}),
     };

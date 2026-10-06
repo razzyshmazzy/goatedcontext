@@ -145,9 +145,12 @@ you MAY record a compact signal as evidence (see §4) — but still write no pre
 
 A signal is a compact record of a development choice (domain + choice) that is NOT yet
 a durable preference. It is EVIDENCE, not an instruction: a signal never changes your
-behavior on its own, and ctx NEVER promotes one to a preference automatically. Record
-one in a single cheap command when the developer makes a meaningful decision that was
-not stated as durable:
+behavior on its own, and ctx NEVER promotes one to a preference automatically. When a
+task matches a decision domain you have prior signals for, ctx surfaces a compact
+"Observed developer decisions" block automatically — that is evidence (observed, not
+required): weigh it, but the user's current request and the preferences above always
+win. Record a signal in a single cheap command when the developer makes a meaningful
+decision that was not stated as durable:
 
     ctx signal add --domain <domain> --choice <choice>
 
@@ -217,4 +220,4 @@ task context, in preferences OR signals. Secret VALUES belong only in `ctx env`.
   NOT retry in a loop. If the preference was explicit, mention briefly at the end —
   "I followed that preference here, but couldn't persist it to ctx." — no stack traces.
 
-<!-- ctx-memory-protocol: v3 -->
+<!-- ctx-memory-protocol: v4 -->

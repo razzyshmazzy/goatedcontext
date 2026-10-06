@@ -102,6 +102,8 @@ That skill teaches the agent when to:
 - use always, relevant, or conditional applicability
 - never persist secrets
 
+Choose Supabase in a few projects and goatedcontext can surface that pattern the next time your agent needs to pick a backend — as evidence, without turning it into an automatic rule.
+
 Check installed integrations with:
 
 ```powershell

@@ -19,7 +19,7 @@
  * this marker in the rendered artifact so `ctx doctor` can flag a STALE skill (an
  * old installed body) and `ctx repair` can converge it.
  */
-export const MEMORY_PROTOCOL_VERSION = "3";
+export const MEMORY_PROTOCOL_VERSION = "4";
 
 /** Hidden marker embedded in every rendered artifact for staleness detection. */
 export const MEMORY_PROTOCOL_MARKER = `<!-- ctx-memory-protocol: v${MEMORY_PROTOCOL_VERSION} -->`;
@@ -169,9 +169,12 @@ you MAY record a compact signal as evidence (see §4) — but still write no pre
 
 A signal is a compact record of a development choice (domain + choice) that is NOT yet
 a durable preference. It is EVIDENCE, not an instruction: a signal never changes your
-behavior on its own, and ctx NEVER promotes one to a preference automatically. Record
-one in a single cheap command when the developer makes a meaningful decision that was
-not stated as durable:
+behavior on its own, and ctx NEVER promotes one to a preference automatically. When a
+task matches a decision domain you have prior signals for, ctx surfaces a compact
+"Observed developer decisions" block automatically — that is evidence (observed, not
+required): weigh it, but the user's current request and the preferences above always
+win. Record a signal in a single cheap command when the developer makes a meaningful
+decision that was not stated as durable:
 
     ctx signal add --domain <domain> --choice <choice>
 

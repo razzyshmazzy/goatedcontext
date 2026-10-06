@@ -128,11 +128,19 @@ test("raw signals never create or inject a preference (evidence, not instruction
   const t = makeTestContext();
   try {
     for (const r of ["rA", "rB", "rC", "rD", "rE"]) t.ctx.signals.add({ domain: "package-manager", choice: "bun", repoId: r });
-    // No preference exists, and retrieval returns nothing derived from signals.
-    expect(t.ctx.preferences.list()).toHaveLength(0);
     const res = t.ctx.retrieval.retrieve({ cwd: "/x", task: "install a package with the package manager", track: false });
+    // The invariant: a signal NEVER becomes or is injected as a PREFERENCE. No
+    // preference/proposal row is ever created from signals, and retrieval delivers
+    // zero preferences derived from them.
+    expect(t.ctx.preferences.list()).toHaveLength(0);
+    expect(t.ctx.preferences.listCandidates({ repoId: null, includeProposed: true })).toHaveLength(0);
     expect(res.preferences).toHaveLength(0);
-    expect(JSON.stringify(res)).not.toContain("bun");
+    // Since 0.3.4 the SAME evidence IS surfaced automatically — but only as
+    // non-authoritative `observedPatterns`, never as a preference. That is the one
+    // and only place "bun" may appear.
+    expect(res.observedPatterns?.[0]?.domain).toBe("package-manager");
+    expect(res.observedPatterns?.[0]?.choices[0]?.label).toBe("bun");
+    expect(res.observedPatterns?.[0]?.hasExplicitPreference).toBe(false);
   } finally {
     t.cleanup();
   }
