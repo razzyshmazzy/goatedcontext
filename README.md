@@ -2,15 +2,13 @@
 
 [![CI](https://github.com/razzyshmazzy/goatedcontext/actions/workflows/ci.yml/badge.svg)](https://github.com/razzyshmazzy/goatedcontext/actions/workflows/ci.yml)
 
-Local developer memory shared across coding agents.
-
-Tell Claude Code how you like to work. Switch to Codex. It still knows.
+Local developer memory shared across repos and between coding agents.
 
 > "You know what's funny? GOATS!" — Goat Simulator
 
 ## What it is
 
-I kept switching between coding agents and re-teaching each one the same preferences. goatedcontext stores those preferences once, locally, and hands the relevant ones to whichever agent you're using.
+So I frequently switch between repos but most of my stack is the same, so I made goatedcontext to remember that. goatedcontext stores preferences locally, and hands the relevant ones to whichever agent you're using. it's runtime-based.
 
 It is **not** a context-window extension, a transcript RAG system, or a vector database. There are no embeddings and no server. It stores structured developer preferences and compact decision evidence in a local SQLite file, and gives the relevant subset to supported agents at prompt time. That's the whole idea.
 
@@ -24,15 +22,15 @@ It saves that preference locally. Later, in Codex:
 
 > write a levenshtein helper
 
-Codex writes it in TypeScript, because it got your preference — you never repeated yourself.
+Codex writes it in TypeScript, because it got your preference without u needing to repeat it.
 
 Repo-specific choices work too:
 
 > Use Supabase for the backend in this repo.
 
-That becomes a preference for this repo, and also a cross-repo *signal* ("backend → supabase"). Make the same call in a few projects and the next time an agent needs to pick a backend, it sees that you tend to reach for Supabase — as evidence, not as a rule it's forced to follow.
+That becomes a preference for this repo, and also a cross-repo *signal* ("backend → supabase"). Make the same call in a few projects and the next time an agent needs to pick a backend, it sees that you tend to reach for Supabase. It's soft evidence, not a rule it's forced to follow.
 
-You don't run any commands for this. You talk to the agent normally; it decides what's worth remembering and writes it through `ctx`.
+Totally hands-free ofc. You don't run any commands for this. Talk to the agent normally; it decides what's worth remembering and writes it through `ctx`.
 
 ## Install
 
