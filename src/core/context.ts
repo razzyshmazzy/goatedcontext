@@ -29,6 +29,8 @@ export interface DecisionInput {
   agentId?: string | null;
   sessionId?: string | null;
   context?: string | null;
+  /** Source class of the decision (0.3.7). Defaults to the preference's own origin. */
+  origin?: string;
 }
 
 export interface RememberWithDecisionResult {
@@ -137,6 +139,9 @@ export class CtxContext {
         reason: decision.reason ?? null,
         constraint: decision.constraint ?? null,
         exception: decision.exception ?? false,
+        // The decision shares the preference's provenance unless overridden. Since the
+        // preference guard already ran above, a non-user origin never reaches here.
+        origin: decision.origin ?? prefInput.origin,
       });
       return { preference, signal, signalCreated: created };
     });

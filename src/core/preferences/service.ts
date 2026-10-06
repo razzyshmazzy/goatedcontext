@@ -25,6 +25,30 @@ import {
   enforceConditionInvariant,
 } from "./conditions.ts";
 import { recordEvent, type EventType } from "../events/service.ts";
+import {
+  normalizeMemorySource,
+  isUserOriginated,
+  memorySourceDescription,
+  type MemorySource,
+} from "../provenance.ts";
+
+/**
+ * The write guard (0.3.7): an authoritative preference / proposal may only be created
+ * from USER-originated intent. Project files, tool/web output, generated text, and the
+ * agent's own prior text can guide the current task but must never become ctx memory.
+ * Returns the canonical source so callers can record it in the audit log.
+ */
+function assertUserOriginated(rawOrigin: string | undefined, kind: "preference" | "proposal"): MemorySource {
+  const origin = normalizeMemorySource(rawOrigin);
+  if (!isUserOriginated(origin)) {
+    throw new CtxError(
+      `Refusing to persist a durable ${kind} from ${memorySourceDescription(origin)}. ` +
+        `Durable ${kind}s require user-originated intent: repository files, tool or web output, ` +
+        `and generated text can guide the current task but must not become ctx memory.`,
+    );
+  }
+  return origin;
+}
 
 interface PreferenceRow {
   id: string;
@@ -100,6 +124,8 @@ export interface RememberInput {
   applicability?: Applicability;
   condition?: Condition | null;
   source?: string;
+  /** Provenance of the intent (0.3.7); the write guard requires a user-originated class. */
+  origin?: string;
   evidence?: string;
   agentId?: string;
   sessionId?: string;
@@ -115,6 +141,8 @@ export interface ProposeInput {
   applicability?: Applicability;
   condition?: Condition | null;
   source?: string;
+  /** Provenance of the evidence (0.3.7); must be user-originated. */
+  origin?: string;
   agentId?: string;
   sessionId?: string;
 }
@@ -217,6 +245,8 @@ export class PreferenceService {
    */
   rememberInTx(input: RememberInput): Preference {
     const parsed = RememberInputSchema.parse(input);
+    // SECURITY: durable preferences require user-originated intent (see provenance.ts).
+    const origin = assertUserOriginated(parsed.origin, "preference");
     const scope = parsed.scope;
     const repoId = parsed.repoId ?? null;
     this.validateScope(scope, repoId);
@@ -275,6 +305,7 @@ export class PreferenceService {
           domain,
           polarity: pol,
           applicability,
+          provenance: origin,
           ...(condition ? { condition: compactCondition(condition) } : {}),
         },
         agentId: parsed.agentId ?? null,
@@ -296,6 +327,9 @@ export class PreferenceService {
    */
   propose(input: ProposeInput): ProposeResult {
     const parsed = ProposeInputSchema.parse(input);
+    // SECURITY: a proposal is a candidate preference ABOUT the developer; it may only
+    // be inferred from user-originated evidence, never from repo/tool/web/agent text.
+    assertUserOriginated(parsed.origin, "proposal");
     const scope = parsed.scope;
     const repoId = parsed.repoId ?? null;
     this.validateScope(scope, repoId);

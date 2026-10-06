@@ -1,6 +1,6 @@
 {
   "name": "goatedcontext",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Local, shared developer memory for AI coding agents. Your coding preferences persist across repos and reach Claude Code, OpenAI Codex, and Cursor.",
   "type": "module",
   "license": "MIT",

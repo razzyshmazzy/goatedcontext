@@ -72,6 +72,26 @@ function provenance(opts: { agentId?: string; sessionId?: string }) {
 }
 
 /**
+ * Resolve the memory-write SOURCE class (0.3.7). A bare, human-typed CLI invocation
+ * (no `--agent-id`) is treated as a direct user action, so `--origin` is optional and
+ * defaults to user. An AGENT-integrated write (`--agent-id` present) MUST pass
+ * `--origin` explicitly — ctx will not assume developer intent on the agent's behalf,
+ * so a forgotten/absent source fails closed. This does not make the model honest
+ * (a source-confused agent can still mislabel), but it makes the trusted path explicit.
+ */
+function resolveOrigin(opts: { origin?: string; agentId?: string }, action: string): string | undefined {
+  if (opts.origin) return opts.origin;
+  if (opts.agentId) {
+    throw new CtxError(
+      `${action} with --agent-id must also pass --origin <user|project|external>. ` +
+        `ctx cannot assume developer intent on an agent's behalf: use --origin user ONLY for the ` +
+        `developer's own request; repository, tool, or web content must never become ctx memory.`,
+    );
+  }
+  return undefined; // human CLI → direct user action (core defaults to `user`)
+}
+
+/**
  * Resolve the applicability from `--always` / `--applicability <v>`.
  * `--always` is a convenience alias for `--applicability always`. Returns
  * `undefined` when neither is given (the service then infers it from the rule).
@@ -420,12 +440,14 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--decision-reason <text>", "Exception: why the choice differed (verbatim; never secrets)")
     .option("--decision-constraint <tag>", "Exception: constraint category (e.g. free-tier)")
     .option("--decision-exception", "Mark the decision signal as an exception to the usual preference")
+    .option("--origin <class>", "Source of the intent: user | project | external (agents must set this)")
     .option("--agent-id <id>", "Provenance: which agent recorded this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
       withContext(deps, (ctx) => {
+        const origin = resolveOrigin(opts, "ctx remember");
         const { applicability, condition } = resolveApplicabilityAndCondition(
           opts,
           makeRepoResolver(ctx, opts.cwd),
@@ -454,6 +476,7 @@ export function buildProgram(deps: CliDeps): Command {
                   opts.decisionReason ||
                   opts.decisionConstraint,
               ),
+              origin,
               ...provenance(opts),
             }
           : null;
@@ -470,6 +493,7 @@ export function buildProgram(deps: CliDeps): Command {
             condition,
             evidence: opts.evidence,
             source: "explicit",
+            origin,
             ...provenance(opts),
           },
           decision,
@@ -504,13 +528,15 @@ export function buildProgram(deps: CliDeps): Command {
       [],
     )
     .option("--when-json <json>", "Advanced: a structured condition as JSON (all/any/not)")
-    .option("--source <source>", "Origin of the observation", "agent")
+    .option("--source <source>", "Free-text label for the observation", "agent")
+    .option("--origin <class>", "Source of the evidence: user | project | external (agents must set this)")
     .option("--agent-id <id>", "Provenance: which agent proposed this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((rule, opts) => {
       withContext(deps, (ctx) => {
+        const origin = resolveOrigin(opts, "ctx propose");
         const { applicability, condition } = resolveApplicabilityAndCondition(
           opts,
           makeRepoResolver(ctx, opts.cwd),
@@ -528,6 +554,7 @@ export function buildProgram(deps: CliDeps): Command {
           applicability: applicability as Applicability | undefined,
           condition,
           source: opts.source,
+          origin,
           ...provenance(opts),
         });
         // Count only brand-new proposals (decision A): when an equivalent proposal
@@ -1231,11 +1258,13 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--reason <text>", "Why the choice differed (compact; preserved verbatim; never secrets)")
     .option("--constraint <tag>", "Constraint category that drove it (e.g. free-tier, existing-stack)")
     .option("--exception", "Mark this as an exception to the usual preference")
+    .option("--origin <class>", "Source of the decision: user | project | external (agents must set this)")
     .option("--agent-id <id>", "Provenance: which agent recorded this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--json", "Output JSON")
     .action((opts) => {
       withContext(deps, (ctx) => {
+        const origin = resolveOrigin(opts, "ctx signal add");
         // Default: link to the current repo when --cwd is inside one, unless --no-repo.
         let repoId: string | null = null;
         if (opts.repo !== false) repoId = ctx.repos.resolve(opts.cwd)?.id ?? null;
@@ -1250,6 +1279,7 @@ export function buildProgram(deps: CliDeps): Command {
           reason: opts.reason ?? null,
           constraint: opts.constraint ?? null,
           exception,
+          origin,
           ...provenance(opts),
         });
         if (opts.json) return printJson({ ...s, created });

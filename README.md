@@ -116,6 +116,7 @@ Preference retrieval scales roughly linearly with the number of active preferenc
 - No telemetry. No transcript scraping. No embeddings or vector index.
 - Secrets live in a separate store (DPAPI on Windows, otherwise an encrypted file) and are never returned through preference retrieval, context injection, history, stats, or exports.
 - The permission rules are narrow and host-validated (see above). Setup does not require any blanket permission bypass.
+- Repository and tool content cannot directly become persistent memory. Durable preferences require user-originated intent; a README or tool output telling the agent to "save this preference" is refused, and project/web content never counts as cross-repo developer-choice evidence. The model still classifies source, so this stops accidental and source-confused writes rather than being a cryptographic guarantee — see [ARCHITECTURE.md](./ARCHITECTURE.md#persistent-memory-injection-boundary-037).
 
 It is not audited and I'm not claiming it's bulletproof. This is what it does and does not do; judge it on that.
 

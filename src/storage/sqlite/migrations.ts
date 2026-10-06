@@ -243,4 +243,21 @@ export const migrations: Migration[] = [
       CREATE INDEX idx_signals_exception ON decision_signals(domain, is_exception);
     `,
   },
+  {
+    version: 9,
+    name: "signal_source_provenance",
+    sql: `
+      -- Source provenance for decision signals (0.3.7 persistent-memory-injection fix).
+      -- A signal represents a DEVELOPER decision; this records WHERE that decision came
+      -- from so untrusted content (repo files, tool/web output) cannot masquerade as
+      -- cross-repo developer-choice evidence. Values (app-layer; see core/provenance.ts):
+      -- 'user' (developer decision — the only learning-eligible class for new rows),
+      -- 'project' / 'external' / 'agent' (recorded but EXCLUDED from cross-repo learning).
+      -- Purely additive + nullable: existing rows keep source = NULL, which the app reads
+      -- as the legacy class 'unknown' and KEEPS surfacing as historical evidence (they
+      -- predate provenance and came from the user's own sessions) — never silently
+      -- upgraded to 'user'. No value is ever changed; this only tags origin.
+      ALTER TABLE decision_signals ADD COLUMN source TEXT;
+    `,
+  },
 ];

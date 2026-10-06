@@ -135,6 +135,12 @@ export const RememberInputSchema = z.object({
   /** Structured condition; required iff applicability resolves to `conditional`. */
   condition: ConditionSchema.nullable().optional(),
   source: z.string().optional(),
+  /**
+   * Provenance of the intent (0.3.7). The write guard requires a user-originated
+   * class to persist an authoritative preference. Omitted → treated as direct user
+   * action (manual CLI / in-process caller). See core/provenance.ts.
+   */
+  origin: z.string().optional(),
   evidence: z.string().optional(),
   agentId: z.string().optional(),
   sessionId: z.string().optional(),
@@ -153,6 +159,8 @@ export const ProposeInputSchema = z.object({
   /** Structured condition; required iff applicability resolves to `conditional`. */
   condition: ConditionSchema.nullable().optional(),
   source: z.string().optional(),
+  /** Provenance of the proposal's evidence (0.3.7); must be user-originated. */
+  origin: z.string().optional(),
   agentId: z.string().optional(),
   sessionId: z.string().optional(),
 });

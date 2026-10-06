@@ -84,7 +84,8 @@ test(
       Array.from({ length: N }, (_, i) =>
         ctx(
           ["propose", "Prefer small focused pull requests.", "--scope", "global",
-           "--category", "conventions", "--evidence", `agent-${i} observed this`, "--agent-id", `a${i}`],
+           "--category", "conventions", "--evidence", `agent-${i} observed this`,
+           "--agent-id", `a${i}`, "--origin", "user"],
           { home },
         ),
       ),

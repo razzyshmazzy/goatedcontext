@@ -66,7 +66,7 @@ test("migration v5 adds a null condition to a 0.2.7 (schema v4) database, preser
     const db = openDatabase(paths);
     try {
       const v = db.query<{ v: number }, []>("SELECT MAX(version) AS v FROM schema_migrations").get();
-      expect(v?.v).toBe(8); // latest: v5 condition, v6 dedup index, v7 signals, v8 exception context
+      expect(v?.v).toBe(9); // latest: v5 condition, v6 dedup index, v7 signals, v8 exception, v9 signal source
 
       const cols = db
         .query<{ name: string }, []>("PRAGMA table_info(preferences)")

@@ -5,6 +5,7 @@ import { CtxError } from "../../utils/errors.ts";
 import { withWriteTx } from "../../storage/sqlite/tx.ts";
 import { normalizeChoice, normalizeConstraint, normalizeDomain } from "./normalize.ts";
 import { canonicalDomain, expandCanonicalToRaw } from "./domains.ts";
+import { normalizeMemorySource, isLearningEligible, type MemorySource } from "../provenance.ts";
 
 // Canonicalization helpers live in a dependency-free module (normalize.ts) so the
 // canonical-domain layer can reuse them without a cycle; re-exported here so every
@@ -53,6 +54,8 @@ export interface Signal {
   constraintTag: string | null;
   /** True when this decision departed from the usual preference. */
   isException: boolean;
+  /** Canonical source class of the decision (see core/provenance.ts); `unknown` for legacy rows. */
+  source: MemorySource;
   createdAt: string;
 }
 
@@ -69,6 +72,7 @@ interface SignalRow {
   reason: string | null;
   constraint_tag: string | null;
   is_exception: number;
+  source: string | null;
   created_at: string;
 }
 
@@ -86,6 +90,7 @@ function rowToSignal(r: SignalRow): Signal {
     reason: r.reason,
     constraintTag: r.constraint_tag,
     isException: r.is_exception === 1,
+    source: normalizeMemorySource(r.source),
     createdAt: r.created_at,
   };
 }
@@ -105,6 +110,13 @@ export interface AddSignalInput {
   constraint?: string | null;
   /** Mark this as an exception to the usual preference (default false). */
   exception?: boolean;
+  /**
+   * Source provenance of the DECISION (0.3.7). Only developer decisions (`user`) feed
+   * cross-repo learning; `project`/`external`/`agent` signals are recorded but excluded
+   * from surfacing + proposal evidence. Omitted → `user` (a direct decision). See
+   * core/provenance.ts.
+   */
+  origin?: string;
 }
 
 /** One choice observed in a domain, with aggregate evidence (never a verdict). */
@@ -202,6 +214,9 @@ export class SignalService {
     const constraintTag = input.constraint ? normalizeConstraint(input.constraint) : null;
     const reason = input.reason ? input.reason.trim().slice(0, MAX_REASON_LEN) : null;
     const isException = input.exception ? 1 : 0;
+    // Source class of the decision. A new row is always written with an EXPLICIT class
+    // (default `user`) so it is never confused with a legacy NULL (`unknown`) row.
+    const source: MemorySource = normalizeMemorySource(input.origin);
     const ts = nowIso();
     const day = ts.slice(0, 10);
 
@@ -222,10 +237,10 @@ export class SignalService {
       .query(
         `INSERT INTO decision_signals
            (id, domain, choice, choice_raw, repo_id, session_id, agent_id, context,
-            preferred_choice, reason, constraint_tag, is_exception, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            preferred_choice, reason, constraint_tag, is_exception, source, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, domain, choice, choiceRaw, repoId, sessionId, agentId, context, preferredChoice, reason, constraintTag, isException, ts);
+      .run(id, domain, choice, choiceRaw, repoId, sessionId, agentId, context, preferredChoice, reason, constraintTag, isException, source, ts);
     return { signal: this.getById(id)!, created: true };
   }
 
@@ -323,6 +338,11 @@ export class SignalService {
   ): DomainEvidence[] {
     const byDomain = new Map<string, Signal[]>();
     for (const s of signals) {
+      // SECURITY: only developer-decision signals feed cross-repo learning. Signals
+      // tagged project/external/agent are inert rows (recorded for audit) and never
+      // surface as developer-choice evidence, so repeated untrusted content — e.g. the
+      // same malicious README across many repos — cannot fabricate a cross-repo pattern.
+      if (!isLearningEligible(s.source)) continue;
       const k = domainKey(s);
       if (!k) continue;
       const arr = byDomain.get(k) ?? [];

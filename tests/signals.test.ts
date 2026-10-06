@@ -160,6 +160,7 @@ test("the ledger stores ONLY compact decision fields — no transcript/code/secr
       [
         "agent_id", "choice", "choice_raw", "constraint_tag", "context", "created_at",
         "domain", "id", "is_exception", "preferred_choice", "reason", "repo_id", "session_id",
+        "source",
       ].sort(),
     );
   } finally {
