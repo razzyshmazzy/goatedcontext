@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { CtxPaths } from "./paths.ts";
 import { nowIso } from "../utils/time.ts";
 import { writeFileAtomic, withFileLock } from "../utils/fs.ts";
+import { CtxError } from "../utils/errors.ts";
 
 export const ConfigSchema = z.object({
   version: z.number().int().default(1),
@@ -33,11 +34,36 @@ export function loadConfig(paths: CtxPaths): Config {
         saveConfig(paths, cfg);
         return cfg;
       }
-      return ConfigSchema.parse(JSON.parse(readFileSync(paths.configFile, "utf8")));
+      return parseConfig(readFileSync(paths.configFile, "utf8"), paths.configFile);
     });
   }
-  const raw = JSON.parse(readFileSync(paths.configFile, "utf8"));
-  return ConfigSchema.parse(raw);
+  return parseConfig(readFileSync(paths.configFile, "utf8"), paths.configFile);
+}
+
+/**
+ * Parse + validate config.json, turning a raw JSON `SyntaxError` or schema mismatch
+ * into an actionable `CtxError` (what failed + where + the fix) instead of a bare
+ * stack trace on every command when the file is hand-corrupted.
+ */
+function parseConfig(text: string, file: string): Config {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new CtxError(
+      `Config file is not valid JSON: ${file}\n` +
+        `Fix the JSON, or delete the file to let ctx recreate it (your preferences live in the database, not here).`,
+    );
+  }
+  const parsed = ConfigSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new CtxError(
+      `Config file has invalid values: ${file}\n` +
+        `${parsed.error.issues.map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`).join("\n")}\n` +
+        `Fix the values, or delete the file to let ctx recreate it.`,
+    );
+  }
+  return parsed.data;
 }
 
 export function saveConfig(paths: CtxPaths, config: Config): void {

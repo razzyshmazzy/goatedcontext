@@ -71,8 +71,12 @@ export class FileSecretStore implements SecretStore {
   }
 
   set(ref: string, value: string): void {
-    const key = this.key();
     withFileLock(this.lockFile, () => {
+      // Resolve the key INSIDE the lock. On a brand-new store two concurrent `set`s
+      // would otherwise each see no key file and generate a DIFFERENT key; the losing
+      // writer's entry would then be permanently undecryptable. Under the lock the
+      // first writer creates the key and the second reads it, so both agree.
+      const key = this.key();
       const iv = randomBytes(12);
       const cipher = createCipheriv("aes-256-gcm", key, iv);
       const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);

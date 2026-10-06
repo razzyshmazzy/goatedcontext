@@ -296,7 +296,7 @@ Then:
 
 Verify the durable repo preference is updated appropriately.
 
-## Seamless-memory acceptance test (0.3.5)
+## Memory-write acceptance test — no approval prompts (0.3.5)
 
 For releases touching the permission integration, the decisive check is that memory
 writes happen in NORMAL permission mode — no `--dangerously-skip-permissions`, no Codex

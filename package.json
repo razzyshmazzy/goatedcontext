@@ -1,7 +1,7 @@
 {
   "name": "goatedcontext",
-  "version": "0.3.5",
-  "description": "A persistent, local-first developer-context layer for AI coding agents. Your preferences follow you across repos and reach Claude Code, OpenAI Codex, and Cursor automatically.",
+  "version": "0.3.6",
+  "description": "Local, shared developer memory for AI coding agents. Your coding preferences persist across repos and reach Claude Code, OpenAI Codex, and Cursor.",
   "type": "module",
   "license": "MIT",
   "author": "razzyshmazzy",
@@ -17,6 +17,7 @@
     "claude",
     "claude-code",
     "codex",
+    "cursor",
     "ai",
     "context",
     "developer-preferences",
@@ -41,6 +42,7 @@
     "ctx": "bun run src/index.ts",
     "build": "bun run scripts/build.mjs",
     "test": "bun test",
+    "bench": "bun run scripts/bench/diagnostics.ts",
     "typecheck": "tsc --noEmit",
     "prepack": "bun run build",
     "prepublishOnly": "bun run typecheck && bun test && bun run build"

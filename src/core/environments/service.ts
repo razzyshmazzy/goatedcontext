@@ -206,21 +206,36 @@ export class EnvironmentService {
       throw new CtxError(`Invalid environment variable name: "${varName}".`);
     }
     const ref = envVarSecretRef(environmentId, varName);
-    this.secrets.set(ref, value);
 
+    // The secret and its DB row live in two stores and cannot share one transaction.
+    // Read the metadata FIRST, so a DB error happens before any secret is written
+    // (nothing to strand). Only then write the secret. For a NEW variable, if the
+    // metadata INSERT fails, compensate by deleting the just-written secret so we
+    // never leave encrypted material with no referencing row.
     const existing = this.db
       .query<EnvVarRow, [string, string]>(
         "SELECT * FROM environment_variables WHERE environment_id = ? AND var_name = ?",
       )
       .get(environmentId, varName);
+
+    this.secrets.set(ref, value);
     if (existing) return; // secret updated in place; metadata unchanged
 
-    this.db
-      .query(
-        `INSERT INTO environment_variables (id, environment_id, var_name, secret_ref, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(newId(), environmentId, varName, ref, nowIso());
+    try {
+      this.db
+        .query(
+          `INSERT INTO environment_variables (id, environment_id, var_name, secret_ref, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(newId(), environmentId, varName, ref, nowIso());
+    } catch (err) {
+      try {
+        this.secrets.delete(ref);
+      } catch {
+        /* best-effort cleanup — surface the original INSERT error below */
+      }
+      throw err;
+    }
   }
 
   removeVariable(environmentId: string, varName: string): void {

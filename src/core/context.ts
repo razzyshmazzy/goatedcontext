@@ -84,9 +84,22 @@ export class CtxContext {
     const paths = resolvePaths(env);
     ensureHome(paths);
     const db = openDatabase(paths);
-    const config = loadConfig(paths);
-    const secrets = createSecretStore(paths, env);
-    return new CtxContext(paths, config, db, secrets);
+    // A throw AFTER the DB is open but BEFORE the context is constructed (a corrupt
+    // config.json, or CTX_SECRET_BACKEND=dpapi on a machine without DPAPI) would leak
+    // the open SQLite handle + its -wal/-shm files, since the caller's `finally`
+    // never runs. Close it on failure and rethrow the original error.
+    try {
+      const config = loadConfig(paths);
+      const secrets = createSecretStore(paths, env);
+      return new CtxContext(paths, config, db, secrets);
+    } catch (err) {
+      try {
+        db.close();
+      } catch {
+        /* already closing down due to err — ignore */
+      }
+      throw err;
+    }
   }
 
   /** Build a context around an already-open database (used by tests). */

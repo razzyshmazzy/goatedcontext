@@ -143,6 +143,82 @@ function benchCandidateReduction() {
   return rows;
 }
 
+/**
+ * Signal-aware retrieval (0.3.4): a task that matches a decision domain triggers an
+ * indexed, canonical-domain signal aggregation on top of normal preference retrieval.
+ * Seeds N signals across 50 repos and measures warm retrieve() for a backend task, so
+ * the number reflects the FULL added cost of automatic evidence surfacing at scale.
+ */
+function benchSignalRetrieval() {
+  const DOMAINS: Record<string, string[]> = {
+    backend: ["supabase", "firebase", "convex"],
+    database: ["postgres", "sqlite", "mysql"],
+    "package-manager": ["bun", "npm", "pnpm"],
+    testing: ["vitest", "jest"],
+    frontend: ["react", "vue", "svelte"],
+  };
+  const domainKeys = Object.keys(DOMAINS);
+  const rows: Record<string, unknown>[] = [];
+  for (const count of [1_000, 10_000, 50_000]) {
+    const dir = mkdtempSync(join(tmpdir(), "bench-sig-"));
+    const ctx = ctxFor(dir);
+    try {
+      withWriteTx(ctx.db, () => {
+        for (let i = 0; i < count; i++) {
+          const d = domainKeys[i % domainKeys.length]!;
+          const cs = DOMAINS[d]!;
+          ctx.signals.addInTx({ domain: d, choice: cs[i % cs.length]!, repoId: `r${i % 50}`, sessionId: `s${i}` });
+        }
+      });
+      const q = { cwd: "/x", task: "set up the backend", track: false as const };
+      const cold = time(() => void ctx.retrieval.retrieve(q));
+      const iters = count >= 50_000 ? 40 : 150;
+      const warm: number[] = [];
+      let evidence = 0;
+      for (let i = 0; i < iters; i++)
+        warm.push(time(() => (evidence = ctx.retrieval.retrieve(q).observedPatterns?.length ?? 0)));
+      rows.push({ signals: count, domainsSurfaced: evidence, coldMs: +cold.toFixed(3), warm: stat(warm), iters });
+    } finally {
+      ctx.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  return rows;
+}
+
+/**
+ * Decision-aware remember (0.3.5): one atomic write that persists a preference AND a
+ * decision signal. Measures per-op cost of plain `remember` vs `rememberWithDecision`
+ * so the dual-write overhead (one extra SELECT+INSERT in the SAME transaction) is
+ * visible. Both run in the same in-memory store on identical rule shapes.
+ */
+function benchDecisionRemember() {
+  const dir = mkdtempSync(join(tmpdir(), "bench-dec-"));
+  const ctx = ctxFor(dir);
+  const N = 2_000;
+  try {
+    const plain: number[] = [];
+    for (let i = 0; i < N; i++)
+      plain.push(time(() => void ctx.preferences.remember({ rule: `Plain rule ${i} about topic ${i % 97}.`, scope: "global" })));
+    const dual: number[] = [];
+    for (let i = 0; i < N; i++)
+      dual.push(
+        time(() =>
+          void ctx.rememberWithDecision(
+            { rule: `Decision rule ${i} about topic ${i % 97}.`, scope: "global" },
+            { domain: "backend", choice: `choice${i}`, repoId: `r${i % 20}` },
+          ),
+        ),
+      );
+    const p = stat(plain);
+    const d = stat(dual);
+    return { ops: N, plainRememberMs: p, decisionRememberMs: d, overheadMedianMs: +(d.median - p.median).toFixed(4) };
+  } finally {
+    ctx.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function benchStartupLatency() {
   const dist = join(import.meta.dir, "..", "..", "dist", "index.js");
   if (!existsSync(dist)) return { skipped: "run `bun run build` first" };
@@ -265,6 +341,8 @@ const result = {
     cwd: process.cwd(),
   },
   retrievalScaling: benchRetrievalScaling(),
+  signalRetrieval: benchSignalRetrieval(),
+  decisionRemember: benchDecisionRemember(),
   candidateReduction: benchCandidateReduction(),
   dbOpenCost: benchDbOpenCost(),
   exportImport: benchExportImport(),

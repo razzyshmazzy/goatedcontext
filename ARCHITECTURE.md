@@ -4,7 +4,8 @@ This document explains how `ctx` is put together and, importantly, *why* it is
 shaped the way it is. The guiding principle:
 
 > **The core product is the `ctx` CLI and context engine. Agent integrations
-> (Claude Code today; Codex, Cursor, MCP tomorrow) are adapters around that core.**
+> (Claude Code, Codex, and Cursor today; MCP a possible future one) are adapters
+> around that core.**
 
 ## Core vs. adapters
 
@@ -17,7 +18,7 @@ shaped the way it is. The guiding principle:
                     │  calls the CLI / engine, never storage
              ┌──────▼───────────────────────────────────────┐
              │                    core                       │
-             │  preferences   retrieval   repos   environments│
+             │  preferences  retrieval  signals  repos  envs │
              └──────┬───────────────────────────────────────┘
                     │  services own all domain logic
              ┌──────▼───────────────────────────────────────┐
@@ -332,7 +333,7 @@ The flow lives entirely in shared core; thin adapters never query signals:
 - **Never promoted.** Surfacing is not promotion. There is no background scanner and no
   count threshold; the model decides, at the decision point, whether to `ctx propose`.
 
-## Seamless memory writes (0.3.5)
+## Memory writes without per-call approval prompts (0.3.5)
 
 Two problems kept the learning loop from feeling like memory, solved together here.
 
