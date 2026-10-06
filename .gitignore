@@ -9,5 +9,8 @@ dist/
 .tmp/
 coverage/
 
+# Stray captured test-output logs (e.g. a redirected `bun test` run)
+*-failure.txt
+
 # Never commit a real ctx home
 .ctx/
