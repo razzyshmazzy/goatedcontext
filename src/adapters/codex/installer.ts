@@ -30,6 +30,12 @@ import {
   ensureCodexWritableRoot,
   type WritableRootAction,
 } from "./config.ts";
+import {
+  upsertCodexRules,
+  removeCodexRules,
+  codexRulesFile,
+  type PermissionAction,
+} from "./permissions.ts";
 
 /**
  * Install the goatedcontext Codex adapter. Two native channels:
@@ -73,6 +79,10 @@ export interface CodexInstallResult {
   writableRootAction: WritableRootAction;
   /** The effective ctx home granted as a writable root. */
   ctxHome: string;
+  /** The goatedcontext-owned execpolicy rules file granting seamless ctx commands. */
+  rulesFile: string;
+  /** Outcome of installing the narrow ctx command auto-approval rules. */
+  permissionAction: PermissionAction;
 }
 
 function resolveHome(opts: CodexInstallOptions): string {
@@ -103,6 +113,10 @@ export function installCodex(opts: CodexInstallOptions = {}): CodexInstallResult
     // untouched and reported — ctx itself still installs fine.
     const configFile = codexConfigFile(home);
     const { action: writableRootAction } = ensureCodexWritableRoot(configFile, ctxHome, platform);
+    // Narrow, argv-based auto-approval for the safe ctx commands, in our OWN rules
+    // file (never config.toml). Orthogonal to writable_roots above — both are needed:
+    // the rule skips the approval prompt, writable_roots lets the sandboxed write land.
+    const permissionAction = upsertCodexRules(home, platform);
     return {
       home,
       hooksFile,
@@ -112,6 +126,8 @@ export function installCodex(opts: CodexInstallOptions = {}): CodexInstallResult
       configFile,
       writableRootAction,
       ctxHome,
+      rulesFile: codexRulesFile(home),
+      permissionAction,
     };
   });
 }
@@ -124,6 +140,8 @@ export interface CodexUninstallResult {
   hooksFile: string;
   hookAction: HookAction;
   skillAction: SkillRemoveAction;
+  /** Outcome of removing the goatedcontext-owned execpolicy rules file. */
+  permissionAction: PermissionAction;
 }
 
 /**
@@ -139,12 +157,16 @@ export interface CodexUninstallResult {
 export function uninstallCodex(opts: CodexInstallOptions = {}): CodexUninstallResult {
   const home = resolveHome(opts);
   const hooksFile = codexHooksFile(home);
-  if (!existsSync(home)) return { home, hooksFile, hookAction: "absent", skillAction: "absent" };
+  if (!existsSync(home))
+    return { home, hooksFile, hookAction: "absent", skillAction: "absent", permissionAction: "absent" };
   const lockFile = join(home, ".ctx-install.lock");
   return withFileLock(lockFile, () => {
     const hookAction = removeCodexHook(hooksFile);
     const skillAction = removeSkill(home, CTX_MEMORY_SKILL_NAME);
-    return { home, hooksFile, hookAction, skillAction };
+    // Remove ONLY our own rules file. config.toml (writable_roots) is left intact —
+    // same conservative ownership policy as the writable root itself (spec §18).
+    const permissionAction = removeCodexRules(home);
+    return { home, hooksFile, hookAction, skillAction, permissionAction };
   });
 }
 
@@ -154,3 +176,4 @@ export function codexSkillHealth(home: string, platform: NodeJS.Platform = proce
 }
 
 export { detectCodexHook };
+export { detectCodexRules, codexRulesHealth, codexRulesFile } from "./permissions.ts";

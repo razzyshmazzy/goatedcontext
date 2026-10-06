@@ -455,6 +455,23 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
           fix: s.writableRootConfigured ? undefined : "Run `ctx repair codex`.",
         });
       }
+
+      // Narrow ctx command permissions (seamless memory writes, no per-call prompt).
+      // Reported per detected agent where ctx can safely install a rule (Claude/Codex).
+      // An org-managed policy can still override a local allow — we report PRESENCE of
+      // our rule, not that the host will honor it over a managed deny.
+      if (s.detected && s.installed && s.permissionsConfigured !== null) {
+        add({
+          section: s.label,
+          id: `${s.id}-permissions`,
+          label: "ctx command permissions",
+          status: s.permissionsConfigured ? "ok" : "warn",
+          detail: s.permissionsConfigured
+            ? "narrow ctx allow rules installed"
+            : "narrow ctx allow rules missing (memory writes will prompt)",
+          fix: s.permissionsConfigured ? undefined : `Run \`${repairHint(s.id)}\`.`,
+        });
+      }
     }
 
     // Windows ctx command: agents must invoke `ctx.cmd` (not the `ctx.ps1` shim that

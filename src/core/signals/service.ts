@@ -173,6 +173,17 @@ export class SignalService {
    * genuinely separate evidence. Returns the row (new or the deduped existing one).
    */
   add(input: AddSignalInput): { signal: Signal; created: boolean } {
+    return withWriteTx(this.db, () => this.addInTx(input));
+  }
+
+  /**
+   * The transactional CORE of {@link add}: performs the dedup SELECT + INSERT but
+   * assumes the caller ALREADY holds a write transaction (it never opens its own).
+   * This lets a decision-aware `remember` persist the preference AND this signal in a
+   * SINGLE `withWriteTx`, so a failure in either rolls the whole pair back — never a
+   * half-written preference/signal. `add` is just `withWriteTx(() => addInTx())`.
+   */
+  addInTx(input: AddSignalInput): { signal: Signal; created: boolean } {
     const domain = normalizeDomain(input.domain);
     const choice = normalizeChoice(input.choice);
     if (!domain) throw new CtxError("A signal requires a non-empty --domain (e.g. backend, package-manager).");
@@ -194,30 +205,28 @@ export class SignalService {
     const ts = nowIso();
     const day = ts.slice(0, 10);
 
-    return withWriteTx(this.db, () => {
-      // Same immediate context = same (domain, choice, repo, session, exception-ness) on
-      // the same day. Exception vs ordinary are distinct evidence even for one choice.
-      const existing = this.db
-        .query<SignalRow, [string, string, string | null, string | null, number, string]>(
-          `SELECT * FROM decision_signals
-           WHERE domain = ? AND choice = ? AND repo_id IS ? AND session_id IS ?
-             AND is_exception = ? AND substr(created_at, 1, 10) = ?
-           LIMIT 1`,
-        )
-        .get(domain, choice, repoId, sessionId, isException, day);
-      if (existing) return { signal: rowToSignal(existing), created: false };
+    // Same immediate context = same (domain, choice, repo, session, exception-ness) on
+    // the same day. Exception vs ordinary are distinct evidence even for one choice.
+    const existing = this.db
+      .query<SignalRow, [string, string, string | null, string | null, number, string]>(
+        `SELECT * FROM decision_signals
+         WHERE domain = ? AND choice = ? AND repo_id IS ? AND session_id IS ?
+           AND is_exception = ? AND substr(created_at, 1, 10) = ?
+         LIMIT 1`,
+      )
+      .get(domain, choice, repoId, sessionId, isException, day);
+    if (existing) return { signal: rowToSignal(existing), created: false };
 
-      const id = newId();
-      this.db
-        .query(
-          `INSERT INTO decision_signals
-             (id, domain, choice, choice_raw, repo_id, session_id, agent_id, context,
-              preferred_choice, reason, constraint_tag, is_exception, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(id, domain, choice, choiceRaw, repoId, sessionId, agentId, context, preferredChoice, reason, constraintTag, isException, ts);
-      return { signal: this.getById(id)!, created: true };
-    });
+    const id = newId();
+    this.db
+      .query(
+        `INSERT INTO decision_signals
+           (id, domain, choice, choice_raw, repo_id, session_id, agent_id, context,
+            preferred_choice, reason, constraint_tag, is_exception, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, domain, choice, choiceRaw, repoId, sessionId, agentId, context, preferredChoice, reason, constraintTag, isException, ts);
+    return { signal: this.getById(id)!, created: true };
   }
 
   getById(id: string): Signal | null {

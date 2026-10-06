@@ -233,7 +233,8 @@ ctx agents
 ctx doctor
 ```
 
-show healthy Claude runtime integration and memory guidance.
+show healthy Claude runtime integration, memory guidance, and `permissions ✓` (the narrow
+ctx command allow rules).
 
 Use a fresh Claude session when required by the installer output.
 
@@ -245,11 +246,13 @@ Verify:
 runtime ✓
 AGENTS.md ✓
 memory skill ✓
+permissions ✓
 ```
 
 On Windows, `ctx doctor` should also confirm the Codex ctx writable-root configuration and the runnable `ctx.cmd` command path.
 
-Do not require Codex Full Access merely for goatedcontext memory writes.
+Do not require Codex Full Access merely for goatedcontext memory writes — the narrow
+`goatedcontext.rules` execpolicy file is sufficient.
 
 ### Cursor
 
@@ -292,6 +295,45 @@ Then:
 > Actually use npm in this repo from now on.
 
 Verify the durable repo preference is updated appropriately.
+
+## Seamless-memory acceptance test (0.3.5)
+
+For releases touching the permission integration, the decisive check is that memory
+writes happen in NORMAL permission mode — no `--dangerously-skip-permissions`, no Codex
+Full Access.
+
+In a disposable Git repo, in a normal agent session, say:
+
+> Always use Supabase for the backend in this repo.
+
+Expected, with NO broad permission bypass enabled:
+
+- the agent does NOT ask you to approve running `ctx` just to record the memory
+- exactly one `ctx` write happens (a decision-aware `ctx remember`)
+- a repo-scoped durable Supabase preference exists, AND a `backend=supabase` signal exists:
+
+```bash
+ctx prefs --json
+ctx signals --domain backend --json
+```
+
+Then, in a FRESH repo, say:
+
+> Set up the backend.
+
+Expected: the injected context surfaces the cross-repo Supabase evidence automatically
+(no manual `ctx signal add` was ever run), and no preference was silently created in the
+fresh repo.
+
+Negative check — these must STILL prompt (never silently run):
+
+- `ctx env run …`, `ctx setup`, `ctx install …`, `ctx uninstall …`
+- `ctx forget …`, `ctx signal clear`, `ctx prefs approve …`
+- any non-ctx command (`npm`, `node`, `powershell`, …)
+
+If an organization ships a managed/enterprise policy that requires approval, a local
+allow cannot override it — `ctx doctor` reports the rule's presence, not a guarantee the
+host will honor it over a managed deny. That is expected and must be reported honestly.
 
 ## Static projection acceptance test
 

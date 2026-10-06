@@ -104,6 +104,8 @@ That skill teaches the agent when to:
 
 Choose Supabase in a few projects and goatedcontext can surface that pattern the next time your agent needs to pick a backend — as evidence, without turning it into an automatic rule.
 
+`setup` also configures a narrow, safe permission rule for Claude Code and Codex so the agent can remember your preferences without asking you to approve each `ctx` command — no `--dangerously-skip-permissions`, no Full Access, no blanket shell access. Only the specific low-risk `ctx` memory/context commands are auto-approved; everything else still prompts.
+
 Check installed integrations with:
 
 ```powershell

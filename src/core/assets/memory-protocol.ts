@@ -19,7 +19,7 @@
  * this marker in the rendered artifact so `ctx doctor` can flag a STALE skill (an
  * old installed body) and `ctx repair` can converge it.
  */
-export const MEMORY_PROTOCOL_VERSION = "4";
+export const MEMORY_PROTOCOL_VERSION = "5";
 
 /** Hidden marker embedded in every rendered artifact for staleness detection. */
 export const MEMORY_PROTOCOL_MARKER = `<!-- ctx-memory-protocol: v${MEMORY_PROTOCOL_VERSION} -->`;
@@ -97,6 +97,24 @@ wording is explicit:
 
     ctx remember --scope <global|repo> [--always | --when <key=value> ...] "<one terse rule>"
 
+### Architecture/tooling choices: record the preference AND the decision in ONE command
+When the durable preference is ALSO a meaningful architecture/tooling CHOICE (which
+backend/database/framework/package-manager/etc. was picked), add \`--decision-domain\`
+and \`--decision-choice\` so the SAME command records both the authoritative preference
+AND a non-authoritative cross-repo decision signal — atomically, in one write. Do NOT
+run a separate \`ctx signal add\`:
+
+    ctx remember --scope repo --always --decision-domain backend --decision-choice supabase "Use Supabase for the backend."
+
+Use it when BOTH hold: the statement is durable (a preference) AND it names a concrete
+technology/architecture decision. A purely behavioral rule ("Never add dependencies
+without asking", "Keep functions small") is a preference with NO decision — omit the
+decision flags. A one-off technology choice that is NOT durable ("Use Supabase just for
+this prototype") is the opposite — record a signal only (see §4), no preference.
+For an EXCEPTION to a usual preference, add \`--decision-preferred-choice\`,
+\`--decision-reason\`, \`--decision-constraint\` (and/or \`--decision-exception\`); the
+stored preference is never changed or deleted.
+
 ### Comparative / default-choice rules are usually \`--always\`
 A rule that picks a DEFAULT or chooses X over Y governs a future choice before the
 future task even names X, so it must apply broadly — use \`--always\`:
@@ -173,8 +191,10 @@ behavior on its own, and ctx NEVER promotes one to a preference automatically. W
 task matches a decision domain you have prior signals for, ctx surfaces a compact
 "Observed developer decisions" block automatically — that is evidence (observed, not
 required): weigh it, but the user's current request and the preferences above always
-win. Record a signal in a single cheap command when the developer makes a meaningful
-decision that was not stated as durable:
+win. If the decision is ALSO a durable preference, do NOT record the signal separately
+— use the one-command decision-aware \`ctx remember\` (§1). Record a standalone signal
+only when the decision is meaningful but NOT durable (a one-off choice), in a single
+cheap command:
 
     ctx signal add --domain <domain> --choice <choice>
 
@@ -237,6 +257,11 @@ task context, in preferences OR signals. Secret VALUES belong only in \`ctx env\
   ctx remember ..." / "recording a signal ...") unless the developer asks or it fails.
   It should feel like memory, not CLI orchestration; a brief acknowledgement (see §1)
   is fine. Signals are invisible infrastructure.
+- Run each ctx operation as ONE direct command with properly-quoted arguments. Never
+  chain it with \`&&\`, \`;\`, or a pipe, never wrap it in \`eval\`/\`bash -c\`, and never
+  build the command by string concatenation — setup grants a NARROW auto-approval for
+  bare ctx memory commands, so a chained or wrapped command will (correctly) fall back
+  to asking for approval. One command, quoted args, nothing appended.
 - Allowed memory operations: \`ctx remember\`, \`ctx propose\`, \`ctx forget\`,
   \`ctx prefs\`, \`ctx why\`, \`ctx signal add\`, \`ctx signals\`. Pass
   \`--agent-id\`/\`--session-id\` when your host exposes one. Nothing else mutates ctx.

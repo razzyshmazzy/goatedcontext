@@ -332,6 +332,71 @@ The flow lives entirely in shared core; thin adapters never query signals:
 - **Never promoted.** Surfacing is not promotion. There is no background scanner and no
   count threshold; the model decides, at the decision point, whether to `ctx propose`.
 
+## Seamless memory writes (0.3.5)
+
+Two problems kept the learning loop from feeling like memory, solved together here.
+
+### Decision-aware write: one preference AND one signal, atomically
+
+A meaningful architecture/tooling choice ("Use Supabase for the backend") is BOTH a repo
+convention (an authoritative **preference** — what the agent should do here) AND cross-repo
+evidence (a non-authoritative **signal** — what the developer chose). Making the agent run
+`ctx remember` *and* `ctx signal add` meant two commands, two approvals, and a possible
+half-written pair. `ctx remember` now takes optional `--decision-domain` / `--decision-choice`
+(+ the exception fields `--decision-preferred-choice` / `--decision-reason` /
+`--decision-constraint` / `--decision-exception`) and writes both in ONE call:
+
+```
+ctx remember --scope repo --always --decision-domain backend --decision-choice supabase "Use Supabase for the backend."
+```
+
+`CtxContext.rememberWithDecision` runs `PreferenceService.rememberInTx` then
+`SignalService.addInTx` inside a SINGLE `withWriteTx` (`BEGIN IMMEDIATE`). The preference is
+written first; if it throws, no signal is attempted; if the signal throws, the whole
+transaction rolls back — never a half-written pair. Signal dedup is unchanged (the same
+decision in the same immediate context does not spam rows). The two services expose tx-free
+cores (`*InTx`) precisely so the pair can share one transaction — `BEGIN IMMEDIATE` does not
+nest. The agent decides, semantically, when a statement is a pure behavioral preference
+(no decision), a one-off choice (signal only), or a durable decision (both) — never a keyword
+parser.
+
+### Safe auto-allow: no per-call approval prompts, no privilege bypass
+
+Agents prompt for approval on every shell command by default, which breaks the "memory just
+happens" UX when they run `ctx`. The fix is the NARROWEST host-native permission rule, never a
+blanket bypass (`--dangerously-skip-permissions`, Codex Full Access, `Bash(*)`). The safe set
+and its rendering live in one place (`core/agents/permissions.ts`); thin adapters install it:
+
+- **Claude Code** — `permissions.allow`/`deny` in `~/.claude/settings.json`
+  (`Bash(ctx remember:*)` …). Claude splits a command on shell operators
+  (`&& || ; | |& & newline`) and requires EACH sub-command to match independently, so a
+  narrow prefix can't be turned into arbitrary execution by chaining.
+- **Codex** — argv-based `prefix_rule(pattern=["ctx","remember"], decision="allow")` in a
+  dedicated, goatedcontext-owned `$CODEX_HOME/rules/goatedcontext.rules` file (never
+  `config.toml`; orthogonal to the writable-root merge, which stays). Matching is token-array
+  based and splits chains per-segment; an unsplittable/opaque script falls back to prompting.
+- **Cursor** — **not installed.** Cursor's `terminalAllowlist` is raw-prefix matching with
+  CVE-documented chaining bypasses (`ctx remember` would also admit `ctx remember … && rm -rf /`),
+  so per §21/§22 we refuse to write a rule there and document the limitation. Cursor keeps its
+  memory skill + AGENTS.md.
+
+Auto-allowed (low-risk reads + bounded additive writes): `remember`, `propose`, `signal add`,
+`prefs`, `why`, `signals`, `history`, `conflicts`. On Windows BOTH `ctx` and `ctx.cmd` spellings
+are allowed (the skill invokes `ctx.cmd`).
+
+Intentionally NEVER auto-allowed (they keep prompting as normal): `env run`/`env set`, `import`,
+`export`, `setup`, `install`, `repair`, `uninstall`, `sync`, and the destructive/human-review
+memory ops `forget`, `signal clear`, `signal forget`, `prefs approve`, `prefs reject` (the last
+two rendered as an explicit higher-precedence gate — Claude `deny`, Codex `prompt`). Nothing
+shell-generic (`bash`, `node`, `npm`, `powershell`) is ever whitelisted. An org-managed/enterprise
+policy can still override a local allow — `ctx doctor` reports the rule's presence, not that the
+host will honor it over a managed deny.
+
+Ownership: Codex gets its own file (delete = uninstall). Claude's rules are a fixed, recognizable
+set of strings merged into the shared `settings.json`; uninstall removes exactly those and tidies
+an emptied `permissions` object, preserving every other setting. A present-but-unparseable config
+is never clobbered.
+
 ## Applicability (`relevant` vs `always` vs `conditional`)
 
 Every preference has an **`applicability`** that decides HOW it reaches the agent.

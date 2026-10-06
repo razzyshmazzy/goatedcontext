@@ -411,6 +411,15 @@ export function buildProgram(deps: CliDeps): Command {
     )
     .option("--when-json <json>", "Advanced: a structured condition as JSON (all/any/not)")
     .option("--evidence <text>", "Optional supporting evidence")
+    // Decision-aware write (0.3.5): when a durable preference is ALSO a meaningful
+    // architecture/tooling CHOICE, record a cross-repo decision signal in the SAME
+    // atomic write. Both --decision-domain and --decision-choice are required to opt in.
+    .option("--decision-domain <domain>", "Also record a decision signal in this domain (e.g. backend)")
+    .option("--decision-choice <choice>", "The chosen option for the decision signal (e.g. supabase)")
+    .option("--decision-preferred-choice <choice>", "Exception: the usually-preferred choice this departed from")
+    .option("--decision-reason <text>", "Exception: why the choice differed (verbatim; never secrets)")
+    .option("--decision-constraint <tag>", "Exception: constraint category (e.g. free-tier)")
+    .option("--decision-exception", "Mark the decision signal as an exception to the usual preference")
     .option("--agent-id <id>", "Provenance: which agent recorded this")
     .option("--session-id <id>", "Provenance: session identifier")
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
@@ -424,23 +433,55 @@ export function buildProgram(deps: CliDeps): Command {
         const scope: Scope = opts.repo ? "repo" : (opts.scope as Scope);
         let repoId: string | null = null;
         if (scope === "repo") repoId = resolveRepoOrThrow(ctx, opts.cwd).id;
-        const pref = ctx.preferences.remember({
-          rule,
-          category: opts.category,
-          domain: opts.domain ?? null,
-          scope,
-          repoId,
-          status: opts.lock ? "locked" : "approved",
-          applicability: applicability as Applicability | undefined,
-          condition,
-          evidence: opts.evidence,
-          source: "explicit",
-          ...provenance(opts),
-        });
-        if (opts.json) return printJson(pref);
+
+        // A decision signal is recorded only when BOTH domain and choice are given.
+        const hasDecision = Boolean(opts.decisionDomain && opts.decisionChoice);
+        if ((opts.decisionDomain || opts.decisionChoice) && !hasDecision) {
+          throw new CtxError("--decision-domain and --decision-choice must be used together.");
+        }
+        const decision = hasDecision
+          ? {
+              domain: opts.decisionDomain as string,
+              choice: opts.decisionChoice as string,
+              // The decision happened in THIS repo: link to the repo-scope id, else the cwd repo.
+              repoId: repoId ?? ctx.repos.resolve(opts.cwd)?.id ?? null,
+              preferredChoice: opts.decisionPreferredChoice ?? null,
+              reason: opts.decisionReason ?? null,
+              constraint: opts.decisionConstraint ?? null,
+              exception: Boolean(
+                opts.decisionException ||
+                  opts.decisionPreferredChoice ||
+                  opts.decisionReason ||
+                  opts.decisionConstraint,
+              ),
+              ...provenance(opts),
+            }
+          : null;
+
+        const { preference: pref, signal, signalCreated } = ctx.rememberWithDecision(
+          {
+            rule,
+            category: opts.category,
+            domain: opts.domain ?? null,
+            scope,
+            repoId,
+            status: opts.lock ? "locked" : "approved",
+            applicability: applicability as Applicability | undefined,
+            condition,
+            evidence: opts.evidence,
+            source: "explicit",
+            ...provenance(opts),
+          },
+          decision,
+        );
+        if (opts.json) return printJson({ preference: pref, signal, signalCreated });
         line(`Remembered [${pref.status}] (${shortId(pref.id)}): ${pref.rule}`);
         const condStr = pref.condition ? ` condition=[${compactCondition(pref.condition)}]` : "";
         line(`  scope=${pref.scope} category=${pref.category} domain=${pref.domain ?? "-"} polarity=${pref.polarity} applicability=${pref.applicability}${condStr}`);
+        if (signal) {
+          const tag = signal.isException ? " (exception)" : "";
+          line(`  decision signal: ${signal.domain}=${signal.choiceRaw}${tag}${signalCreated ? "" : " (already recorded)"}`);
+        }
       });
     });
 
@@ -1502,6 +1543,9 @@ export function buildProgram(deps: CliDeps): Command {
               ? "memory skill (stale)"
               : "memory skill (missing)",
         );
+        // Narrow ctx command permissions (seamless writes) — shown where applicable.
+        if (s.permissionsConfigured !== null && s.installed)
+          parts.push(s.permissionsConfigured ? "permissions ✓" : "permissions (missing)");
         line(`${s.label.padEnd(13)} ${parts.join("   ")}`);
       }
       line("");

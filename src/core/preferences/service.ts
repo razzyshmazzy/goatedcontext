@@ -206,6 +206,16 @@ export class PreferenceService {
 
   /** Explicit developer instruction. Creates an in-effect (approved) preference. */
   remember(input: RememberInput): Preference {
+    return withWriteTx(this.db, () => this.rememberInTx(input));
+  }
+
+  /**
+   * The transactional CORE of {@link remember}: validates, derives and inserts the
+   * preference but assumes the caller ALREADY holds a write transaction (it never
+   * opens its own). This lets a decision-aware write persist the preference AND a
+   * decision signal in a SINGLE `withWriteTx` so the pair commits/rolls back as one.
+   */
+  rememberInTx(input: RememberInput): Preference {
     const parsed = RememberInputSchema.parse(input);
     const scope = parsed.scope;
     const repoId = parsed.repoId ?? null;
@@ -222,7 +232,7 @@ export class PreferenceService {
     const id = newId();
     const ts = nowIso();
 
-    return withWriteTx(this.db, () => {
+    {
       this.db
         .query(
           `INSERT INTO preferences
@@ -271,7 +281,7 @@ export class PreferenceService {
         sessionId: parsed.sessionId ?? null,
       });
       return this.getById(id)!;
-    });
+    }
   }
 
   /**

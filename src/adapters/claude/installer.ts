@@ -14,6 +14,11 @@ import {
   removePromptHook,
   type HookAction,
 } from "./hook.ts";
+import {
+  upsertClaudePermissions,
+  removeClaudePermissions,
+  type PermissionAction,
+} from "./permissions.ts";
 
 export interface ClaudeInstallOptions {
   /** Root of the Claude user config dir. Defaults to ~/.claude (override for tests). */
@@ -22,6 +27,8 @@ export interface ClaudeInstallOptions {
   hookCommand?: string;
   /** Remove the proactive-retrieval hook instead of installing it (keeps skills/prefs). */
   disableHook?: boolean;
+  /** Override the host platform (for deterministic tests). Affects ctx/ctx.cmd rules. */
+  platform?: NodeJS.Platform;
 }
 
 export interface ClaudeInstallResult {
@@ -31,6 +38,8 @@ export interface ClaudeInstallResult {
   instructionsAction: "created" | "updated" | "unchanged";
   settingsFile: string;
   hookAction: HookAction;
+  /** Outcome of installing the narrow ctx command permission rules (seamless writes). */
+  permissionAction: PermissionAction;
 }
 
 /**
@@ -70,6 +79,9 @@ export function installClaude(opts: ClaudeInstallOptions = {}): ClaudeInstallRes
     const hookAction = opts.disableHook
       ? removePromptHook(settingsFile)
       : upsertPromptHook(settingsFile, opts.hookCommand ?? HOOK_COMMAND_DEFAULT);
+    // Narrow ctx command permissions make memory writes seamless (no per-call prompt).
+    // Installed regardless of the read hook — writes flow through the memory skill.
+    const permissionAction = upsertClaudePermissions(settingsFile, opts.platform ?? process.platform);
 
     return {
       skillsDir: skillsRoot,
@@ -78,6 +90,7 @@ export function installClaude(opts: ClaudeInstallOptions = {}): ClaudeInstallRes
       instructionsAction: action,
       settingsFile,
       hookAction,
+      permissionAction,
     };
   });
 }
@@ -90,6 +103,7 @@ export interface ClaudeRepairResult {
   instructionsAction: "ok" | "restored" | "repaired";
   settingsFile: string;
   hookAction: HookAction;
+  permissionAction: PermissionAction;
 }
 
 /**
@@ -136,8 +150,9 @@ export function repairClaude(opts: ClaudeInstallOptions = {}): ClaudeRepairResul
     const hookAction = opts.disableHook
       ? removePromptHook(settingsFile)
       : upsertPromptHook(settingsFile, opts.hookCommand ?? HOOK_COMMAND_DEFAULT);
+    const permissionAction = upsertClaudePermissions(settingsFile, opts.platform ?? process.platform);
 
-    return { skillsDir: skillsRoot, skills, instructionsFile, instructionsAction, settingsFile, hookAction };
+    return { skillsDir: skillsRoot, skills, instructionsFile, instructionsAction, settingsFile, hookAction, permissionAction };
   });
 }
 
@@ -149,6 +164,7 @@ export interface ClaudeUninstallResult {
   instructionsAction: "removed" | "absent";
   settingsFile: string;
   hookAction: HookAction;
+  permissionAction: PermissionAction;
 }
 
 /**
@@ -172,6 +188,7 @@ export function uninstallClaude(opts: ClaudeInstallOptions = {}): ClaudeUninstal
       instructionsAction: "absent",
       settingsFile,
       hookAction: "absent",
+      permissionAction: "absent",
     };
   }
 
@@ -188,8 +205,9 @@ export function uninstallClaude(opts: ClaudeInstallOptions = {}): ClaudeUninstal
 
     const instructionsAction = removeInstructionBlock(instructionsFile);
     const hookAction = removePromptHook(settingsFile);
+    const permissionAction = removeClaudePermissions(settingsFile);
 
-    return { skillsDir: skillsRoot, removedSkills, instructionsFile, instructionsAction, settingsFile, hookAction };
+    return { skillsDir: skillsRoot, removedSkills, instructionsFile, instructionsAction, settingsFile, hookAction, permissionAction };
   });
 }
 

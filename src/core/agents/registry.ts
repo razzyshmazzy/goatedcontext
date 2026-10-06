@@ -8,9 +8,10 @@ import {
   capabilitiesFor,
 } from "./capabilities.ts";
 import { detectPromptHook } from "../../adapters/claude/hook.ts";
+import { detectClaudePermissions } from "../../adapters/claude/permissions.ts";
 import { CTX_INSTRUCTION_BEGIN, CLAUDE_SKILLS } from "../../adapters/claude/skills.ts";
 import { codexHome, codexHooksFile, detectCodexHook } from "../../adapters/codex/hook.ts";
-import { codexSkillHealth } from "../../adapters/codex/installer.ts";
+import { codexSkillHealth, detectCodexRules } from "../../adapters/codex/installer.ts";
 import { codexConfigFile, codexWritableRootConfigured } from "../../adapters/codex/config.ts";
 import { resolvePaths } from "../../storage/paths.ts";
 import { cursorSkillHealth } from "../../adapters/cursor/installer.ts";
@@ -64,6 +65,13 @@ export interface AgentStatus {
    * `null` for agents where this does not apply.
    */
   writableRootConfigured: boolean | null;
+  /**
+   * Whether the narrow ctx command permission rules (seamless memory writes) are
+   * installed and current for this agent. `null` for agents where ctx does not (and
+   * safely cannot) install a permission rule — e.g. Cursor, whose terminal allowlist
+   * is injection-unsafe raw-prefix matching.
+   */
+  permissionsConfigured: boolean | null;
   /** Agent version when cheaply available; otherwise null (we never spawn to find out). */
   version: string | null;
   /** Short, human-readable notes (missing pieces, honest limitations). */
@@ -117,14 +125,22 @@ function claudeStatus(opts: AgentStatusOptions): AgentStatus {
   const skills = existsSync(join(home, "skills", "context", "SKILL.md"));
   const memHealth = skillHealth(home, "context-learn", CONTEXT_LEARN_CONTENT);
   const memorySkill = { installed: memHealth !== "missing", health: memHealth };
+  const permissionsConfigured = (() => {
+    try {
+      return detectClaudePermissions(settings);
+    } catch {
+      return false;
+    }
+  })();
   const installed = hook || instructions || skills;
-  const healthy = hook && instructions && skills && memHealth === "current";
+  const healthy = hook && instructions && skills && memHealth === "current" && permissionsConfigured;
   const notes: string[] = [];
   if (installed && !hook) notes.push("prompt hook missing (repair: ctx install claude --repair)");
   if (installed && !instructions) notes.push("instruction block missing");
   if (installed && !skills) notes.push("skills missing");
   if (installed && memHealth === "stale") notes.push("memory skill stale (repair: ctx install claude --repair)");
   if (installed && memHealth === "missing") notes.push("memory skill missing (repair: ctx install claude --repair)");
+  if (installed && !permissionsConfigured) notes.push("ctx command permissions missing (repair: ctx install claude --repair)");
   return {
     id: "claude",
     label: LABELS.claude,
@@ -136,6 +152,7 @@ function claudeStatus(opts: AgentStatusOptions): AgentStatus {
     configPath: home,
     memorySkill,
     writableRootConfigured: null, // Claude is not sandboxed by a writable-roots allowlist
+    permissionsConfigured,
     version: null,
     notes,
   };
@@ -169,6 +186,13 @@ function codexStatus(opts: AgentStatusOptions): AgentStatus {
       return false;
     }
   })();
+  const permissionsConfigured = (() => {
+    try {
+      return detectCodexRules(home);
+    } catch {
+      return false;
+    }
+  })();
   const anyInstalled = installed || memorySkill.installed;
   const notes: string[] = [];
   if (!anyInstalled && (existsSync(home) || onPath)) notes.push("not configured (run: ctx install codex)");
@@ -177,17 +201,20 @@ function codexStatus(opts: AgentStatusOptions): AgentStatus {
   if (anyInstalled && memHealth === "missing") notes.push("memory skill missing (repair: ctx repair codex)");
   if (anyInstalled && !writableRootConfigured)
     notes.push("ctx writable root missing (repair: ctx repair codex)");
+  if (anyInstalled && !permissionsConfigured)
+    notes.push("ctx command rules missing (repair: ctx repair codex)");
   return {
     id: "codex",
     label: LABELS.codex,
     capabilities: CODEX_CAPS,
     detected: existsSync(home) || onPath,
     installed: anyInstalled,
-    healthy: installed && memHealth === "current",
+    healthy: installed && memHealth === "current" && permissionsConfigured,
     staticPresent: repoAgentsBlockPresent(opts.cwd ?? process.cwd()),
     configPath: home,
     memorySkill,
     writableRootConfigured,
+    permissionsConfigured,
     version: null,
     notes,
   };
@@ -227,6 +254,9 @@ function cursorStatus(opts: AgentStatusOptions): AgentStatus {
     configPath: repoRoot ? join(repoRoot, "AGENTS.md") : globalDir,
     memorySkill,
     writableRootConfigured: null, // Cursor is not sandboxed by a writable-roots allowlist
+    // Cursor's terminal allowlist is injection-unsafe raw-prefix matching, so ctx does
+    // NOT install a permission rule there (spec §14/§21). Not applicable → null.
+    permissionsConfigured: null,
     version: null,
     notes,
   };

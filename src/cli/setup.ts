@@ -397,6 +397,13 @@ export function runSetup(opts: SetupOptions): SetupResult {
         ? "✗ Claude settings.json is not valid JSON — hook left untouched"
         : "✓ Claude integration",
     );
+    if (install.permissionAction === "error") {
+      warnings.push(
+        "Claude settings.json is not valid JSON, so the narrow ctx command permissions\n" +
+          "  were left untouched. Fix the JSON, then run: ctx install claude --repair\n" +
+          "  (Until then Claude will ask to approve each ctx memory write.)",
+      );
+    }
   }
 
   // Codex + Cursor: only in auto-detect mode, only when present. Both share the
