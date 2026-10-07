@@ -282,9 +282,16 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
   }
 
   // ---- git -----------------------------------------------------------------
+  // Git is an OPTIONAL dependency. When it is absent (or fails), `runGit` returns null
+  // and repo identity/scoping falls back safely: `detectRepoIdentity` → null → not in a
+  // repo, so ctx still opens its DB, serves global preferences, runs `ctx agent context`
+  // and MCP, and records global memory. Missing git therefore degrades repo scoping — it
+  // does NOT make the installation unhealthy — so this is a WARN, never a fail. (Honors
+  // the same `CTX_GIT_BIN` override the rest of the codebase uses; see utils/git.ts.)
+  const gitBin = env.CTX_GIT_BIN?.trim() || "git";
   let gitOk = false;
   try {
-    const out = execFileSync("git", ["--version"], {
+    const out = execFileSync(gitBin, ["--version"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
@@ -295,16 +302,16 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
       section: "Git",
       id: "git-exe",
       label: "git executable",
-      status: "fail",
-      detail: "not found on PATH",
-      fix: "Install Git and ensure it is on PATH; repo scoping needs it.",
+      status: "warn",
+      detail: "not found on PATH; repository identity/scoping falls back to global-only (git is optional)",
+      fix: "Install Git for canonical repository detection and repo-scoped preferences.",
     });
   }
 
   if (gitOk) {
     let root: string | null = null;
     try {
-      root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      root = execFileSync(gitBin, ["rev-parse", "--show-toplevel"], {
         cwd,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],

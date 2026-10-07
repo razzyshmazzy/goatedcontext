@@ -270,3 +270,36 @@ test(
   },
   TIMEOUT,
 );
+
+test("git missing is a WARN (not fail): the install stays healthy via fallback repo scoping", () => {
+  // Force git resolution to fail deterministically (a bin name that exists nowhere),
+  // using the same CTX_GIT_BIN override the rest of the codebase honors.
+  const home = initHome();
+  try {
+    const report = runDoctor({
+      version: "0.4.0",
+      env: {
+        CTX_HOME: home,
+        CTX_SECRET_BACKEND: "file",
+        PATH: process.env.PATH,
+        CTX_GIT_BIN: "ctx-no-such-git-binary-xyz",
+      },
+      skipAdapter: true,
+      which: alwaysFound,
+    });
+
+    // Git is optional: its absence degrades repo scoping but must NOT fail the report.
+    expect(check(report, "git-exe").status).toBe("warn");
+    expect(report.hasWarnings).toBe(true);
+    expect(report.ok).toBe(true);
+    // No check is fatal, and core functionality checks stay healthy.
+    expect(report.checks.filter((c) => c.status === "fail")).toEqual([]);
+    expect(check(report, "db-readable").status).toBe("ok");
+    expect(check(report, "integrity").status).toBe("ok");
+    expect(check(report, "schema").status).toBe("ok");
+    // With git unavailable the git-only "repo-detected" line is simply not emitted.
+    expect(report.checks.some((c) => c.id === "repo-detected")).toBe(false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
