@@ -40,6 +40,10 @@ const NPM = whichSync("npm");
 const NODE = whichSync("node");
 const PKG_VERSION = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version as string;
 const TIMEOUT = 180_000;
+// The 0.4.0 packed+MCP acceptance test gets a tighter, dedicated timeout than the plain
+// install tests: it adds an MCP client/server round-trip (a potential stdio-shutdown
+// hang), so its ceiling is kept low enough to surface such a hang quickly.
+const PACKED_MCP_TIMEOUT_MS = 60_000;
 
 const ready = Boolean(NPM && NODE && existsSync(DIST));
 
@@ -696,7 +700,11 @@ test(
       rmSync(cursorHome, { recursive: true, force: true });
     }
   },
-  TIMEOUT,
+  // Dedicated timeout (not the shared 180s): this test does a real npm install plus an
+  // MCP client/server round-trip. ~5s in isolation, ~7.5s under full-suite parallel load;
+  // 60s gives generous headroom for npm-install variance on a loaded Windows CI runner
+  // while staying tight enough to SURFACE an MCP stdio-shutdown hang rather than hide it.
+  PACKED_MCP_TIMEOUT_MS,
 );
 
 test(

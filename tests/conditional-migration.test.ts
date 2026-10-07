@@ -9,6 +9,14 @@ import { resolvePaths } from "../src/storage/paths.ts";
 
 // Proves the 0.2.8 schema change is a real, non-destructive migration from the
 // EXACT previous (0.2.7 / schema v4) layout — not just a fresh latest-schema DB.
+//
+// Timing: this is a SYNCHRONOUS integration test that opens a real DB, applies nine
+// real migrations (each a committed transaction → fsync), reopens, and reads back. In
+// isolation it runs in well under 250ms, but in the full parallel suite its fsyncs
+// compete for disk with the concurrent packed-install tests (npm writing thousands of
+// files), which on a Windows CI runner pushes it past the 5s default. It is healthy, not
+// hung (no awaits, no lock waits), so a generous explicit timeout is the right fix.
+const MIGRATION_TIMEOUT_MS = 20_000;
 
 test("migration v5 adds a null condition to a 0.2.7 (schema v4) database, preserving everything", () => {
   const home = mkdtempSync(join(tmpdir(), "ctx-mig5-"));
@@ -140,4 +148,4 @@ test("migration v5 adds a null condition to a 0.2.7 (schema v4) database, preser
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
-});
+}, MIGRATION_TIMEOUT_MS);
