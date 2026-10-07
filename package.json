@@ -1,6 +1,6 @@
 {
   "name": "goatedcontext",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Local, shared developer memory for any AI coding agent. Works with any agent that speaks MCP, can invoke a subprocess, or reads AGENTS.md. Native zero-config integrations for Claude Code, OpenAI Codex, and Cursor.",
   "type": "module",
   "license": "MIT",
