@@ -185,19 +185,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
   } else {
     let db: Database | null = null;
     try {
-      // Prefer a read-only open (doctor must never mutate). BUT on Windows a read-only
-      // open of a WAL database can fail when a `-wal`/`-shm` sidecar is present: SQLite
-      // cannot create/attach the shared-memory file in read-only mode (e.g. right after
-      // another process used the DB, or while a virus scanner briefly holds the sidecar).
-      // The database is perfectly readable — so fall back to a normal (read-write) open
-      // for inspection. We still only ISSUE reads below (integrity_check/SELECTs), so
-      // nothing is mutated, and a genuinely unreadable/corrupt DB still fails the outer
-      // catch. This keeps `ctx doctor` honest and non-flaky on Windows.
-      try {
-        db = openDb(paths.dbFile, { readonly: true });
-      } catch {
-        db = openDb(paths.dbFile, { readonly: false });
-      }
+      db = openDb(paths.dbFile, { readonly: true });
       add({ section: "Database", id: "db-readable", label: "database readable", status: "ok" });
 
       // Integrity check.

@@ -649,11 +649,16 @@ test(
       // outside the adapter gate, so they are present here.
       const doc = JSON.parse(captureChild(launcher, ["doctor", "--skip-adapter", "--json"], { env }).stdout);
       // Diagnostic only (does NOT change the assertion): if doctor is unhealthy, surface
-      // the exact failing checks in the CI log so a Windows-only failure is actionable.
+      // the exact failing checks — full structured detail — in the CI log so a Windows-only
+      // failure is actionable. The assertion below is unchanged and still fails.
       if (!doc.ok) {
         console.error(
-          "[packed] doctor NOT ok — failing checks: " +
-            JSON.stringify(doc.checks.filter((c: { status: string }) => c.status === "fail")),
+          "[packed] doctor failing checks:\n" +
+            JSON.stringify(
+              doc.checks.filter((c: { status: string }) => c.status === "fail"),
+              null,
+              2,
+            ),
         );
       }
       expect(doc.ok).toBe(true);
