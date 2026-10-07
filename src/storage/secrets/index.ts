@@ -5,7 +5,13 @@ import { FileSecretStore } from "./file-backend.ts";
 import { DpapiSecretStore } from "./dpapi-backend.ts";
 
 export type { SecretStore, SecretBackendInfo } from "./types.ts";
-export { envVarSecretRef } from "./types.ts";
+export {
+  envVarSecretRef,
+  assertUsableEnvValue,
+  CorruptSecretStoreError,
+  MissingSecretKeyError,
+  InvalidSecretValueError,
+} from "./types.ts";
 
 /**
  * Select the secret backend.

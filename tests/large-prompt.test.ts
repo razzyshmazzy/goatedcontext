@@ -49,7 +49,7 @@ test("a pathologically long RULE is capped at the injected-value limit (no conte
     preferences: [{ id: "a", rule: huge, category: "general", domain: null, polarity: "neutral", scope: "global", status: "approved", applicability: "always", confidence: 1, relevance: 1 }],
     environments: [],
     overridden: [],
-    delivery: { matched: 1, effective: 1, delivered: 1, omittedByRelevanceLimit: 0, omittedByBudget: 0, budget: { maxChars: null, maxPreferences: null } },
+    delivery: { matched: 1, effective: 1, delivered: 1, omittedByRelevanceLimit: 0, omittedByBudget: 0, budgetExceeded: false, budget: { maxChars: null, maxPreferences: null } },
   })!;
   // The 100k rule contributes at most ~500 chars to the block, not 100k.
   expect(block.length).toBeLessThan(2_000);

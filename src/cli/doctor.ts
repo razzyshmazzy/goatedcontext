@@ -134,7 +134,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
     label: "config directory writable",
     status: isWritable(configDir) ? "ok" : "fail",
     detail: configDir,
-    fix: `Ensure ${configDir} exists and is writable by your user.`,
+    fix: `Restore write permission and ownership for ${configDir} (e.g. it may be read-only). Do not delete it — it holds your data.`,
   });
   const dbDir = dirname(paths.dbFile);
   add({
@@ -143,7 +143,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
     label: "database directory writable",
     status: isWritable(dbDir) ? "ok" : "fail",
     detail: dbDir,
-    fix: `Ensure ${dbDir} exists and is writable by your user.`,
+    fix: `Restore write permission and ownership for ${dbDir} (e.g. it may be read-only). Do not delete it — it holds your data.`,
   });
 
   // ---- config --------------------------------------------------------------
@@ -201,7 +201,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
             label: "SQLite integrity",
             status: "fail",
             detail: String(first ?? "unknown failure"),
-            fix: "The database is corrupt. Restore a backup or re-create ~/.ctx (this loses local data).",
+            fix: "Restore ~/.ctx from a backup if you have one. ctx never modifies a corrupt database automatically; only as a LAST resort, after backing up ~/.ctx, remove the database file to let ctx re-initialize.",
           });
         }
       } catch (err) {
@@ -211,7 +211,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
           label: "SQLite integrity",
           status: "fail",
           detail: (err as Error).message,
-          fix: "The database is unreadable. Restore a backup or re-create ~/.ctx (this loses local data).",
+          fix: "The database could not be read. If ~/.ctx is read-only, restore write permission and ownership for it — that commonly fixes this. Otherwise restore from a backup. Never delete ~/.ctx without backing it up first.",
         });
       }
 
@@ -246,7 +246,7 @@ export function runDoctor(deps: DoctorDeps): DoctorReport {
           label: "schema up to date",
           status: "fail",
           detail: (err as Error).message,
-          fix: "Schema table missing. Run `ctx init`, or re-create ~/.ctx if the file is not a ctx database.",
+          fix: "Run `ctx init` to apply the schema. If this file is not a ctx database, move it aside (back it up) rather than deleting ~/.ctx.",
         });
       }
 

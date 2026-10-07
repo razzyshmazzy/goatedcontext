@@ -4,6 +4,7 @@ import type { PreferenceService } from "../preferences/service.ts";
 import type { RepoService, Repo } from "../repos/repo.ts";
 import type { EnvironmentService } from "../environments/service.ts";
 import {
+  boundQueryText,
   contentTokens,
   inferDomains,
   isExclusiveDomain,
@@ -11,6 +12,7 @@ import {
   subjectKey,
   subjectTokens,
 } from "../preferences/analysis.ts";
+import { MAX_RULE_CHARS } from "../preferences/types.ts";
 import { precedenceRank } from "./precedence.ts";
 import { withReadTx } from "../../storage/sqlite/tx.ts";
 import type { Condition } from "../preferences/conditions.ts";
@@ -30,11 +32,16 @@ const RELEVANCE_THRESHOLD = 0.25;
 const MAX_RESULTS = 15;
 const DEFAULT_LIMIT = 12;
 /**
- * Approximate per-rule rendered-size contribution used by the delivery budget's
- * `maxChars` accounting. Mirrors `sanitizeInjectedText`'s value cap so the budget
- * estimate tracks the injected block without importing the renderer.
+ * Per-rule char cost for the delivery budget's `maxChars` accounting. ONE truthful
+ * basis for every transport: a rule's delivered content is its text bounded to
+ * `MAX_RULE_CHARS` — exactly the per-rule bound the JSON/MCP envelope emits (`boundRule`)
+ * and an upper bound on the text block (which further compacts each value to ≤500 via
+ * `sanitizeInjectedText`). So for a given `maxChars`, the delivered content of JSON, MCP
+ * and text never exceeds the accounting without `omittedByBudget > 0` / `overflow = true`,
+ * and all three agree on which preference IDs are delivered. The budget counts rule TEXT
+ * only (semantic content) — never JSON punctuation/field names.
  */
-const RENDER_CHAR_CAP = 500;
+const RULE_BUDGET_CAP = MAX_RULE_CHARS;
 /**
  * Nominal relevance assigned to `always`-on and matched `conditional` preferences.
  * Both bypass task scoring (one applies unconditionally, the other because its
@@ -93,6 +100,12 @@ export interface DeliveryDiagnostics {
   omittedByRelevanceLimit: number;
   /** Effective preferences dropped by an explicit delivery budget (0 when unlimited). */
   omittedByBudget: number;
+  /**
+   * True when the DELIVERED content exceeds `budget.maxChars` even though nothing could
+   * be omitted to fit — i.e. a single rule larger than the budget was force-kept (we
+   * never deliver zero rules). Lets consumers report overflow truthfully in that case.
+   */
+  budgetExceeded: boolean;
   /** The budget in force for this retrieval. */
   budget: DeliveryBudget;
   /** Ids omitted by the delivery budget (explain only; deterministic, least-important first). */
@@ -334,8 +347,9 @@ export class RetrievalEngine {
 
       // `relevant` rules keep their original behavior: score against the task and
       // drop anything below the threshold. `always` + matched `conditional` bypass
-      // scoring entirely.
-      const scoredRelevant = this.rank(relevantPool, task);
+      // scoring entirely. The task is bounded to ctx's query representation so scoring a
+      // huge prompt does not re-tokenize megabytes (the agent's prompt is unaffected).
+      const scoredRelevant = this.rank(relevantPool, task ? boundQueryText(task) : null);
       const scoredAlways = alwaysPool.map((pref) => ({ pref, relevance: ALWAYS_RELEVANCE }));
       const scoredConditional = matchedConditional.map((pref) => ({
         pref,
@@ -384,7 +398,7 @@ export class RetrievalEngine {
       const effectiveCount = effectiveAlways.length + effectiveConditional.length + effectiveRelevant.length;
       const matchedCount = scoredAlways.length + scoredConditional.length + scoredRelevant.length;
       const ordered = [...effectiveAlways, ...effectiveConditional, ...keptRelevant];
-      const { kept, omittedIds } = applyDeliveryBudget(ordered, budget);
+      const { kept, omittedIds, exceeded } = applyDeliveryBudget(ordered, budget);
 
       const delivery: DeliveryDiagnostics = {
         matched: matchedCount,
@@ -392,6 +406,7 @@ export class RetrievalEngine {
         delivered: kept.length,
         omittedByRelevanceLimit,
         omittedByBudget: omittedIds.length,
+        budgetExceeded: exceeded,
         budget,
         ...(opts.explain ? { omittedByBudgetIds: omittedIds } : {}),
       };
@@ -583,14 +598,16 @@ export class RetrievalEngine {
 function applyDeliveryBudget(
   scored: Scored[],
   budget: DeliveryBudget,
-): { kept: Scored[]; omittedIds: string[] } {
-  if (budget.maxChars == null && budget.maxPreferences == null) return { kept: scored, omittedIds: [] };
+): { kept: Scored[]; omittedIds: string[]; exceeded: boolean } {
+  if (budget.maxChars == null && budget.maxPreferences == null) {
+    return { kept: scored, omittedIds: [], exceeded: false };
+  }
   const kept: Scored[] = [];
   const omittedIds: string[] = [];
   let chars = 0;
   for (let i = 0; i < scored.length; i++) {
     const s = scored[i]!;
-    const cost = Math.min(s.pref.rule.length, RENDER_CHAR_CAP);
+    const cost = Math.min(s.pref.rule.length, RULE_BUDGET_CAP);
     const overPref = budget.maxPreferences != null && kept.length >= budget.maxPreferences;
     const overChars = budget.maxChars != null && kept.length > 0 && chars + cost > budget.maxChars;
     if (overPref || overChars) {
@@ -600,7 +617,11 @@ function applyDeliveryBudget(
     kept.push(s);
     chars += cost;
   }
-  return { kept, omittedIds };
+  // We always keep at least one rule (delivering nothing would be worse), so a single
+  // rule larger than `maxChars` is force-kept. That still EXCEEDS the budget, so report
+  // it truthfully: the budget invariant is "delivered content ≤ accounting OR overflow".
+  const exceeded = budget.maxChars != null && chars > budget.maxChars;
+  return { kept, omittedIds, exceeded };
 }
 
 const DEFAULT_IDF = Math.log(2);

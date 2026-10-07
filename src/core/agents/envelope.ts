@@ -1,6 +1,18 @@
 import type { RetrievalResult, RetrievedPreference } from "../retrieval/retrieval.ts";
 import type { ObservedPattern } from "../signals/evidence.ts";
 import { renderContextBlock } from "../render/context-block.ts";
+import { MAX_RULE_CHARS } from "../preferences/types.ts";
+
+/**
+ * Bound a rule to the same cap the write path enforces, so a LEGACY oversized row
+ * (written before the cap existed) can never flood the JSON/MCP transport with a
+ * multi-megabyte value. New rules are already ≤ this at write time, so they pass
+ * through untouched; only a legacy giant is truncated (with an ellipsis marker). The
+ * STORED rule is never modified — this bounds OUTPUT only.
+ */
+function boundRule(rule: string): string {
+  return rule.length <= MAX_RULE_CHARS ? rule : rule.slice(0, MAX_RULE_CHARS - 1) + "…";
+}
 
 /**
  * The STABLE, versioned machine contract for universal agent retrieval (0.4.0).
@@ -153,6 +165,8 @@ export function buildContextEnvelope(
   const d = result.delivery;
   const omittedByRelevance = d?.omittedByRelevanceLimit ?? 0;
   const omittedByBudget = d?.omittedByBudget ?? 0;
+  // A force-kept single rule larger than the char budget is still over budget.
+  const budgetExceeded = d?.budgetExceeded ?? false;
 
   const context: ContextEnvelopeV1["context"] = {
     authoritativePreferences: authoritative.map(toEnvelopePreference),
@@ -179,7 +193,7 @@ export function buildContextEnvelope(
         approxTokens: Math.ceil(renderedChars / 4),
         omittedByRelevance,
         omittedByBudget,
-        overflow: omittedByRelevance > 0 || omittedByBudget > 0,
+        overflow: omittedByRelevance > 0 || omittedByBudget > 0 || budgetExceeded,
       },
     },
   };
@@ -187,7 +201,7 @@ export function buildContextEnvelope(
 
 function toEnvelopePreference(p: RetrievedPreference): EnvelopePreference {
   return {
-    rule: p.rule,
+    rule: boundRule(p.rule),
     scope: p.scope,
     domain: p.domain ?? null,
     applicability: p.applicability,
@@ -197,7 +211,7 @@ function toEnvelopePreference(p: RetrievedPreference): EnvelopePreference {
 
 function toEnvelopeProposal(p: RetrievedPreference): EnvelopeProposal {
   return {
-    rule: p.rule,
+    rule: boundRule(p.rule),
     scope: p.scope,
     domain: p.domain ?? null,
     applicability: p.applicability,

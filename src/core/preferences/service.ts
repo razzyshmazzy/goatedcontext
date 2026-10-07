@@ -259,6 +259,28 @@ export class PreferenceService {
       parsed.applicability ?? (parsed.condition ? "conditional" : inferApplicability(parsed.rule));
     const condition = enforceConditionInvariant(applicability, parsed.condition ?? null);
     const status: Status = parsed.status ?? "approved";
+    const condJson = condition ? conditionToCanonicalJson(condition) : null;
+
+    // Idempotency (W3): a STRUCTURALLY IDENTICAL in-effect preference already exists →
+    // reinforce it (add evidence) instead of creating a duplicate row. "Identical" is
+    // exact, not fuzzy: same canonical rule text (trim/case/whitespace), scope, repo,
+    // applicability, domain, polarity, condition AND status. Distinct scope / repo-vs-
+    // global / always-vs-relevant / domain / condition / status therefore never merge.
+    // The check runs inside the caller's BEGIN IMMEDIATE write tx, so two concurrent
+    // identical remembers serialize and the second observes the first's committed row.
+    const key = dedupKey(scope, repoId, parsed.rule, pol, condition);
+    const identical = this.findIdenticalActive(key, parsed.rule, applicability, domain, condJson, status);
+    if (identical) {
+      this.insertEvidence(identical.id, {
+        source: parsed.source ?? "explicit",
+        repoId,
+        text: parsed.evidence ?? `Reaffirmed: ${parsed.rule}`,
+        agentId: parsed.agentId ?? null,
+        sessionId: parsed.sessionId ?? null,
+      });
+      return this.getById(identical.id)!;
+    }
+
     const id = newId();
     const ts = nowIso();
 
@@ -281,11 +303,11 @@ export class PreferenceService {
           repoId,
           status,
           applicability,
-          condition ? conditionToCanonicalJson(condition) : null,
+          condJson,
           1.0,
           ts,
           ts,
-          dedupKey(scope, repoId, parsed.rule, pol, condition),
+          key,
         );
       this.insertEvidence(id, {
         source: parsed.source ?? "explicit",
@@ -419,6 +441,42 @@ export class PreferenceService {
     });
   }
 
+  /**
+   * Find an in-effect (approved/locked) preference that is STRUCTURALLY IDENTICAL to a
+   * remember request, for idempotent de-duplication. The INDEXED `dedup_key` lookup
+   * (`idx_prefs_dedup`) narrows to the handful of rows already sharing scope/repo/
+   * polarity/condition/subject — so this stays O(1), not an O(n) table scan — then we
+   * verify exact structural equality: canonical rule text (`hashText`), applicability,
+   * domain and status. Fuzzy subject similarity is never used here. Returns null for any
+   * non-active target status (proposals are handled by `findSimilarProposal`).
+   */
+  private findIdenticalActive(
+    key: string,
+    rule: string,
+    applicability: Applicability,
+    domain: string | null,
+    condJson: string | null,
+    status: Status,
+  ): Preference | null {
+    if (status !== "approved" && status !== "locked") return null;
+    const target = hashText(rule);
+    const rows = this.db
+      .query<PreferenceRow, [string, string]>(
+        "SELECT * FROM preferences WHERE dedup_key = ? AND status = ?",
+      )
+      .all(key, status)
+      .map(rowToPref);
+    return (
+      rows.find(
+        (r) =>
+          r.applicability === applicability &&
+          (r.domain ?? null) === (domain ?? null) &&
+          (r.condition ? conditionToCanonicalJson(r.condition) : null) === condJson &&
+          hashText(r.rule) === target,
+      ) ?? null
+    );
+  }
+
   private findSimilarProposal(
     rule: string,
     scope: Scope,
@@ -514,6 +572,16 @@ export class PreferenceService {
           sessionId: e.sessionId,
         });
       }
+      // Record the merge so `ctx why`/history explain where imported evidence came from
+      // (compact metadata only — never the raw bundle).
+      recordEvent(this.db, {
+        type: "preference.evidence_added",
+        preferenceId: existing.id,
+        repoId,
+        scope: rec.scope,
+        summary: existing.rule,
+        detail: { imported: true, merged: true, evidenceCount: rec.evidence.length },
+      });
       return { id: existing.id, created: false };
     }
 
@@ -551,6 +619,22 @@ export class PreferenceService {
         sessionId: e.sessionId,
       });
     }
+    // Record import-created preferences in history so an import is explainable via
+    // `ctx why`/events. Compact metadata only — never the raw import document.
+    recordEvent(this.db, {
+      type: "preference.remembered",
+      preferenceId: id,
+      repoId,
+      scope: rec.scope,
+      summary: rec.rule,
+      detail: {
+        imported: true,
+        status: rec.status,
+        domain: rec.domain,
+        polarity: rec.polarity,
+        applicability,
+      },
+    });
     return { id, created: true };
   }
 
@@ -751,6 +835,14 @@ export class PreferenceService {
     return withWriteTx(this.db, () => {
       const current = this.getById(id);
       if (!current) throw new NotFoundError(`No preference with id "${id}".`);
+      // `approve` must NEVER downgrade a locked rule — locked is the strongest in-effect
+      // state, and approving it would silently unlock it. Approving an already-approved
+      // rule is likewise a no-op. Both return the current state unchanged (idempotent),
+      // writing nothing and recording no event, so `prefs approve` on an in-effect rule
+      // can never weaken it. `lock`/`reject` are explicit and still transition.
+      if (target === "approved" && (current.status === "locked" || current.status === "approved")) {
+        return current;
+      }
       const expected = opts.force ? current.version : opts.expectedVersion ?? current.version;
       const res = this.db
         .query(

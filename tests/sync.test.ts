@@ -118,6 +118,27 @@ test("two repos stay isolated: each AGENTS.md contains only its own rules", () =
   }
 });
 
+test("sync FAILS CLOSED on an AGENTS.md with a malformed managed marker (no truncation)", () => {
+  const t = makeTestContext();
+  const repo = makeGitRepo();
+  try {
+    // A user AGENTS.md that happens to contain our begin marker with no matching end,
+    // followed by real user content. sync must refuse and preserve every byte.
+    const original =
+      "# Our project\n\n<!-- goatedcontext:begin -->\nUSER-SENTINEL-MUST-SURVIVE\nmore user notes\n";
+    const file = join(repo.root, "AGENTS.md");
+    writeFileSync(file, original);
+    const r = t.ctx.repos.resolve(repo.root)!;
+    t.ctx.preferences.remember({ rule: "Use Bun here.", scope: "repo", repoId: r.id, applicability: "always" });
+
+    expect(() => syncProject(t.ctx, repo.root)).toThrow(/malformed/i);
+    expect(readFileSync(file, "utf8")).toBe(original); // byte-for-byte unchanged
+  } finally {
+    repo.cleanup();
+    t.cleanup();
+  }
+});
+
 test("sync outside a git repo fails cleanly (repo-scoped)", () => {
   const t = makeTestContext();
   try {

@@ -6,6 +6,7 @@ import {
   upsertManagedBlock,
   removeManagedBlock,
   hasManagedBlock,
+  ManagedBlockError,
 } from "../src/utils/managed-block.ts";
 
 const B = "<!-- gc:begin -->";
@@ -49,14 +50,68 @@ test("dedupes stray duplicate blocks down to one", () => {
   cleanup();
 });
 
-test("tolerates a damaged block (missing end marker)", () => {
+// ── fail-closed regression matrix (security wave) ─────────────────────────────
+
+// B. begin marker only → upsert/remove fail, original bytes unchanged.
+test("begin marker without end: upsert FAILS CLOSED, bytes unchanged", () => {
   const { file, cleanup } = tmpFile();
-  writeFileSync(file, `keep me\n\n${B}\nhalf written`);
-  upsertManagedBlock(file, B, E, block("fixed"));
+  const original = `keep me\n\n${B}\nhalf written user text below\nmore\n`;
+  writeFileSync(file, original);
+  expect(() => upsertManagedBlock(file, B, E, block("fixed"))).toThrow(ManagedBlockError);
+  expect(readFileSync(file, "utf8")).toBe(original); // untouched — no truncation
+  expect(() => removeManagedBlock(file, B, E)).toThrow(ManagedBlockError);
+  expect(readFileSync(file, "utf8")).toBe(original);
+  expect(hasManagedBlock(file, B, E)).toBe(false); // not a well-formed block
+  cleanup();
+});
+
+// D. begin marker appears in arbitrary user prose (no end) → must not truncate.
+test("begin marker embedded in user prose does not truncate unrelated text", () => {
+  const { file, cleanup } = tmpFile();
+  const original = `Docs: write the marker like ${B} to open a block.\nSENTINEL-KEEP-ME\n`;
+  writeFileSync(file, original);
+  expect(() => upsertManagedBlock(file, B, E, block("x"))).toThrow(ManagedBlockError);
+  expect(readFileSync(file, "utf8")).toBe(original);
+  cleanup();
+});
+
+// C. end marker only → not a block; preserved as user text, no destructive removal.
+test("stray end marker (no begin) is preserved as user text", () => {
+  const { file, cleanup } = tmpFile();
+  const original = `intro\n${E}\nSENTINEL\n`;
+  writeFileSync(file, original);
+  expect(removeManagedBlock(file, B, E)).toBe("absent"); // nothing to remove
+  expect(readFileSync(file, "utf8")).toBe(original);
+  // upsert appends a fresh block, preserving the stray end marker and user text.
+  expect(upsertManagedBlock(file, B, E, block("new"))).toBe("updated");
   const after = readFileSync(file, "utf8");
-  expect(after).toContain("keep me");
-  expect(after).toContain("fixed");
-  expect(hasManagedBlock(file, B, E)).toBe(true);
+  expect(after).toContain("SENTINEL");
+  expect(after).toContain(`intro\n${E}`);
+  expect(after).toContain("new");
+  cleanup();
+});
+
+// F. nested / overlapping begins → fail closed.
+test("nested begin markers fail closed, bytes unchanged", () => {
+  const { file, cleanup } = tmpFile();
+  const original = `${B}\nouter\n${B}\ninner\n${E}\n`;
+  writeFileSync(file, original);
+  expect(() => upsertManagedBlock(file, B, E, block("x"))).toThrow(ManagedBlockError);
+  expect(readFileSync(file, "utf8")).toBe(original);
+  cleanup();
+});
+
+// H + G. user text above AND below a valid block survives; CRLF style preserved.
+test("CRLF file: user text above and below a valid block is preserved on refresh", () => {
+  const { file, cleanup } = tmpFile();
+  const original = `# Title\r\n\r\nabove\r\n\r\n${block("v1")}\r\n\r\nbelow-SENTINEL\r\n`;
+  writeFileSync(file, original);
+  expect(upsertManagedBlock(file, B, E, block("v2"))).toBe("updated");
+  const after = readFileSync(file, "utf8");
+  expect(after).toContain("above\r\n");
+  expect(after).toContain("below-SENTINEL\r\n"); // trailing user content + CRLF intact
+  expect(after).toContain("v2");
+  expect(after).not.toContain("v1");
   cleanup();
 });
 

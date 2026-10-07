@@ -1,5 +1,5 @@
 import type { Repo } from "../repos/repo.ts";
-import { inferPrimaryDomain } from "../preferences/analysis.ts";
+import { inferPrimaryDomain, boundQueryText } from "../preferences/analysis.ts";
 import { inferLanguagesFromFiles, normalizeLanguage } from "../preferences/languages.ts";
 import { normalizeSlashes } from "../../utils/glob.ts";
 
@@ -53,7 +53,12 @@ export interface BuildRuntimeContextInput {
  *     pass any label for debugging.
  */
 export function buildRuntimeContext(input: BuildRuntimeContextInput): RuntimeContext {
-  const task = input.task?.trim() || null;
+  // Bound the task to ctx's retrieval-query representation. Every downstream analysis
+  // (domain inference here, `taskSignalDomains`, the relevance ranker) reads this, so
+  // one bound keeps hook latency flat for huge prompts without altering the agent's
+  // prompt. Short tasks pass through unchanged.
+  const trimmed = input.task?.trim() || null;
+  const task = trimmed != null ? boundQueryText(trimmed) : null;
   const files = (input.files ?? []).map((f) => normalizeSlashes(f)).filter((f) => f.length > 0);
 
   let languages: Set<string>;

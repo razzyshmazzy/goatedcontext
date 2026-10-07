@@ -316,16 +316,54 @@ export function createMcpServer(ctx: CtxContext): McpServer {
 
 /**
  * Entry point for `ctx mcp`: open ONE shared `ctx` context, connect the stdio
- * transport, and serve until the host closes the stream. Resolves when the transport
- * closes so the CLI can exit cleanly. No background work survives this call.
+ * transport, and serve until the host disconnects. Resolves on a CLEAN disconnect so
+ * the CLI exits 0; rejects on a genuine transport error so the CLI exits nonzero. No
+ * background work survives this call.
+ *
+ * Lifecycle fix (Wave 2): `StdioServerTransport` only listens for stdin `data`/`error`
+ * — it never reacts to stdin EOF. So when the host closes stdin (the normal way an MCP
+ * client disconnects), `transport.onclose` never fires and the awaited promise would
+ * hang forever, which Node reports as an unsettled top-level await (warning + exit 13).
+ * We therefore also treat stdin `end`/`close` as a clean disconnect. A tool-call error
+ * is an in-band MCP error response (handled by the tools), NOT a transport error, so it
+ * never reaches here — the server stays alive across tool errors as required.
  */
 export async function runMcpServer(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const ctx = CtxContext.open(env);
   const server = createMcpServer(ctx);
   const transport = new StdioServerTransport();
-  await server.connect(transport);
-  await new Promise<void>((resolve) => {
-    transport.onclose = () => resolve();
+
+  let settled = false;
+  let resolveDone!: () => void;
+  let rejectDone!: (err: Error) => void;
+  const done = new Promise<void>((resolve, reject) => {
+    resolveDone = resolve;
+    rejectDone = reject;
   });
-  ctx.close();
+  const finish = (err?: Error) => {
+    if (settled) return;
+    settled = true;
+    err ? rejectDone(err) : resolveDone();
+  };
+  // Clean host disconnect: stdin reaching EOF (or closing). The SDK's transport does
+  // not observe this, so we do — and resolve so the process exits 0 rather than hanging.
+  const onEnd = () => finish();
+
+  try {
+    transport.onclose = () => finish();
+    transport.onerror = (e: unknown) => finish(e instanceof Error ? e : new Error(String(e)));
+    process.stdin.once("end", onEnd);
+    process.stdin.once("close", onEnd);
+    await server.connect(transport);
+    await done;
+  } finally {
+    process.stdin.removeListener("end", onEnd);
+    process.stdin.removeListener("close", onEnd);
+    try {
+      await transport.close();
+    } catch {
+      /* already closing — ignore */
+    }
+    ctx.close();
+  }
 }

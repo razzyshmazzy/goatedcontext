@@ -8,7 +8,7 @@ import {
   uninstallClaude,
 } from "../src/adapters/claude/installer.ts";
 import { detectPromptHook, removePromptHook, HOOK_MARKER } from "../src/adapters/claude/hook.ts";
-import { CTX_INSTRUCTION_BEGIN, CTX_INSTRUCTION_END } from "../src/adapters/claude/skills.ts";
+import { CTX_INSTRUCTION_BEGIN } from "../src/adapters/claude/skills.ts";
 import { openDatabase } from "../src/storage/sqlite/db.ts";
 import { resolvePaths } from "../src/storage/paths.ts";
 import { PreferenceService } from "../src/core/preferences/service.ts";
@@ -45,23 +45,23 @@ test("repair rewrites a deleted skill and restores a missing hook", () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-test("repair fixes a damaged (end-marker-less) instruction block", () => {
+test("repair FAILS CLOSED on a damaged (end-marker-less) block — never truncates", () => {
   const home = tmp("ctx-repair-");
   installClaude({ claudeHome: home });
   const file = claudeMd(home);
 
-  // User content the repair must preserve, plus a truncated ctx block.
-  const damaged = "# My rules\n\nAlways write tests.\n\n" + CTX_INSTRUCTION_BEGIN + "\n(truncated ctx block, no end marker)\n";
+  // A begin marker with no matching end is ambiguous: we cannot tell where the managed
+  // region stops, so repair must refuse rather than delete everything after it (the
+  // old behavior truncated to EOF, destroying any user content below the marker).
+  const damaged =
+    "# My rules\n\nAlways write tests.\n\n" +
+    CTX_INSTRUCTION_BEGIN +
+    "\nIMPORTANT USER PROSE BELOW A STRAY MARKER\nmore user lines\n";
   writeFileSync(file, damaged, "utf8");
 
-  const result = repairClaude({ claudeHome: home });
-  expect(result.instructionsAction).toBe("restored"); // no well-formed block existed
-  const content = readFileSync(file, "utf8");
-  // Exactly one well-formed block, and the user's content survived.
-  expect(content.split(CTX_INSTRUCTION_BEGIN).length - 1).toBe(1);
-  expect(content).toContain(CTX_INSTRUCTION_END);
-  expect(content).toContain("Always write tests.");
-  expect(content).not.toContain("(truncated ctx block");
+  expect(() => repairClaude({ claudeHome: home })).toThrow(/malformed/i);
+  // Byte-for-byte unchanged: no truncation, nothing appended.
+  expect(readFileSync(file, "utf8")).toBe(damaged);
 
   rmSync(home, { recursive: true, force: true });
 });

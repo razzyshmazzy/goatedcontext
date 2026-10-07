@@ -19,6 +19,11 @@ import {
   removeClaudePermissions,
   type PermissionAction,
 } from "./permissions.ts";
+import {
+  upsertManagedBlock,
+  removeManagedBlock,
+  hasManagedBlock,
+} from "../../utils/managed-block.ts";
 
 export interface ClaudeInstallOptions {
   /** Root of the Claude user config dir. Defaults to ~/.claude (override for tests). */
@@ -211,7 +216,11 @@ export function uninstallClaude(opts: ClaudeInstallOptions = {}): ClaudeUninstal
   });
 }
 
-/** Classify the ctx block in an instructions file for reporting/repair decisions. */
+/**
+ * Classify the ctx block for repair reporting. A begin marker with no matching end is
+ * "damaged" — the safe parser refuses to rewrite such a file (it would truncate user
+ * content), so repair fails closed rather than guessing. Read-only; never throws.
+ */
 function instructionBlockState(file: string): "none" | "well-formed" | "damaged" {
   if (!existsSync(file)) return "none";
   let text: string;
@@ -220,80 +229,29 @@ function instructionBlockState(file: string): "none" | "well-formed" | "damaged"
   } catch {
     return "none";
   }
-  const begin = text.indexOf(CTX_INSTRUCTION_BEGIN);
-  if (begin === -1) return "none";
-  const end = text.indexOf(CTX_INSTRUCTION_END, begin);
-  return end !== -1 ? "well-formed" : "damaged";
-}
-
-/**
- * Remove every ctx instruction block from `text`, preserving everything else.
- * Handles duplicated blocks and a damaged block whose end marker is missing
- * (treated as running to end-of-file). Returns the cleaned text and whether any
- * block was found.
- */
-function removeAllCtxBlocks(text: string): { text: string; changed: boolean } {
-  let out = text;
-  let changed = false;
-  while (true) {
-    const b = out.indexOf(CTX_INSTRUCTION_BEGIN);
-    if (b === -1) break;
-    const e = out.indexOf(CTX_INSTRUCTION_END, b);
-    out =
-      e !== -1
-        ? out.slice(0, b) + out.slice(e + CTX_INSTRUCTION_END.length)
-        : out.slice(0, b); // damaged: no end marker → strip to EOF
-    changed = true;
-  }
-  return { text: out, changed };
+  if (!text.includes(CTX_INSTRUCTION_BEGIN)) return "none";
+  // hasManagedBlock is true only for a structurally valid block; a malformed one → false.
+  return hasManagedBlock(file, CTX_INSTRUCTION_BEGIN, CTX_INSTRUCTION_END)
+    ? "well-formed"
+    : "damaged";
 }
 
 /**
  * Adds/refreshes the ctx block in a global instructions file without disturbing
- * anything else. Robust against a damaged (end-marker-less) or duplicated block:
- * a well-formed block is refreshed in place, otherwise the file is cleaned and a
- * single fresh block is appended. Atomic write; racing callers hold the install lock.
+ * anything else, via the shared fail-closed managed-block parser. A well-formed block
+ * is refreshed in place (duplicates deduped); if none exists a single fresh block is
+ * appended. A malformed/ambiguous block (begin without matching end) makes this THROW
+ * `ManagedBlockError` and leaves CLAUDE.md byte-for-byte unchanged — never truncated.
  */
 export function upsertInstructionBlock(file: string): "created" | "updated" | "unchanged" {
-  if (!existsSync(file)) {
-    writeFileAtomic(file, CTX_INSTRUCTION_BLOCK + "\n", 0o644);
-    return "created";
-  }
-
-  const current = readFileSync(file, "utf8");
-  const begin = current.indexOf(CTX_INSTRUCTION_BEGIN);
-  const end = current.indexOf(CTX_INSTRUCTION_END);
-
-  if (begin !== -1 && end !== -1 && end > begin) {
-    // Well-formed block: refresh it in place, deduping any stray blocks after it.
-    const before = current.slice(0, begin);
-    const after = removeAllCtxBlocks(current.slice(end + CTX_INSTRUCTION_END.length)).text;
-    const next = before + CTX_INSTRUCTION_BLOCK + after;
-    if (next === current) return "unchanged";
-    writeFileAtomic(file, next, 0o644);
-    return "updated";
-  }
-
-  // No block, or a damaged begin-without-end: strip any remnants and append fresh.
-  const cleaned = removeAllCtxBlocks(current).text;
-  const separator = cleaned.length === 0 ? "" : cleaned.endsWith("\n") ? "\n" : "\n\n";
-  const next = cleaned + separator + CTX_INSTRUCTION_BLOCK + "\n";
-  if (next === current) return "unchanged";
-  writeFileAtomic(file, next, 0o644);
-  return "updated";
+  return upsertManagedBlock(file, CTX_INSTRUCTION_BEGIN, CTX_INSTRUCTION_END, CTX_INSTRUCTION_BLOCK);
 }
 
 /**
- * Remove the ctx instruction block, preserving unrelated user instructions.
- * Returns "removed" when a block was present, "absent" otherwise.
+ * Remove the ctx instruction block, preserving unrelated user instructions. Returns
+ * "removed" when a block was present, "absent" otherwise. Throws (file untouched) if
+ * the block is malformed, so removal can never truncate user content to EOF.
  */
 export function removeInstructionBlock(file: string): "removed" | "absent" {
-  if (!existsSync(file)) return "absent";
-  const current = readFileSync(file, "utf8");
-  const { text, changed } = removeAllCtxBlocks(current);
-  if (!changed) return "absent";
-  // Tidy blank lines left behind by the removal.
-  const tidy = text.replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
-  writeFileAtomic(file, tidy, 0o644);
-  return "removed";
+  return removeManagedBlock(file, CTX_INSTRUCTION_BEGIN, CTX_INSTRUCTION_END);
 }

@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { Database } from "../storage/sqlite/driver.ts";
 import { resolvePaths, type CtxPaths } from "../storage/paths.ts";
 import { loadConfig, ensureHome, type Config } from "../storage/config.ts";
@@ -69,7 +70,7 @@ export class CtxContext {
     this.secrets = secrets;
     this.preferences = new PreferenceService(db);
     this.repos = new RepoService(db);
-    this.environments = new EnvironmentService(db, secrets);
+    this.environments = new EnvironmentService(db, secrets, join(paths.home, "env-write.lock"));
     this.events = new EventService(db);
     this.signals = new SignalService(db);
     this.stats = new StatsStore(paths.home);
@@ -82,10 +83,18 @@ export class CtxContext {
     );
   }
 
-  static open(env: NodeJS.ProcessEnv = process.env): CtxContext {
+  /**
+   * Open a context. `opts.busyTimeoutMs` bounds the DB lock-wait for THIS context only
+   * (the prompt hook passes a short value so a locked DB fails open fast instead of
+   * stalling the agent); normal callers omit it and keep the durable default.
+   */
+  static open(
+    env: NodeJS.ProcessEnv = process.env,
+    opts: { busyTimeoutMs?: number } = {},
+  ): CtxContext {
     const paths = resolvePaths(env);
     ensureHome(paths);
-    const db = openDatabase(paths);
+    const db = openDatabase(paths, { busyTimeoutMs: opts.busyTimeoutMs });
     // A throw AFTER the DB is open but BEFORE the context is constructed (a corrupt
     // config.json, or CTX_SECRET_BACKEND=dpapi on a machine without DPAPI) would leak
     // the open SQLite handle + its -wal/-shm files, since the caller's `finally`

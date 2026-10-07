@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import type { SecretStore, SecretBackendInfo } from "./types.ts";
+import { CorruptSecretStoreError, assertUsableEnvValue } from "./types.ts";
 import { writeFileAtomic, withFileLock } from "../../utils/fs.ts";
 
 /**
@@ -51,11 +52,27 @@ export class DpapiSecretStore implements SecretStore {
 
   private readAll(): Record<string, string> {
     if (!existsSync(this.file)) return {};
+    let raw: string;
     try {
-      return JSON.parse(readFileSync(this.file, "utf8"));
+      raw = readFileSync(this.file, "utf8");
     } catch {
-      return {};
+      throw new CorruptSecretStoreError(this.file);
     }
+    if (raw.trim().length === 0) return {};
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // A corrupt store must NEVER be collapsed to empty and overwritten.
+      throw new CorruptSecretStoreError(this.file);
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new CorruptSecretStoreError(this.file);
+    }
+    for (const v of Object.values(parsed as Record<string, unknown>)) {
+      if (typeof v !== "string") throw new CorruptSecretStoreError(this.file);
+    }
+    return parsed as Record<string, string>;
   }
 
   private writeAll(entries: Record<string, string>): void {
@@ -63,6 +80,7 @@ export class DpapiSecretStore implements SecretStore {
   }
 
   set(ref: string, value: string): void {
+    assertUsableEnvValue(value);
     const blob = dpapi("Protect", Buffer.from(value, "utf8").toString("base64"));
     if (blob == null) throw new Error("DPAPI protect failed");
     withFileLock(this.lockFile, () => {

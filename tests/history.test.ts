@@ -45,7 +45,7 @@ test("propose then approve records proposed + approved, most-recent-first", () =
   t.cleanup();
 });
 
-test("approving a locked preference is recorded as 'unlocked'", () => {
+test("approving a locked preference is a no-op (never silently unlocks)", () => {
   const t = makeTestContext();
   const p = t.ctx.preferences.remember({
     rule: "Use PostgreSQL.",
@@ -53,9 +53,12 @@ test("approving a locked preference is recorded as 'unlocked'", () => {
     scope: "global",
     status: "locked",
   });
-  t.ctx.preferences.approve(p.id);
+  const after = t.ctx.preferences.approve(p.id);
+  expect(after.status).toBe("locked"); // NOT downgraded to approved
+  expect(after.version).toBe(p.version); // no write happened
+  // No spurious unlock/approve event was recorded by the no-op.
   const types = t.ctx.events.list().map((e) => e.type);
-  expect(types[0]).toBe("preference.unlocked");
+  expect(types).not.toContain("preference.unlocked");
   t.cleanup();
 });
 

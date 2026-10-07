@@ -14,7 +14,7 @@ function result(partial: Partial<RetrievalResult>): RetrievalResult {
     preferences: [],
     environments: [],
     overridden: [],
-    delivery: { matched: 0, effective: 0, delivered: 0, omittedByRelevanceLimit: 0, omittedByBudget: 0, budget: { maxChars: null, maxPreferences: null } },
+    delivery: { matched: 0, effective: 0, delivered: 0, omittedByRelevanceLimit: 0, omittedByBudget: 0, budgetExceeded: false, budget: { maxChars: null, maxPreferences: null } },
     ...partial,
   };
 }

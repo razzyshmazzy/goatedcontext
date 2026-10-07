@@ -57,13 +57,66 @@ export interface CliDeps {
   env?: NodeJS.ProcessEnv;
 }
 
-function withContext<T>(deps: CliDeps, fn: (ctx: CtxContext) => T): T {
-  const ctx = CtxContext.open(deps.env ?? process.env);
+/**
+ * Hook-specific DB lock-wait bound (ms). The prompt hook is latency-sensitive and must
+ * FAIL OPEN rather than block the agent: if the DB is locked, it waits only this long
+ * (well under the agent's hook deadline, and far above a normal uncontended read of a
+ * few ms) before giving up with no context. Normal CLI writes keep the durable 10s wait.
+ */
+const HOOK_BUSY_TIMEOUT_MS = 250;
+
+function withContext<T>(
+  deps: CliDeps,
+  fn: (ctx: CtxContext) => T,
+  opts: { busyTimeoutMs?: number } = {},
+): T {
+  const ctx = CtxContext.open(deps.env ?? process.env, opts);
   try {
     return fn(ctx);
   } finally {
     ctx.close();
   }
+}
+
+/**
+ * Replace any occurrence of a known secret value in `text` with `[redacted]`. Used to
+ * scrub subprocess error messages (Node's spawn validation echoes the offending value)
+ * before they can reach stderr. Longest values first so a value that is a substring of
+ * another is not partially left behind.
+ */
+function redactSecrets(text: string, secrets: string[]): string {
+  let out = text;
+  for (const s of [...secrets].filter((v) => v.length > 0).sort((a, b) => b.length - a.length)) {
+    out = out.split(s).join("[redacted]");
+  }
+  return out;
+}
+
+/**
+ * A STRICT integer option coercion for Commander. `parseInt` accepts a numeric prefix
+ * ("1e3" → 1, "10foo" → 10), silently corrupting the argument. This consumes the WHOLE
+ * string: only an optional sign + digits is accepted. Rejects "1e3", "1.5", "10foo",
+ * "NaN", "Infinity", "" and out-of-range values with an actionable error (thrown during
+ * parse → surfaced cleanly by runCli). Use for every integer flag (limit, budgets, …).
+ */
+function strictIntOption(flag: string, opts: { min?: number; max?: number } = {}) {
+  return (raw: string): number => {
+    const s = raw.trim();
+    if (!/^[+-]?\d+$/.test(s)) {
+      throw new ValidationError(`Invalid value for ${flag}: "${raw}" is not a whole number.`);
+    }
+    const n = Number(s);
+    if (!Number.isSafeInteger(n)) {
+      throw new ValidationError(`Invalid value for ${flag}: "${raw}" is out of range.`);
+    }
+    if (opts.min != null && n < opts.min) {
+      throw new ValidationError(`Invalid value for ${flag}: must be at least ${opts.min}.`);
+    }
+    if (opts.max != null && n > opts.max) {
+      throw new ValidationError(`Invalid value for ${flag}: must be at most ${opts.max}.`);
+    }
+    return n;
+  };
 }
 
 function resolveRepoOrThrow(ctx: CtxContext, cwd: string) {
@@ -686,8 +739,8 @@ export function buildProgram(deps: CliDeps): Command {
       .option("--language <lang>", "Active language (repeatable); overrides inference.", collect, [])
       .option("--domain <domain>", "Explicit decision-domain override")
       .option("--include-proposed", "Also include non-authoritative candidate proposals")
-      .option("--budget-chars <n>", "Max rendered chars delivered (omission reported, never silent)", (v) => parseInt(v, 10))
-      .option("--budget-prefs <n>", "Max preferences delivered (omission reported, never silent)", (v) => parseInt(v, 10))
+      .option("--budget-chars <n>", "Max rendered chars delivered (omission reported, never silent)", strictIntOption("--budget-chars", { min: 1 }))
+      .option("--budget-prefs <n>", "Max preferences delivered (omission reported, never silent)", strictIntOption("--budget-prefs", { min: 1 }))
       .option("--format <fmt>", "json | text", "json")
       .option("--json", "Alias for --format json")
       .option("--stdin", "Read one JSON object {task,cwd,files,languages,domain,includeProposed} on stdin")
@@ -835,11 +888,14 @@ export function buildProgram(deps: CliDeps): Command {
     .argument("<id>", "Preference id (or unique prefix)")
     .option("--force", "Apply even if the preference changed since you read it")
     .option("--json", "Output JSON")
-    .action((id, opts) => {
+    .action((id, opts, cmd) => {
+      // `--json` may bind to the parent `prefs` command (which also declares it), so
+      // honor it whether it landed on this subcommand or the parent — matching `pending`.
+      const useJson = Boolean(opts.json || cmd.optsWithGlobals().json);
       withContext(deps, (ctx) => {
         const pref = ctx.preferences.resolveRef(id);
         const updated = ctx.preferences.approve(pref.id, { expectedVersion: pref.version, force: opts.force });
-        if (opts.json) return printJson(updated);
+        if (useJson) return printJson(updated);
         line(`Approved (${shortId(updated.id)}): ${updated.rule}`);
       });
     });
@@ -850,11 +906,12 @@ export function buildProgram(deps: CliDeps): Command {
     .argument("<id>", "Preference id (or unique prefix)")
     .option("--force", "Apply even if the preference changed since you read it")
     .option("--json", "Output JSON")
-    .action((id, opts) => {
+    .action((id, opts, cmd) => {
+      const useJson = Boolean(opts.json || cmd.optsWithGlobals().json);
       withContext(deps, (ctx) => {
         const pref = ctx.preferences.resolveRef(id);
         const updated = ctx.preferences.reject(pref.id, { expectedVersion: pref.version, force: opts.force });
-        if (opts.json) return printJson(updated);
+        if (useJson) return printJson(updated);
         line(`Rejected (${shortId(updated.id)}): ${updated.rule}`);
       });
     });
@@ -986,7 +1043,7 @@ export function buildProgram(deps: CliDeps): Command {
     .command("history")
     .description("Show recent local changes to preferences and environments (append-only audit).")
     .option("--repo", "Only events for the current repository")
-    .option("--limit <n>", "Max events to show", (v) => parseInt(v, 10), 20)
+    .option("--limit <n>", "Max events to show", strictIntOption("--limit", { min: 1 }), 20)
     .option("--cwd <dir>", "Working directory used to resolve the repo", process.cwd())
     .option("--json", "Output JSON")
     .action((opts) => {
@@ -1026,7 +1083,7 @@ export function buildProgram(deps: CliDeps): Command {
     .description("Retrieve relevance-filtered, conflict-resolved context (JSON).")
     .option("--cwd <dir>", "Working directory", process.cwd())
     .option("--task <text>", "Description of the current task")
-    .option("--limit <n>", "Max preferences to return (1-15)", (v) => parseInt(v, 10))
+    .option("--limit <n>", "Max preferences to return (1-15)", strictIntOption("--limit", { min: 1 }))
     .option("--include-proposed", "Also include proposed/observed preferences")
     .action((opts) => {
       withContext(deps, (ctx) => {
@@ -1078,6 +1135,9 @@ export function buildProgram(deps: CliDeps): Command {
         if (!prompt.trim()) return;
         const cwd = payload.cwd && payload.cwd.trim().length > 0 ? payload.cwd : process.cwd();
         const agent = event === "codex-prompt" ? "codex" : "claude";
+        // Hook-specific short DB wait: a locked DB fails open fast (no context) rather
+        // than stalling the agent for the default 10s. The outer try/catch turns any
+        // such failure into a clean no-op exit.
         withContext(deps, (ctx) => {
           const result = ctx.retrieval.retrieve({ cwd, task: prompt, track: false });
           // Capability-driven static/runtime dedup: whatever the delivery planner
@@ -1094,7 +1154,7 @@ export function buildProgram(deps: CliDeps): Command {
           if (block) ctx.stats.recordHookInjection(runtimePrefs.length, agent);
           else ctx.stats.recordHookNoMatch(agent);
           if (debug) hookDebug(deps, `[${event}] injected=${block ? "yes" : "no"} n=${runtimePrefs.length} static=${staticIds.size} cwd=${cwd}`);
-        });
+        }, { busyTimeoutMs: HOOK_BUSY_TIMEOUT_MS });
       } catch (err) {
         if (debug) hookDebug(deps, `error: ${(err as Error).message}`);
         // swallow — fail open
@@ -1437,7 +1497,15 @@ export function buildProgram(deps: CliDeps): Command {
         const childEnv = { ...(deps.env ?? process.env), ...injected };
 
         const [cmd, ...cmdArgs] = passthrough;
-        const code = runChildInherit(cmd!, cmdArgs, { cwd: opts.cwd, env: childEnv });
+        let code: number;
+        try {
+          code = await runChildInherit(cmd!, cmdArgs, { cwd: opts.cwd, env: childEnv });
+        } catch (err) {
+          // Defense in depth: a runtime spawn error can embed the offending env value
+          // (Node's ERR_INVALID_ARG_VALUE echoes it). Redact every injected secret from
+          // the message before it can ever surface on stderr.
+          throw new CtxError(redactSecrets((err as Error).message, Object.values(injected)));
+        }
         if (code !== 0) process.exitCode = code;
       });
     });
@@ -1468,8 +1536,8 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--task <text>", "Description of the current task")
     .option("--cwd <dir>", "Working directory", process.cwd())
     .option("--include-proposed", "Also account for non-authoritative candidate proposals")
-    .option("--budget-chars <n>", "Simulate a rendered-char budget", (v) => parseInt(v, 10))
-    .option("--budget-prefs <n>", "Simulate a preference-count budget", (v) => parseInt(v, 10))
+    .option("--budget-chars <n>", "Simulate a rendered-char budget", strictIntOption("--budget-chars", { min: 1 }))
+    .option("--budget-prefs <n>", "Simulate a preference-count budget", strictIntOption("--budget-prefs", { min: 1 }))
     .option("--json", "Output JSON")
     .action((opts) => {
       const includeProposed = Boolean(opts.includeProposed);
@@ -2018,7 +2086,7 @@ async function runCursorSessionHook(deps: CliDeps, debug: boolean): Promise<void
       // patterns and relevant rules are task-specific and come via MCP get_context.
       const always = result.preferences.filter((p) => p.applicability === "always");
       return renderContextBlock({ ...result, preferences: always, observedPatterns: [] });
-    });
+    }, { busyTimeoutMs: HOOK_BUSY_TIMEOUT_MS }); // fail open fast on a locked DB
     const additional_context = block ? `${block}\n\n${instruction}` : instruction;
     process.stdout.write(JSON.stringify({ additional_context }) + "\n");
   } catch (err) {
@@ -2060,15 +2128,24 @@ function uninstallCursorTarget(deps: CliDeps, opts: Record<string, unknown>): vo
 }
 
 /**
- * Read a single secret value from stdin (one line). Works with a pipe
- * (`echo $KEY | ctx env set …`) and interactively (type/paste the value, Enter).
- * ctx never echoes the value back.
+ * Read a secret value from stdin. ctx never echoes the value back.
+ *
+ * Two modes, chosen by whether stdin is a terminal:
+ *   - interactive TTY: read ONE line (Enter submits), trimmed — the convenient path
+ *     for typing/pasting a single token without needing Ctrl-D.
+ *   - pipe/redirect (`cat key.pem | …`, `printf … | …`): read the COMPLETE stream to
+ *     EOF so MULTILINE secrets (PEM keys, certs, JSON blobs) are preserved. Every
+ *     embedded newline is kept verbatim; exactly ONE trailing newline (the shell/echo
+ *     artifact) is stripped, and no other whitespace is touched.
  */
 async function readSecretFromStdin(varName: string): Promise<string | undefined> {
   if (process.stdin.isTTY) {
     process.stderr.write(`Enter value for ${varName} (read from stdin, not echoed by ctx): `);
+    const value = (await readStdinLine()).trim();
+    return value.length > 0 ? value : undefined;
   }
-  const value = (await readStdinLine()).trim();
+  const raw = await readStdin();
+  const value = raw.replace(/\r?\n$/, "");
   return value.length > 0 ? value : undefined;
 }
 

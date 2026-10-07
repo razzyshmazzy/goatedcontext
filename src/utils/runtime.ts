@@ -1,5 +1,6 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
+import { constants as osConstants } from "node:os";
 import { delimiter, join } from "node:path";
 
 /**
@@ -192,13 +193,96 @@ function spawnPortable(
 }
 
 /**
- * Run a command with the parent's stdio inherited (used by `ctx env run`).
- * Returns the child's exit code. Throws only if the process could not be spawned.
+ * Translate a child's termination into a shell-style exit code.
+ *   - normal numeric exit  → that code unchanged (`exit 7` → 7)
+ *   - killed by a signal    → 128 + signal number (SIGTERM → 143, SIGKILL → 137,
+ *     SIGPIPE → 141), the POSIX convention `sh`/`bash` use
+ *   - unknown/undecodable signal → 1 (nonzero; never a false success)
+ *   - NEITHER code nor signal → 1 (fail closed)
+ *
+ * A signal death must NEVER map to 0 — that was the bug where `status ?? 0`
+ * reported success for a SIGTERM/SIGKILL/SIGPIPE child.
+ *
+ * The `null`/`null` branch is not reachable on the `env run` path: after a
+ * successfully-spawned child, Node/Bun's `exit` event sets EXACTLY ONE of (code,
+ * signal) — verified empirically (exit→(code,null); signal-kill→(null,signal)) and per
+ * the child_process contract (a spawn failure goes to `error`, which the caller turns
+ * into a reject, not here). We still fail CLOSED rather than return 0: a child that
+ * ended with no exit code AND no signal carries no evidence of success, so treating it
+ * as success would be unsafe.
  */
-export function runChildInherit(cmd: string, args: string[], opts: ChildOptions = {}): number {
-  const res = spawnPortable(cmd, args, opts, "inherit");
-  if (res.error) throw res.error;
-  return res.status ?? 0;
+export function exitCodeFromChild(code: number | null, signal: NodeJS.Signals | null): number {
+  if (code != null) return code;
+  if (signal != null) {
+    const num = (osConstants.signals as Record<string, number | undefined>)[signal];
+    return typeof num === "number" && num > 0 ? 128 + num : 1;
+  }
+  return 1;
+}
+
+/** Signals ctx forwards to a live `env run` child. SIGHUP is POSIX-only. */
+function forwardableSignals(): NodeJS.Signals[] {
+  return process.platform === "win32"
+    ? ["SIGINT", "SIGTERM"]
+    : ["SIGINT", "SIGTERM", "SIGHUP"];
+}
+
+/**
+ * Run a command with the parent's stdio inherited (used by `ctx env run`), forwarding
+ * termination signals to the child and propagating its true exit status.
+ *
+ * Why async `spawn` (not `spawnSync`): a synchronous spawn blocks the event loop, so
+ * ctx's own signal handlers can never run — if ctx is sent SIGTERM while the child is
+ * live, ctx dies and the child is orphaned. With async spawn we install handlers for
+ * the duration of the child's life that forward the signal to the child, then await the
+ * child's exit and return the correct (possibly signal-derived) code. Handlers are
+ * removed in `finally`, so they never leak or affect unrelated commands.
+ *
+ * Rejects only if the process could not be spawned (e.g. command not found).
+ */
+export function runChildInherit(cmd: string, args: string[], opts: ChildOptions = {}): Promise<number> {
+  const resolved = whichSync(cmd, opts.env?.PATH ?? process.env.PATH) ?? cmd;
+  const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved);
+
+  const child = needsShell
+    ? spawn([winQuote(resolved), ...args.map(winQuote)].join(" "), {
+        cwd: opts.cwd,
+        env: opts.env,
+        stdio: "inherit",
+        shell: true,
+        windowsHide: true,
+      })
+    : spawn(resolved, args, {
+        cwd: opts.cwd,
+        env: opts.env,
+        stdio: "inherit",
+        windowsHide: true,
+      });
+
+  // Forward termination signals to the child for the lifetime of the child only.
+  // One received signal → exactly one forwarded signal (no double-send). Installing a
+  // SIGINT listener also stops Node's default (which would kill ctx and strand the
+  // child); we wait for the child, then return its signal-derived code — Ctrl-C is
+  // neither swallowed nor turned into exit 0.
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  for (const sig of forwardableSignals()) {
+    const handler = () => {
+      try {
+        child.kill(sig);
+      } catch {
+        /* child already gone — nothing to forward */
+      }
+    };
+    handlers.set(sig, handler);
+    process.on(sig, handler);
+  }
+
+  return new Promise<number>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code, signal) => resolve(exitCodeFromChild(code, signal)));
+  }).finally(() => {
+    for (const [sig, handler] of handlers) process.removeListener(sig, handler);
+  });
 }
 
 /** Run a command and capture its output (used by `ctx setup` for npm queries). */

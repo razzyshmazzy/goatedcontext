@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { nowIso } from "../../utils/time.ts";
-import { Applicability, Polarity, Scope, Status } from "../preferences/types.ts";
+import { Applicability, Polarity, Scope, Status, MAX_RULE_CHARS } from "../preferences/types.ts";
 import { ConditionSchema, canonicalizeCondition } from "../preferences/conditions.ts";
+import { CtxError } from "../../utils/errors.ts";
+import { redactRemoteUrl } from "../repos/repo.ts";
 import type { CtxContext } from "../context.ts";
 
 /**
@@ -24,6 +26,14 @@ import type { CtxContext } from "../context.ts";
 export const EXPORT_SCHEMA = "ctx-export";
 export const EXPORT_VERSION = 1;
 
+/**
+ * Export-bundle versions this build knows how to import. A bundle from a FUTURE ctx
+ * (e.g. `version: 2`) is rejected rather than parsed as if it were current — its
+ * record shape may differ and silently mis-importing it would corrupt state. Add a
+ * version here (with any needed migration) only when the format actually changes.
+ */
+export const SUPPORTED_IMPORT_VERSIONS: ReadonlySet<number> = new Set([1]);
+
 const ExportEvidence = z.object({
   source: z.string(),
   text: z.string(),
@@ -42,7 +52,10 @@ const ExportRepo = z.object({
 
 const ExportPreference = z
   .object({
-    rule: z.string().min(1),
+    // Same bound as every other write path: an imported rule is still a rule and must
+    // obey the concise-instruction invariant, so a bundle can never smuggle in an
+    // oversized rule that `remember` would reject.
+    rule: z.string().min(1).max(MAX_RULE_CHARS),
     category: z.string().min(1),
     domain: z.string().nullable().default(null),
     polarity: Polarity,
@@ -113,7 +126,10 @@ export function exportData(ctx: CtxContext): ExportBundle {
     .map((r) => ({
       identity: r.identity,
       name: r.name,
-      remoteUrl: r.remoteUrl,
+      // Redact credentials even for LEGACY rows written before storage-time redaction,
+      // so an export can never leak a token embedded in an old remote URL (no migration
+      // required for export safety).
+      remoteUrl: redactRemoteUrl(r.remoteUrl),
       hasRemote: r.hasRemote,
       rootPath: r.rootPath,
     }));
@@ -163,6 +179,15 @@ export function exportData(ctx: CtxContext): ExportBundle {
  */
 export function importData(ctx: CtxContext, raw: unknown): ImportSummary {
   const bundle = ExportBundleSchema.parse(raw);
+
+  // Fail CLOSED on an unknown (e.g. future) format version — BEFORE any write — so an
+  // unsupported bundle can never be half-applied or mis-parsed as current.
+  if (!SUPPORTED_IMPORT_VERSIONS.has(bundle.version)) {
+    throw new CtxError(
+      `Unsupported export version ${bundle.version}. This ctx imports version(s): ` +
+        `${[...SUPPORTED_IMPORT_VERSIONS].join(", ")}. Upgrade ctx to import a newer bundle.`,
+    );
+  }
 
   // Resolve/create each referenced repo once, mapping export identity → local id.
   const repoIdByIdentity = new Map<string, string>();

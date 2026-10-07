@@ -177,6 +177,29 @@ export function stem(token: string): string {
     .replace(/y$/, "");
 }
 
+/**
+ * Maximum characters of task text goatedcontext uses for RELEVANCE/domain analysis.
+ * This bounds ONLY ctx's internal query representation — it never changes the prompt the
+ * coding agent sees, and never mutates stored data. Rationale: a very large prompt (a
+ * pasted file or log) was tokenized and stemmed in full several times per retrieval,
+ * so hook latency scaled with raw input size. 8 KB is far more than enough to infer a
+ * task's domain and relevance keywords; measured hook overhead becomes flat above it.
+ */
+export const MAX_QUERY_ANALYSIS_CHARS = 8000;
+
+/**
+ * Reduce an over-long task to a bounded, deterministic retrieval-query representation:
+ * the head (where the intent usually sits) plus the tail (the most recent instruction),
+ * separated by an ellipsis so no token straddles the cut. Tasks at or below the cap are
+ * returned unchanged. Deterministic — no time/randomness — so retrieval stays stable.
+ */
+export function boundQueryText(task: string, max = MAX_QUERY_ANALYSIS_CHARS): string {
+  if (task.length <= max) return task;
+  const head = Math.ceil(max * 0.75);
+  const tail = max - head;
+  return task.slice(0, head) + " … " + task.slice(task.length - tail);
+}
+
 function rawTokens(text: string): string[] {
   return text
     .toLowerCase()

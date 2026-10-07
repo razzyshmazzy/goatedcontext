@@ -3,8 +3,9 @@ import { z } from "zod";
 import { newId } from "../../utils/id.ts";
 import { nowIso } from "../../utils/time.ts";
 import { CtxError, NotFoundError } from "../../utils/errors.ts";
-import { envVarSecretRef, type SecretStore } from "../../storage/secrets/index.ts";
+import { envVarSecretRef, assertUsableEnvValue, type SecretStore } from "../../storage/secrets/index.ts";
 import { recordEvent } from "../events/service.ts";
+import { withFileLock } from "../../utils/fs.ts";
 
 export const EnvScope = z.enum(["global", "repo"]);
 export type EnvScope = z.infer<typeof EnvScope>;
@@ -79,6 +80,14 @@ export class EnvironmentService {
   constructor(
     private readonly db: Database,
     private readonly secrets: SecretStore,
+    /**
+     * Cross-process lock file guarding the combined declaration+value mutation. A
+     * variable's declaration (SQLite) and its value (secret store) cannot share one
+     * transaction, so concurrent `env set` calls are serialized here to keep the pair
+     * atomic. Omitted only in legacy direct constructions (tests); such callers lose
+     * cross-process serialization but keep single-process correctness.
+     */
+    private readonly varWriteLock?: string,
   ) {}
 
   add(input: AddEnvironmentInput): Environment {
@@ -176,8 +185,20 @@ export class EnvironmentService {
 
   availability(env: Environment): EnvironmentAvailability {
     const vars = this.variables(env.id);
+    // "available" must mean the value can actually be injected into `env run` — not
+    // merely that a stored row exists. A missing key, a corrupt store, or a value that
+    // no longer decrypts all make the secret UNavailable, so we probe real readability
+    // (never exposing the value) rather than trusting `has`, which would report a
+    // deleted-key environment as healthy and mislead the user.
     const available =
-      vars.length > 0 && vars.every((v) => this.secrets.has(v.secret_ref));
+      vars.length > 0 &&
+      vars.every((v) => {
+        try {
+          return this.secrets.get(v.secret_ref) != null;
+        } catch {
+          return false; // missing key / corrupt store / decryption failure
+        }
+      });
     return {
       environment: env,
       variableNames: vars.map((v) => v.var_name),
@@ -205,47 +226,75 @@ export class EnvironmentService {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) {
       throw new CtxError(`Invalid environment variable name: "${varName}".`);
     }
+    // Reject values the runtime cannot accept as an env var (e.g. a NUL byte) at the
+    // earliest boundary — before any store or DB write — so a value that would later
+    // make `spawn` throw (and echo the plaintext) can never be persisted.
+    assertUsableEnvValue(value, varName);
     const ref = envVarSecretRef(environmentId, varName);
 
-    // The secret and its DB row live in two stores and cannot share one transaction.
-    // Read the metadata FIRST, so a DB error happens before any secret is written
-    // (nothing to strand). Only then write the secret. For a NEW variable, if the
-    // metadata INSERT fails, compensate by deleting the just-written secret so we
-    // never leave encrypted material with no referencing row.
-    const existing = this.db
-      .query<EnvVarRow, [string, string]>(
-        "SELECT * FROM environment_variables WHERE environment_id = ? AND var_name = ?",
-      )
-      .get(environmentId, varName);
-
-    this.secrets.set(ref, value);
-    if (existing) return; // secret updated in place; metadata unchanged
-
-    try {
-      this.db
-        .query(
-          `INSERT INTO environment_variables (id, environment_id, var_name, secret_ref, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
+    // The declaration (SQLite row) and the value (secret store) live in two stores and
+    // cannot share one transaction. Serialize the COMBINED mutation across processes so
+    // two concurrent `ctx env set` calls on the SAME new variable can never interleave
+    // into a half-written state (the old race left "declaration present, value deleted"
+    // when a losing writer's UNIQUE-violation compensation deleted the winner's secret).
+    this.withVarLock(() => {
+      const existing = this.db
+        .query<EnvVarRow, [string, string]>(
+          "SELECT * FROM environment_variables WHERE environment_id = ? AND var_name = ?",
         )
-        .run(newId(), environmentId, varName, ref, nowIso());
-    } catch (err) {
-      try {
-        this.secrets.delete(ref);
-      } catch {
-        /* best-effort cleanup — surface the original INSERT error below */
+        .get(environmentId, varName);
+
+      if (existing) {
+        // Declaration already present → update the value in place. Last writer wins;
+        // the declaration is untouched, so no partial state is possible.
+        this.secrets.set(ref, value);
+        return;
       }
-      throw err;
-    }
+
+      // New variable: write the VALUE first, then the declaration. If the declaration
+      // INSERT fails, roll the value back — leaving neither (the prior valid state). The
+      // value-first order means the only possible crash remnant is an orphan secret with
+      // no declaration, which is invisible to env list/vars/run (never a broken, declared
+      // variable with a missing value). Under the lock the rollback cannot race another
+      // writer, so deleting `ref` is safe.
+      this.secrets.set(ref, value);
+      try {
+        this.db
+          .query(
+            `INSERT INTO environment_variables (id, environment_id, var_name, secret_ref, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(newId(), environmentId, varName, ref, nowIso());
+      } catch (err) {
+        try {
+          this.secrets.delete(ref);
+        } catch {
+          /* best-effort rollback — surface the original INSERT error below */
+        }
+        throw err;
+      }
+    });
+  }
+
+  /** Run `fn` under the cross-process variable-write lock, or directly if none was wired. */
+  private withVarLock<T>(fn: () => T): T {
+    return this.varWriteLock ? withFileLock(this.varWriteLock, fn) : fn();
   }
 
   removeVariable(environmentId: string, varName: string): void {
     const ref = envVarSecretRef(environmentId, varName);
-    this.secrets.delete(ref);
-    this.db
-      .query(
-        "DELETE FROM environment_variables WHERE environment_id = ? AND var_name = ?",
-      )
-      .run(environmentId, varName);
+    // Same cross-process lock as setVariable, so a concurrent set+remove on the same
+    // variable can never interleave into a split declaration/value state. Delete the
+    // DECLARATION first (the variable disappears atomically from list/vars/run), then
+    // the value — a crash between leaves only an invisible orphan secret.
+    this.withVarLock(() => {
+      this.db
+        .query(
+          "DELETE FROM environment_variables WHERE environment_id = ? AND var_name = ?",
+        )
+        .run(environmentId, varName);
+      this.secrets.delete(ref);
+    });
   }
 
   /**
@@ -267,6 +316,10 @@ export class EnvironmentService {
               `Set it with: ctx env set ${env.name} ${v.var_name}`,
           );
         }
+        // Defense in depth: a value persisted by an older ctx (before set-time
+        // validation) could still carry a NUL byte. Reject it HERE, before it reaches
+        // the child env, so the runtime never throws an error that echoes the plaintext.
+        assertUsableEnvValue(value, v.var_name);
         out[v.var_name] = value;
       }
     }
@@ -274,15 +327,20 @@ export class EnvironmentService {
   }
 
   remove(env: Environment): void {
-    for (const v of this.variables(env.id)) {
-      this.secrets.delete(v.secret_ref);
-    }
-    this.db.query("DELETE FROM environments WHERE id = ?").run(env.id);
-    recordEvent(this.db, {
-      type: "environment.removed",
-      repoId: env.repoId,
-      scope: env.scope,
-      summary: env.name,
+    // Under the same lock as set/removeVariable (one consistent ordering, no nesting).
+    // Delete the environment row FIRST — the ON DELETE CASCADE removes every variable
+    // declaration atomically — then delete the secret values. A crash between leaves
+    // only invisible orphan secrets, never a declared variable with a missing value.
+    this.withVarLock(() => {
+      const refs = this.variables(env.id).map((v) => v.secret_ref);
+      this.db.query("DELETE FROM environments WHERE id = ?").run(env.id);
+      for (const ref of refs) this.secrets.delete(ref);
+      recordEvent(this.db, {
+        type: "environment.removed",
+        repoId: env.repoId,
+        scope: env.scope,
+        summary: env.name,
+      });
     });
   }
 }

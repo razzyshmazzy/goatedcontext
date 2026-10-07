@@ -38,16 +38,26 @@ function isBusy(err: unknown): boolean {
   );
 }
 
+export interface OpenDatabaseOptions {
+  /**
+   * Override the lock-wait (`busy_timeout`) for THIS connection only, in ms. Latency-
+   * sensitive readers (the prompt hook) pass a short bound so a locked DB fails open
+   * quickly instead of stalling the agent for the full 10s default. Normal CLI writes
+   * omit it and keep the durable 10s wait.
+   */
+  busyTimeoutMs?: number;
+}
+
 /**
  * Opens the SQLite database at `paths.dbFile`, creating the ctx home directory
  * if needed and applying any pending migrations. Safe to call from many
  * processes at once (see `runMigrations`).
  */
-export function openDatabase(paths: CtxPaths): Database {
+export function openDatabase(paths: CtxPaths, opts: OpenDatabaseOptions = {}): Database {
   ensureHome(paths);
   const db = openDb(paths.dbFile, { create: true });
   // Always safe, cheap, lock-free settings first.
-  db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs()};`);
+  db.exec(`PRAGMA busy_timeout = ${opts.busyTimeoutMs ?? busyTimeoutMs()};`);
   db.exec("PRAGMA foreign_keys = ON;");
 
   // Steady state (already WAL + migrated) is the overwhelmingly common case and
@@ -60,11 +70,20 @@ export function openDatabase(paths: CtxPaths): Database {
     return db;
   }
 
-  withFileLock(paths.dbFile + ".setup.lock", () => {
-    enableWal(db);
-    db.exec("PRAGMA synchronous = NORMAL;");
-    runMigrations(db);
-  });
+  // Bound the setup wait for latency-sensitive callers (the hook): if another process
+  // is mid-setup, a short busyTimeoutMs also caps how long we queue on the setup file
+  // lock, so the hook fails open fast instead of blocking on first-run/upgrade
+  // contention. Normal callers keep the default (durable) lock wait.
+  const lockOpts = opts.busyTimeoutMs != null ? { timeoutMs: opts.busyTimeoutMs } : {};
+  withFileLock(
+    paths.dbFile + ".setup.lock",
+    () => {
+      enableWal(db);
+      db.exec("PRAGMA synchronous = NORMAL;");
+      runMigrations(db);
+    },
+    lockOpts,
+  );
   return db;
 }
 

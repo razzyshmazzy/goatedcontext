@@ -109,6 +109,25 @@ const NonEmptyText = z
   .transform((s) => s.trim())
   .refine((s) => s.length > 0, { message: "must not be empty or whitespace-only" });
 
+/**
+ * Maximum length of a single preference RULE. A preference is a concise developer
+ * instruction, not a document; a multi-kilobyte (or multi-megabyte) rule would flood
+ * every agent's context. 4096 chars (~600 words) is far more than any real rule needs
+ * and comfortably exceeds every rule in the codebase/tests, while blocking a pasted
+ * file/log from becoming a "rule". Enforced at EVERY core write path (remember, propose,
+ * import, MCP) because all of them flow through these schemas / the preference service.
+ */
+export const MAX_RULE_CHARS = 4096;
+
+/** A rule: non-empty, trimmed, and bounded so it can never flood agent context. */
+const RuleText = z
+  .string()
+  .transform((s) => s.trim())
+  .refine((s) => s.length > 0, { message: "rule must not be empty or whitespace-only" })
+  .refine((s) => s.length <= MAX_RULE_CHARS, {
+    message: `rule is too long (max ${MAX_RULE_CHARS} characters); a preference is a concise instruction, not a document`,
+  });
+
 /** A category: non-empty, lowercased, reasonable length. */
 const Category = z
   .string()
@@ -124,7 +143,7 @@ export const Provenance = z.object({
 export type Provenance = z.infer<typeof Provenance>;
 
 export const RememberInputSchema = z.object({
-  rule: NonEmptyText,
+  rule: RuleText,
   category: Category.default("general"),
   domain: Domain.nullable().optional(),
   scope: Scope,
@@ -148,7 +167,7 @@ export const RememberInputSchema = z.object({
 export type RememberInput = z.infer<typeof RememberInputSchema>;
 
 export const ProposeInputSchema = z.object({
-  rule: NonEmptyText,
+  rule: RuleText,
   category: Category.default("general"),
   domain: Domain.nullable().optional(),
   scope: Scope,

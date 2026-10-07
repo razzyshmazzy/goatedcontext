@@ -53,6 +53,25 @@ function rowToRepo(r: RepoRow): Repo {
  * paths may be case-sensitive on some hosts, so path case is preserved to avoid
  * merging genuinely distinct repositories.
  */
+/**
+ * Strip embedded credentials from a remote URL so they are never persisted or exported.
+ * Git exposes `https://user:token@host/...` verbatim; the userinfo is a secret and must
+ * not live in the DB or an export bundle. Only the `scheme://[userinfo@]host` form is
+ * touched — the userinfo between scheme and host is removed:
+ *
+ *   https://user:token@example.com/org/repo.git -> https://example.com/org/repo.git
+ *   ssh://git:pw@example.com/org/repo            -> ssh://example.com/org/repo
+ *
+ * scp-like syntax (`git@example.com:org/repo.git`) is identity syntax — `git` is a
+ * conventional USERNAME, not a password — so it is preserved unchanged. Returns the
+ * input (including null) unchanged when there is nothing to redact.
+ */
+export function redactRemoteUrl(url: string | null): string | null {
+  if (!url) return url;
+  const m = url.match(/^([a-z][a-z0-9+.-]*:\/\/)([^/@]*@)(.*)$/i);
+  return m ? `${m[1]}${m[3]}` : url;
+}
+
 export function canonicalizeRemote(url: string): string | null {
   let u = url.trim();
   if (!u) return null;
@@ -99,7 +118,11 @@ export function detectRepoIdentity(
   const root = probe.toplevel(cwd);
   if (!root) return null;
 
-  const remoteUrl = probe.originUrl(cwd);
+  const rawRemote = probe.originUrl(cwd);
+  // Never persist credentials that git may embed in the remote URL. The identity is
+  // already credential-free (canonicalizeRemote strips userinfo); redact the stored
+  // URL too so no secret reaches the DB or an export.
+  const remoteUrl = redactRemoteUrl(rawRemote);
   const canonical = remoteUrl ? canonicalizeRemote(remoteUrl) : null;
 
   if (canonical) {

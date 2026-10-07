@@ -243,6 +243,34 @@ function decodeTomlString(lit: string): string {
   });
 }
 
+/**
+ * Encode a raw string as a VALID TOML basic string, escaping backslashes, quotes and
+ * control chars. Essential for Windows paths: a value like `D:\Users\x` emitted naively
+ * as `"D:\Users\x"` is invalid TOML (`\U`/`\x` are not valid escapes) — it must become
+ * `"D:\\Users\\x"`. All emitted array elements go through this so the result always
+ * re-parses, regardless of what the user originally wrote (literal or basic string).
+ */
+function encodeTomlBasicString(s: string): string {
+  let out = '"';
+  for (const ch of s) {
+    const code = ch.codePointAt(0)!;
+    switch (ch) {
+      case "\\": out += "\\\\"; break;
+      case '"': out += '\\"'; break;
+      case "\b": out += "\\b"; break;
+      case "\t": out += "\\t"; break;
+      case "\n": out += "\\n"; break;
+      case "\f": out += "\\f"; break;
+      case "\r": out += "\\r"; break;
+      default:
+        out += code < 0x20 || code === 0x7f
+          ? "\\u" + code.toString(16).padStart(4, "0").toUpperCase()
+          : ch;
+    }
+  }
+  return out + '"';
+}
+
 /** Match a bare/dotted/quoted header name against the target table name. */
 function headerMatchesTarget(raw: string, target: string): boolean {
   const name = raw.trim().replace(/^["']|["']$/g, "").trim();
@@ -261,6 +289,7 @@ function locate(text: string, targetTable: string): Located {
   let inTargetTable = false;
   let targetHeaderEnd = -1; // char index after the target header's line (first match)
   let sawDottedTargetPrefix = false; // a root dotted key like `sandbox_workspace_write.*`
+  let sawTargetAsKey = false; // the whole table defined as a root key (e.g. an inline table)
   const dottedKeyPath = `${targetTable}.${CODEX_WRITABLE_ROOTS_KEY}`;
 
   while (i < n) {
@@ -321,6 +350,10 @@ function locate(text: string, targetTable: string): Located {
       // The fully-qualified key path (dotted keys compose with the active table).
       const fullKey = currentTable ? `${currentTable}.${key}` : key;
       if (currentTable === "" && key.startsWith(`${targetTable}.`)) sawDottedTargetPrefix = true;
+      // The target defined as a whole root-level key (e.g. `sandbox_workspace_write = { … }`
+      // inline table, or any scalar). Appending a `[sandbox_workspace_write]` header later
+      // would redefine the same key — illegal TOML — so we must detect and refuse.
+      if (currentTable === "" && key === targetTable) sawTargetAsKey = true;
       const isOurKey = (inTargetTable && key === CODEX_WRITABLE_ROOTS_KEY) || fullKey === dottedKeyPath;
       if (isOurKey) {
         // Found our key. Its value must be an array.
@@ -356,6 +389,14 @@ function locate(text: string, targetTable: string): Located {
     return {
       kind: "error",
       reason: `${targetTable} is configured via dotted keys; add "${CODEX_WRITABLE_ROOTS_KEY}" under it manually`,
+    };
+  }
+  if (sawTargetAsKey) {
+    // e.g. `sandbox_workspace_write = { writable_roots = [...] }`. Appending a table
+    // header would duplicate the key and corrupt the file — refuse with guidance.
+    return {
+      kind: "error",
+      reason: `${targetTable} is defined as an inline table; add "${CODEX_WRITABLE_ROOTS_KEY}" to it manually`,
     };
   }
   return { kind: "none" };
@@ -432,7 +473,7 @@ export function ensureCodexWritableRoot(
   }
 
   if (located.kind === "table-no-key") {
-    const insertion = `${CODEX_WRITABLE_ROOTS_KEY} = ["${value}"]\n`;
+    const insertion = `${CODEX_WRITABLE_ROOTS_KEY} = [${encodeTomlBasicString(value)}]\n`;
     const next = text.slice(0, located.insertAt) + insertion + text.slice(located.insertAt);
     writeFileAtomic(configFile, next, 0o644);
     return { action: "added" };
@@ -468,14 +509,19 @@ export function codexWritableRootConfigured(
 }
 
 function minimalConfig(value: string): string {
-  return `[${CODEX_SANDBOX_TABLE}]\n${CODEX_WRITABLE_ROOTS_KEY} = ["${value}"]\n`;
+  return `[${CODEX_SANDBOX_TABLE}]\n${CODEX_WRITABLE_ROOTS_KEY} = [${encodeTomlBasicString(value)}]\n`;
 }
 
-/** Rebuild the writable_roots array text with `value` appended, matching the original layout. */
+/**
+ * Rebuild the writable_roots array text with `value` appended, matching the original
+ * layout. Every element (existing + new) is re-encoded as a valid TOML basic string, so
+ * backslash/quote-bearing paths that were originally literal strings cannot become
+ * invalid escapes — the rewritten array always re-parses to the same values.
+ */
 function rewriteArray(elements: string[], value: string, multiline: boolean): string {
   const all = [...elements, value];
   if (multiline) {
-    return `[\n${all.map((e) => `  "${e}",`).join("\n")}\n]`;
+    return `[\n${all.map((e) => `  ${encodeTomlBasicString(e)},`).join("\n")}\n]`;
   }
-  return `[${all.map((e) => `"${e}"`).join(", ")}]`;
+  return `[${all.map((e) => encodeTomlBasicString(e)).join(", ")}]`;
 }
