@@ -648,6 +648,14 @@ test(
       // UNIVERSAL checks, matching the node-runtime CI job. Those universal checks live
       // outside the adapter gate, so they are present here.
       const doc = JSON.parse(captureChild(launcher, ["doctor", "--skip-adapter", "--json"], { env }).stdout);
+      // Diagnostic only (does NOT change the assertion): if doctor is unhealthy, surface
+      // the exact failing checks in the CI log so a Windows-only failure is actionable.
+      if (!doc.ok) {
+        console.error(
+          "[packed] doctor NOT ok — failing checks: " +
+            JSON.stringify(doc.checks.filter((c: { status: string }) => c.status === "fail")),
+        );
+      }
       expect(doc.ok).toBe(true);
       // The universal-interface checks are PRESENT. We deliberately do NOT assert
       // mcp-launchable's ok/warn: its status depends on resolving the launcher on a
