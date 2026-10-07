@@ -42,8 +42,9 @@ const PKG_VERSION = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"))
 const TIMEOUT = 180_000;
 // The 0.4.0 packed+MCP acceptance test gets a tighter, dedicated timeout than the plain
 // install tests: it adds an MCP client/server round-trip (a potential stdio-shutdown
-// hang), so its ceiling is kept low enough to surface such a hang quickly.
-const PACKED_MCP_TIMEOUT_MS = 60_000;
+// hang), so its ceiling is kept low enough to surface such a hang quickly. Observed
+// ~5s isolated / ~6–8s under parallel load → 20s is ~3x headroom, not a hang-hiding value.
+const PACKED_MCP_TIMEOUT_MS = 20_000;
 
 const ready = Boolean(NPM && NODE && existsSync(DIST));
 
@@ -622,12 +623,20 @@ test(
   "0.4.0 packed acceptance: universal CLI + MCP + generic writes from the INSTALLED tarball; Cursor paths are persistent",
   async () => {
     if (!ready) return console.warn("[setup-packed] skipped: npm/node/dist unavailable.");
+    // Phase timing, gated behind CTX_PACKED_TIMING so normal runs stay quiet. Enable it on
+    // CI (`CTX_PACKED_TIMING=1`) to see exactly which phase is slow or where a failure lands.
+    const t0 = Date.now();
+    const mark = process.env.CTX_PACKED_TIMING
+      ? (phase: string) => process.stderr.write(`[packed] ${phase} @${Date.now() - t0}ms\n`)
+      : () => {};
     const s = scratch();
     const env = isoEnv(s.prefix, s.home);
     const main = packTarball(ROOT, env);
+    mark("packed");
     const cursorHome = mkdtempSync(join(tmpdir(), "ctx-packed-cursor-"));
     try {
       const result = runSetup({ env, version: PKG_VERSION, claudeHome: s.claudeHome, installSpec: main.tarball });
+      mark("installed");
       expect(result.ok).toBe(true);
       const launcher = join(binDirFor(s.prefix), LAUNCHER);
       const dist = join(globalPackageDirFor(s.prefix), "dist", "index.js");
@@ -661,15 +670,21 @@ test(
       const after = JSON.parse(captureChild(launcher, ["agent", "context", "--task", "x", "--json"], { env }).stdout);
       expect(after.context.authoritativePreferences.map((p: { rule: string }) => p.rule)).toContain("Prefer tabs.");
 
+      mark("cli-done");
       // MCP from the INSTALLED bundle, under plain Node (exactly how the launcher runs it).
-      const transport = new StdioClientTransport({
-        command: NODE as string,
-        args: [dist, "mcp"],
-        env: { ...(env as Record<string, string>) },
-      });
+      // Spawn with a COMPLETE environment (the SDK REPLACES the child env with whatever we
+      // pass), overriding only CTX_HOME/secret backend so the server reads the SAME store
+      // the CLI just wrote to. Passing the isolated allow-list env instead risked node
+      // failing to start on a bare runner (missing a required Windows var) → a connect
+      // rejection around the ~6s mark. Only CTX_HOME is overridden, so the acceptance (an
+      // installed-bundle MCP server over the shared SQLite store) is unchanged.
+      const mcpEnv = { ...(process.env as Record<string, string>), CTX_HOME: s.home, CTX_SECRET_BACKEND: "file" };
+      const transport = new StdioClientTransport({ command: NODE as string, args: [dist, "mcp"], env: mcpEnv });
       const client = new Client({ name: "packed-test", version: "1.0.0" });
-      await client.connect(transport);
+      // connect is INSIDE try/finally so a connect failure still tears the child down.
       try {
+        await client.connect(transport);
+        mark("mcp-connected");
         const { tools } = await client.listTools();
         expect(tools.map((t) => t.name).sort()).toEqual([
           "explain_preference", "get_context", "list_preferences", "propose", "record_decision", "remember",
@@ -683,6 +698,7 @@ test(
       } finally {
         await client.close();
       }
+      mark("mcp-done");
 
       // Cursor install from the installed binary: mcp.json points at the PERSISTENT launcher,
       // never the source checkout, node_modules, or an npx cache. `--cwd` is a non-repo temp
@@ -694,6 +710,7 @@ test(
       expect(mcpRaw).not.toContain("node_modules");
       const mcpParsed = JSON.parse(mcpRaw);
       expect(mcpParsed.mcpServers.goatedcontext.args).toEqual(["mcp"]);
+      mark("cursor-done");
     } finally {
       s.cleanup();
       rmSync(main.dir, { recursive: true, force: true });
@@ -701,9 +718,10 @@ test(
     }
   },
   // Dedicated timeout (not the shared 180s): this test does a real npm install plus an
-  // MCP client/server round-trip. ~5s in isolation, ~7.5s under full-suite parallel load;
-  // 60s gives generous headroom for npm-install variance on a loaded Windows CI runner
-  // while staying tight enough to SURFACE an MCP stdio-shutdown hang rather than hide it.
+  // MCP client/server round-trip. Observed ~5s isolated, ~6–8s under full-suite parallel
+  // load on Windows; 20s gives ~3x headroom for npm/process variance while staying tight
+  // enough to SURFACE a real hang quickly rather than hide it. (Verified applied: bun
+  // honors this 3-arg per-test timeout even with a long synchronous spawnSync prefix.)
   PACKED_MCP_TIMEOUT_MS,
 );
 
