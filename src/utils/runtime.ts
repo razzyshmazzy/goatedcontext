@@ -78,6 +78,10 @@ export function whichSync(cmd: string, pathEnv: string | undefined = process.env
 
   for (const dir of (pathEnv ?? "").split(delimiter).filter(Boolean)) {
     const base = join(dir, cmd);
+    // Probe the bare name first so a command that ALREADY carries its extension
+    // (e.g. "ctx.cmd" on Windows) resolves — PATHEXT never includes "", so the
+    // ext loop alone would only ever try "ctx.cmd.CMD" and miss the real file.
+    if (isFile(base)) return base;
     for (const ext of exts) {
       const candidate = base + ext;
       if (isFile(candidate)) return candidate;

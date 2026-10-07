@@ -632,10 +632,9 @@ test(
       // doctor: no failing checks from the installed package.
       const doc = JSON.parse(captureChild(launcher, ["doctor", "--json"], { env }).stdout);
       expect(doc.ok).toBe(true);
-      // The universal-interface checks are present. (mcp-launchable's ok/warn depends on
-      // PATH resolution, which the isolated test prefix doesn't always replicate; the REAL
-      // launchability proof is the SDK client connecting to the packed bundle below.)
-      expect(doc.checks.find((c: { id: string }) => c.id === "mcp-launchable")).toBeTruthy();
+      // The persistent launcher is on the isolated PATH, so MCP is resolvably launchable
+      // (this also guards the whichSync fix: an already-extensioned "ctx.cmd" must resolve).
+      expect(doc.checks.find((c: { id: string }) => c.id === "mcp-launchable")?.status).toBe("ok");
       expect(doc.checks.find((c: { id: string }) => c.id === "agent-cli")?.status).toBe("ok");
 
       // Universal CLI: the stable JSON envelope.
