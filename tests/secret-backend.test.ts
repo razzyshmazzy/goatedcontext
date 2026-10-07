@@ -32,35 +32,45 @@ test("the file backend is always available and honestly reports it is NOT a keyc
   rmSync(home, { recursive: true, force: true });
 });
 
-test("auto selection matches the platform's real capability", () => {
-  const { p, home } = freshPaths();
-  const store = createSecretStore(p, {}); // auto
-  const info = store.describe();
-  if (process.platform === "win32" && DpapiSecretStore.isAvailable()) {
-    // Windows with DPAPI: a real, keyless-on-disk secure backend.
-    expect(store.backend).toBe("windows-dpapi");
-    expect(info.secure).toBe(true);
-    store.set("k", "dpapi-secret");
-    expect(store.get("k")).toBe("dpapi-secret"); // real DPAPI round-trip
-  } else {
-    // No native secure storage available yet on this platform: fall back honestly.
-    expect(store.backend).toBe("encrypted-file");
-    expect(info.secure).toBe(false);
-  }
-  rmSync(home, { recursive: true, force: true });
-});
-
-test("requesting DPAPI where it is unavailable fails loudly rather than pretending", () => {
-  const { p, home } = freshPaths();
-  if (process.platform === "win32") {
-    if (DpapiSecretStore.isAvailable()) {
-      const store = createSecretStore(p, { CTX_SECRET_BACKEND: "dpapi" });
+// Generous timeout: the Windows branch spawns powershell.exe for DPAPI probes/round-trips
+// (slow cold-start, and starved under parallel CI load), which overruns the 5s default.
+test(
+  "auto selection matches the platform's real capability",
+  () => {
+    const { p, home } = freshPaths();
+    const store = createSecretStore(p, {}); // auto
+    const info = store.describe();
+    if (process.platform === "win32" && DpapiSecretStore.isAvailable()) {
+      // Windows with DPAPI: a real, keyless-on-disk secure backend.
       expect(store.backend).toBe("windows-dpapi");
+      expect(info.secure).toBe(true);
+      store.set("k", "dpapi-secret");
+      expect(store.get("k")).toBe("dpapi-secret"); // real DPAPI round-trip
+    } else {
+      // No native secure storage available yet on this platform: fall back honestly.
+      expect(store.backend).toBe("encrypted-file");
+      expect(info.secure).toBe(false);
     }
-  } else {
-    // macOS/Linux: dpapi is not real here, so selecting it must throw — never
-    // silently degrade to a fake "secure" backend.
-    expect(() => createSecretStore(p, { CTX_SECRET_BACKEND: "dpapi" })).toThrow();
-  }
-  rmSync(home, { recursive: true, force: true });
-});
+    rmSync(home, { recursive: true, force: true });
+  },
+  30_000,
+);
+
+test(
+  "requesting DPAPI where it is unavailable fails loudly rather than pretending",
+  () => {
+    const { p, home } = freshPaths();
+    if (process.platform === "win32") {
+      if (DpapiSecretStore.isAvailable()) {
+        const store = createSecretStore(p, { CTX_SECRET_BACKEND: "dpapi" });
+        expect(store.backend).toBe("windows-dpapi");
+      }
+    } else {
+      // macOS/Linux: dpapi is not real here, so selecting it must throw — never
+      // silently degrade to a fake "secure" backend.
+      expect(() => createSecretStore(p, { CTX_SECRET_BACKEND: "dpapi" })).toThrow();
+    }
+    rmSync(home, { recursive: true, force: true });
+  },
+  30_000,
+);

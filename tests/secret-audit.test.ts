@@ -89,27 +89,38 @@ test("FileSecretStore round-trips the value but HONESTLY reports it is not OS-se
   }
 });
 
-test("secret backend selection is explicit and platform-honest", () => {
-  const t = makeTestContext();
-  try {
-    const paths = resolvePaths({ CTX_HOME: t.dir });
-    // Forced file backend everywhere.
-    expect(createSecretStore(paths, { CTX_SECRET_BACKEND: "file" } as NodeJS.ProcessEnv).backend).toBe("encrypted-file");
+// Generous timeout: on Windows, DPAPI availability is probed by SPAWNING powershell.exe
+// (twice per `isAvailable()` — Protect + Unprotect), which is slow to cold-start and can
+// be starved well past the 5s default when the heavy packed-acceptance test runs in
+// parallel on a CI runner. The probe is computed ONCE here to minimize PowerShell spawns.
+test(
+  "secret backend selection is explicit and platform-honest",
+  () => {
+    const t = makeTestContext();
+    try {
+      const paths = resolvePaths({ CTX_HOME: t.dir });
+      // Forced file backend everywhere.
+      expect(createSecretStore(paths, { CTX_SECRET_BACKEND: "file" } as NodeJS.ProcessEnv).backend).toBe("encrypted-file");
 
-    // auto: DPAPI on Windows when available, else encrypted-file. Report what THIS host does.
-    const auto = createSecretStore(paths, { CTX_SECRET_BACKEND: "auto" } as NodeJS.ProcessEnv);
-    if (process.platform === "win32" && DpapiSecretStore.isAvailable()) {
-      expect(auto.describe().secure).toBe(true); // DPAPI is OS-secure
-    } else {
-      expect(auto.backend).toBe("encrypted-file");
-      expect(auto.describe().secure).toBe(false);
-    }
+      // Probe DPAPI availability ONCE (each call spawns PowerShell on Windows).
+      const dpapiAvailable = process.platform === "win32" && DpapiSecretStore.isAvailable();
 
-    // Forcing dpapi on a non-Windows / unavailable host must THROW, not fake security.
-    if (!(process.platform === "win32" && DpapiSecretStore.isAvailable())) {
-      expect(() => createSecretStore(paths, { CTX_SECRET_BACKEND: "dpapi" } as NodeJS.ProcessEnv)).toThrow();
+      // auto: DPAPI on Windows when available, else encrypted-file. Report what THIS host does.
+      const auto = createSecretStore(paths, { CTX_SECRET_BACKEND: "auto" } as NodeJS.ProcessEnv);
+      if (dpapiAvailable) {
+        expect(auto.describe().secure).toBe(true); // DPAPI is OS-secure
+      } else {
+        expect(auto.backend).toBe("encrypted-file");
+        expect(auto.describe().secure).toBe(false);
+      }
+
+      // Forcing dpapi on a non-Windows / unavailable host must THROW, not fake security.
+      if (!dpapiAvailable) {
+        expect(() => createSecretStore(paths, { CTX_SECRET_BACKEND: "dpapi" } as NodeJS.ProcessEnv)).toThrow();
+      }
+    } finally {
+      t.cleanup();
     }
-  } finally {
-    t.cleanup();
-  }
-});
+  },
+  30_000,
+);

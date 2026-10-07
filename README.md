@@ -4,7 +4,7 @@
 
 Local developer memory shared across repos and between coding agents.
 
-**Your coding preferences are not owned by one agent.** They live in a local store and
+**Cross-repo, cross-agent.** Your coding preferences live in a local store and
 reach whichever agent you're using.
 
 > "You know what's funny? GOATS!" — Goat Simulator
