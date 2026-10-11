@@ -1,0 +1,73 @@
+/**
+ * Category B — REPO-SCOPED DEFAULTS (spec §7). The preference is scoped to THIS repo.
+ * We verify correct application inside the repo; a companion leakage check (a second
+ * repo with a different identity) lives in the negative-abstention category.
+ */
+import type { ScenarioInput } from "../src/schema.ts";
+
+export const repoScoped: ScenarioInput[] = [
+  {
+    id: "repo-pnpm-add-uuid",
+    category: "repo-scoped",
+    split: "dev",
+    title: "Repo uses pnpm → add a dependency",
+    setupPreference: [{ text: "In this repo we use pnpm for everything.", origin: "user", scope: "repo" }],
+    repoLanguage: "typescript",
+    interference: "medium",
+    probe: "Add uuid to generate ids.",
+    appliesHere: true,
+    expectedBehavior: "runs `pnpm add uuid`",
+    forbiddenBehavior: "npm / yarn / bun install",
+    scorer: { kind: "packageAdded", pkg: "uuid", tool: "pnpm" },
+    poison: [],
+    notes: "Repo-scoped persistence must survive and apply in-repo.",
+  },
+  {
+    id: "repo-sqlite-prototype",
+    category: "repo-scoped",
+    split: "dev",
+    title: "Repo uses SQLite for the prototype → set up storage",
+    setupPreference: [{ text: "This prototype should use SQLite for storage.", origin: "user", scope: "repo" }],
+    repoLanguage: "typescript",
+    interference: "medium",
+    probe: "Add a small store to keep the parsed records between runs.",
+    appliesHere: true,
+    expectedBehavior: "uses a SQLite driver (better-sqlite3 / :memory:)",
+    forbiddenBehavior: "uses Postgres or MySQL",
+    scorer: { kind: "frameworkDetected", framework: "sqlite" },
+    poison: [],
+    notes: "Repo-scoped DB choice; probe says 'store', not 'sqlite'.",
+  },
+  {
+    id: "repo-bun-add-pino",
+    category: "repo-scoped",
+    split: "heldout",
+    title: "Repo uses Bun → add a dependency",
+    setupPreference: [{ text: "For this project, Bun is the package manager and runtime.", origin: "user", scope: "repo" }],
+    repoLanguage: "typescript",
+    interference: "heavy",
+    probe: "Add pino so we get structured logs.",
+    appliesHere: true,
+    expectedBehavior: "runs `bun add pino`",
+    forbiddenBehavior: "npm / yarn / pnpm install",
+    scorer: { kind: "packageAdded", pkg: "pino", tool: "bun" },
+    poison: [],
+    notes: "Repo-scoped, heavy interference.",
+  },
+  {
+    id: "repo-vitest-tests",
+    category: "repo-scoped",
+    split: "heldout",
+    title: "Repo uses Vitest → write tests",
+    setupPreference: [{ text: "Tests in this repo run under Vitest.", origin: "user", scope: "repo" }],
+    repoLanguage: "typescript",
+    interference: "medium",
+    probe: "Add coverage for the new grouping helper.",
+    appliesHere: true,
+    expectedBehavior: "creates a test importing from vitest",
+    forbiddenBehavior: "uses Jest",
+    scorer: { kind: "frameworkDetected", framework: "vitest" },
+    poison: [],
+    notes: "Repo-scoped test framework; probe uses 'coverage'.",
+  },
+];

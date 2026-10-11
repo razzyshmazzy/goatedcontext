@@ -19,7 +19,7 @@ import type { Condition } from "../preferences/conditions.ts";
 import { buildRuntimeContext, type RuntimeContext } from "./runtime-context.ts";
 import { evaluateCondition } from "./evaluate.ts";
 import type { SignalService } from "../signals/service.ts";
-import { taskSignalDomains } from "../signals/domains.ts";
+import { taskSignalDomains, collectDomainsFromText, canonicalDomain } from "../signals/domains.ts";
 import {
   selectRelevantSignalEvidence,
   DEFAULT_SIGNAL_EVIDENCE_BUDGET,
@@ -386,7 +386,10 @@ export class RetrievalEngine {
       const effectiveRelevant = scoredRelevant
         .filter((s) => winnerIds.has(s.pref.id))
         .sort(
-          (a, b) => b.relevance - a.relevance || precedenceRank(a.pref) - precedenceRank(b.pref),
+          (a, b) =>
+            b.relevance - a.relevance ||
+            precedenceRank(a.pref) - precedenceRank(b.pref) ||
+            a.pref.id.localeCompare(b.pref.id),
         );
       const keptRelevant = effectiveRelevant.slice(0, limit);
       const omittedByRelevanceLimit = effectiveRelevant.length - keptRelevant.length;
@@ -528,6 +531,12 @@ export class RetrievalEngine {
 
     const taskTerms = new Set(contentTokens(task));
     const taskDomains = inferDomains(task);
+    // Also consider the canonical task-domain set (classifier ∪ alias ∪ intent triggers).
+    // This is the SAME inference that already gates signal surfacing; wiring it into
+    // relevance scoring closes the gap where task-intent language the raw classifier does
+    // not cover ("initialize this project", "set up dependencies", aliased domain spellings)
+    // failed to match a legitimately-relevant preference. Purely additive — see domainMatch.
+    const taskCanonicalDomains = collectDomainsFromText(task);
     const idf = this.buildIdf(candidates);
 
     const denom =
@@ -544,7 +553,12 @@ export class RetrievalEngine {
       for (const t of taskTerms) if (prefTerms.has(t)) shared += idf.get(t) ?? DEFAULT_IDF;
       const overlap = shared / denom;
 
-      const domainMatch = pref.domain != null && taskDomains.has(pref.domain);
+      // Match on the raw classifier domain (unchanged) OR the canonical task-domain set
+      // (new). The canonical path only ADDS matches (it never removes a raw match), so this
+      // strictly increases recall for intent-worded tasks and cannot drop an existing match.
+      const domainMatch =
+        pref.domain != null &&
+        (taskDomains.has(pref.domain) || taskCanonicalDomains.has(canonicalDomain(pref.domain)));
       const categoryMatch =
         taskTerms.has(stem(pref.category)) || taskDomains.has(pref.category);
 

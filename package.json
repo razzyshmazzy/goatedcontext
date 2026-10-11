@@ -49,6 +49,11 @@
     "bench": "bun run scripts/bench/diagnostics.ts",
     "stress": "bun run scripts/stress.ts",
     "smoke:mcp": "bun run scripts/smoke/mcp.ts",
+    "bench:memory": "bun run benchmarks/developer-memory/src/cli.ts run",
+    "bench:memory:demo": "bun run benchmarks/developer-memory/src/cli.ts demo",
+    "bench:memory:full": "bun run benchmarks/developer-memory/src/cli.ts full",
+    "bench:memory:check": "bun test ./benchmarks/developer-memory/tests/ctx-participation.check.ts",
+    "bench:memory:typecheck": "tsc --noEmit -p benchmarks/developer-memory/tsconfig.json",
     "typecheck": "tsc --noEmit",
     "prepack": "bun run build",
     "prepublishOnly": "bun run typecheck && bun test && bun run build"
