@@ -52,3 +52,35 @@ test("false-positive guard: an unrelated task surfaces NO package-manager prefer
   }
   t.cleanup();
 });
+
+// ---- F3: dependency-acquisition intent delivers the package-manager pref ----
+
+test("a terse 'add <pkg>' task surfaces a package-manager preference (F3)", () => {
+  const t = makeTestContext();
+  t.ctx.preferences.remember({ rule: PM, category: "dependencies", scope: "global" });
+  for (const task of [
+    "Add uuid to generate ids.", // no package manager named; names a package
+    "Pull in dayjs so we can format timestamps.",
+    "Add nanoid.",
+    "Install the redis client.",
+  ]) {
+    const result = t.ctx.retrieval.retrieve({ cwd: process.cwd(), task });
+    expect(rules(result)).toContain(PM);
+  }
+  t.cleanup();
+});
+
+test("F3 false-positive guard: non-install 'add X' work surfaces NO package-manager pref", () => {
+  const t = makeTestContext();
+  t.ctx.preferences.remember({ rule: PM, category: "dependencies", scope: "global" });
+  for (const task of [
+    "Add a button to the settings page.",
+    "Add logging to the request handler.",
+    "Add validation for the signup form.",
+    "Pull in the latest changes from main.",
+  ]) {
+    const result = t.ctx.retrieval.retrieve({ cwd: process.cwd(), task });
+    expect(rules(result)).not.toContain(PM);
+  }
+  t.cleanup();
+});
