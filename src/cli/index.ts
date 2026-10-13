@@ -1078,9 +1078,12 @@ export function buildProgram(deps: CliDeps): Command {
     });
 
   // ---- get ----------------------------------------------------------------
+  // The human-facing / Claude pull path. READ-ONLY (track:false): a proactive
+  // retrieval must never mutate memory (no markUsed write, no provenance change),
+  // matching `ctx agent context` and the MCP get_context tool (spec §7).
   program
     .command("get")
-    .description("Retrieve relevance-filtered, conflict-resolved context (JSON).")
+    .description("Retrieve relevance-filtered, conflict-resolved context (JSON). Read-only.")
     .option("--cwd <dir>", "Working directory", process.cwd())
     .option("--task <text>", "Description of the current task")
     .option("--limit <n>", "Max preferences to return (1-15)", strictIntOption("--limit", { min: 1 }))
@@ -1093,6 +1096,7 @@ export function buildProgram(deps: CliDeps): Command {
             task: opts.task,
             limit: opts.limit,
             includeProposed: Boolean(opts.includeProposed),
+            track: false,
           }),
         );
       });

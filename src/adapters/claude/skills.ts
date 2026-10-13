@@ -9,6 +9,10 @@
  * Cursor skills, so all agents learn the identical remember/propose/forget policy.
  */
 import { renderSkillMd } from "../../core/assets/memory-protocol.ts";
+import { renderPullGuidance } from "../../core/assets/retrieval-policy.ts";
+
+/** Claude's concrete read-only pull invocation (the CLI `ctx get`). */
+const CLAUDE_PULL_ACTION = 'run `ctx get --cwd "$PWD" --task "<concise task>"`';
 
 export interface SkillDefinition {
   /** Directory name under the Claude skills folder. */
@@ -38,28 +42,25 @@ Use this skill BEFORE any consequential engineering decision, including:
 - testing strategy
 - other significant implementation choices
 
-## Automatic retrieval (default)
+## Automatic retrieval (push)
 
-Relevant developer context is usually injected for you automatically: a
+Relevant developer context is often injected for you automatically: a
 \`ctx\` prompt hook runs on each user message and, when it finds relevant
 preferences, prepends a \`<ctx-developer-context>\` block to the conversation.
 When you see that block, it is authoritative — apply it. If a repo preference and
-a global preference conflict, the repo preference wins. If no block appears, there
-was no relevant stored guidance for this turn; proceed normally.
+a global preference conflict, the repo preference wins.
 
-## Manual retrieval (refresh / special cases)
+## Proactive retrieval (pull)
 
-You normally do NOT need to call \`ctx get\` yourself, because the hook already did.
-Call it manually only to refresh after the task changes substantially, to look up a
-different task than the user's prompt, or when debugging:
+The push path above catches the obvious cases, but it can miss context for terse or
+oblique tasks. So when a decision could depend on established context and it was NOT
+already injected this turn, retrieve it yourself:
 
-\`\`\`bash
-ctx get --cwd "$PWD" --task "<brief description of the current task>"
-\`\`\`
+${renderPullGuidance({ action: CLAUDE_PULL_ACTION })}
 
-It returns concise JSON (repo, relevance-filtered conflict-resolved preferences,
-available environments). It is read-only and safe to call anytime. Never ask \`ctx\`
-for secrets — it does not return them, by design.
+\`ctx get\` returns concise JSON (repo, relevance-filtered conflict-resolved
+preferences, available environments). Never ask \`ctx\` for secrets — it does not
+return them, by design.
 `;
 
 const CONTEXT_LEARN_SKILL = renderSkillMd({ name: "context-learn" });
@@ -144,8 +145,15 @@ Persistent developer preferences are retrieved for you automatically.
   every turn) plus any preferences relevant to the current task. Treat that block
   as authoritative and apply it before making engineering decisions. Repository
   rules override global ones.
-- You normally do NOT need to call \`ctx get\` yourself — it already ran. Use the
-  \`context\` skill only to refresh or look up a different task.
+- That automatic push can miss context for terse or oblique tasks. So before a
+  choice that could reasonably depend on how this developer or repository usually
+  works — a dependency, test framework, data store, language/runtime, formatter,
+  convention, or architecture decision — and when that context was not already
+  injected this turn, retrieve it yourself: run
+  \`ctx get --cwd "$PWD" --task "<concise task>"\` (read-only, safe anytime). Do not
+  query for requests that clearly do not depend on developer/project context
+  (general factual questions, explaining a concept or error), and do not re-fetch
+  context you were already given. The \`context\` skill has the full boundary.
 - When the user states, changes, or revokes a durable coding preference or project
   convention, use the \`context-learn\` skill. It tells you when to persist an
   explicit preference (\`ctx remember\`), when to merely propose an inferred one

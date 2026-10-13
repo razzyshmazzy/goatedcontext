@@ -54,6 +54,10 @@
     "bench:memory:full": "bun run benchmarks/developer-memory/src/cli.ts full",
     "bench:memory:check": "bun test ./benchmarks/developer-memory/tests/ctx-participation.check.ts",
     "bench:memory:typecheck": "tsc --noEmit -p benchmarks/developer-memory/tsconfig.json",
+    "bench:pull:deterministic": "bun run benchmarks/autonomous-pull/cli.ts deterministic",
+    "bench:pull:pilot": "bun run benchmarks/autonomous-pull/cli.ts pilot",
+    "bench:pull:check": "bun test ./benchmarks/autonomous-pull/tests/score.test.ts",
+    "bench:pull:typecheck": "tsc --noEmit -p benchmarks/autonomous-pull/tsconfig.json",
     "typecheck": "tsc --noEmit",
     "prepack": "bun run build",
     "prepublishOnly": "bun run typecheck && bun test && bun run build"
