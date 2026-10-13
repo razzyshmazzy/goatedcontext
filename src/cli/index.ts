@@ -601,8 +601,8 @@ export function buildProgram(deps: CliDeps): Command {
     const cmd = parent.command("remember");
     cmd.description(
       mode === "agent"
-        ? "Agent memory write: record a preference (requires --origin; fails closed without it)."
-        : "Explicitly record a developer preference (approved immediately).",
+        ? "Autonomous coding-agent memory write — the provenance-safe surface for agents (requires --origin; fails closed; auto-approved where ctx's agent permissions are installed). Agents MUST use this, not `ctx remember`."
+        : "Record a developer preference interactively (human use; approved immediately). Coding agents must use `ctx agent remember` instead.",
     );
     applyRememberOptions(cmd);
     cmd.action((rule, opts) => {
@@ -677,8 +677,8 @@ export function buildProgram(deps: CliDeps): Command {
     const cmd = parent.command("propose");
     cmd.description(
       mode === "agent"
-        ? "Agent memory write: propose a preference from USER evidence (requires --origin; fails closed)."
-        : "Propose a preference inferred by an agent (needs review to take effect).",
+        ? "Autonomous coding-agent memory write — propose an inferred preference from USER evidence (requires --origin; fails closed; auto-approved where ctx's agent permissions are installed). Agents MUST use this, not `ctx propose`."
+        : "Propose an inferred preference interactively (human use; needs review to take effect). Coding agents must use `ctx agent propose` instead.",
     );
     applyProposeOptions(cmd);
     cmd.action((rule, opts) => {
@@ -1641,8 +1641,8 @@ export function buildProgram(deps: CliDeps): Command {
     const cmd = parent.command("add");
     cmd.description(
       mode === "agent"
-        ? "Agent memory write: record a decision signal (requires --origin; fails closed)."
-        : "Record one decision signal, e.g. `ctx signal add --domain backend --choice supabase`.",
+        ? "Autonomous coding-agent memory write — record a decision signal (requires --origin; fails closed; auto-approved where ctx's agent permissions are installed). Agents MUST use this, not `ctx signal add`."
+        : "Record one decision signal interactively (human use), e.g. `ctx signal add --domain backend --choice supabase`. Coding agents must use `ctx agent signal add` instead.",
     );
     applySignalAddOptions(cmd);
     cmd.action((opts) => {

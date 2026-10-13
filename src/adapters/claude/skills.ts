@@ -10,6 +10,7 @@
  */
 import { renderSkillMd } from "../../core/assets/memory-protocol.ts";
 import { renderPullGuidance } from "../../core/assets/retrieval-policy.ts";
+import { SAVE_POLICY_CORE } from "../../core/assets/save-policy.ts";
 
 /** Claude's concrete read-only pull invocation (the CLI `ctx get`). */
 const CLAUDE_PULL_ACTION = 'run `ctx get --cwd "$PWD" --task "<concise task>"`';
@@ -154,11 +155,17 @@ Persistent developer preferences are retrieved for you automatically.
   query for requests that clearly do not depend on developer/project context
   (general factual questions, explaining a concept or error), and do not re-fetch
   context you were already given. The \`context\` skill has the full boundary.
-- When the user states, changes, or revokes a durable coding preference or project
-  convention, use the \`context-learn\` skill. It tells you when to persist an
-  explicit preference (\`ctx remember\`), when to merely propose an inferred one
-  (\`ctx propose\`), and how to retract one (\`ctx forget\`) — so the user never has
-  to run \`ctx\` by hand. One-off task instructions are NOT stored.
+- Save developer context the user authors, without being asked. ${SAVE_POLICY_CORE}
+  Write ONLY through the ctx AGENT surface with \`--origin user\` — it is the
+  provenance-safe path and the ONLY one ctx's installed permissions auto-approve;
+  the bare human \`ctx remember\`/\`propose\`/\`signal add\` are NOT auto-approved and
+  will interrupt for permission, so never use them for an autonomous save. Use
+  \`ctx agent remember --origin user\` for a durable preference (a terse standalone line
+  like "Stick to pnpm in this repo." still counts — persist it, then continue) and
+  \`ctx agent signal add --origin user\` for a one-off decision. A durable correction
+  becomes the new authoritative rule — persist it (ctx reconciles exclusive choices by
+  precedence; use \`context-learn\` to retract a contradicted rule); a temporary override
+  never replaces a durable default. The \`context-learn\` skill has the full protocol.
 - If the user asks to see goatedcontext/ctx usage stats (e.g. "show my ctx stats",
   "how often has ctx helped", "how many times has ctx injected preferences"), run
   \`ctx stats\` and show the result rather than estimating from memory. Only when

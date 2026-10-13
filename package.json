@@ -58,6 +58,10 @@
     "bench:pull:pilot": "bun run benchmarks/autonomous-pull/cli.ts pilot",
     "bench:pull:check": "bun test ./benchmarks/autonomous-pull/tests/score.test.ts",
     "bench:pull:typecheck": "tsc --noEmit -p benchmarks/autonomous-pull/tsconfig.json",
+    "bench:save:deterministic": "bun run benchmarks/autonomous-save/cli.ts deterministic",
+    "bench:save:pilot": "bun run benchmarks/autonomous-save/cli.ts pilot",
+    "bench:save:check": "bun test ./benchmarks/autonomous-save/tests/score.test.ts",
+    "bench:save:typecheck": "tsc --noEmit -p benchmarks/autonomous-save/tsconfig.json",
     "typecheck": "tsc --noEmit",
     "prepack": "bun run build",
     "prepublishOnly": "bun run typecheck && bun test && bun run build"

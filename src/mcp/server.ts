@@ -4,6 +4,7 @@ import { z } from "zod";
 import { CtxContext } from "../core/context.ts";
 import { buildContextEnvelope } from "../core/agents/envelope.ts";
 import { GET_CONTEXT_TOOL_DESCRIPTION, MCP_SERVER_INSTRUCTIONS } from "../core/assets/retrieval-policy.ts";
+import { SAVE_POLICY_MCP } from "../core/assets/save-policy.ts";
 import { isCanonicalDomain } from "../core/signals/domains.ts";
 import { CtxError } from "../utils/errors.ts";
 import { shortId } from "../utils/id.ts";
@@ -69,7 +70,7 @@ function repoIdForScope(ctx: CtxContext, scope: Scope, cwd: string): string | nu
 export function createMcpServer(ctx: CtxContext): McpServer {
   const server = new McpServer(
     { name: "goatedcontext", version: VERSION },
-    { instructions: MCP_SERVER_INSTRUCTIONS },
+    { instructions: `${MCP_SERVER_INSTRUCTIONS} ${SAVE_POLICY_MCP}` },
   );
 
   const defaultCwd = () => process.cwd();
