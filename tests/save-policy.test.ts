@@ -160,7 +160,11 @@ describe("human write commands still exist (not removed) (§2,§9)", () => {
     } finally {
       t.cleanup();
     }
-  });
+    // Spawns a cold `bun` subprocess (process start + SQLite open/migration). Completes
+    // in <1s standalone, but under full-suite parallel subprocess contention it can
+    // exceed bun's 5s default. The inner spawnSync is already bounded at 30s; give the
+    // test the matching headroom so a slow-but-correct run isn't a false timeout.
+  }, 15_000);
 });
 
 describe("save safety — provenance (only user origin is authoritative)", () => {
