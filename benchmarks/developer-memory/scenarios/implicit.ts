@@ -1,0 +1,73 @@
+/**
+ * Category E — IMPLICIT APPLICATION (spec §10), the most important category. The probe
+ * is an ordinary task; it never asks "what do I prefer?" and never names the preference.
+ * We measure whether memory changes behavior NATURALLY.
+ */
+import type { ScenarioInput } from "../src/schema.ts";
+
+export const implicit: ScenarioInput[] = [
+  {
+    id: "implicit-bun-scaffold",
+    category: "implicit",
+    split: "dev",
+    title: "Prefer Bun → implicit during scaffolding",
+    setupPreference: [{ text: "Bun is my default for JS/TS tooling.", origin: "user", scope: "global" }],
+    repoLanguage: "typescript",
+    interference: "medium",
+    probe: "We need date handling — bring in dayjs.",
+    appliesHere: true,
+    expectedBehavior: "installs dayjs with Bun",
+    forbiddenBehavior: "npm / yarn / pnpm install",
+    scorer: { kind: "packageAdded", pkg: "dayjs", tool: "bun" },
+    poison: [],
+    notes: "No mention of package managers in the probe at all.",
+  },
+  {
+    id: "implicit-vitest-coverage",
+    category: "implicit",
+    split: "dev",
+    title: "Prefer Vitest → implicit when asked for coverage",
+    setupPreference: [{ text: "I like Vitest for testing.", origin: "user", scope: "global" }],
+    repoLanguage: "typescript",
+    interference: "heavy",
+    probe: "The parser module has no tests yet. Add some.",
+    appliesHere: true,
+    expectedBehavior: "adds Vitest tests",
+    forbiddenBehavior: "uses Jest",
+    scorer: { kind: "frameworkDetected", framework: "vitest" },
+    poison: [],
+    notes: "v1.1: probe now clearly requests tests (old 'safety net' wording was misread as runtime guards) while leaving the framework unnamed. Preference stays `relevant`-applicability (NOT converted to always) so this still exercises F3 delivery honestly.",
+  },
+  {
+    id: "implicit-postgres-store",
+    category: "implicit",
+    split: "heldout",
+    title: "Prefer Postgres → implicit when adding storage",
+    setupPreference: [{ text: "Relational data goes in Postgres for me.", origin: "user", scope: "global" }],
+    repoLanguage: "typescript",
+    interference: "medium",
+    probe: "Orders need to survive a restart — give them a home.",
+    appliesHere: true,
+    expectedBehavior: "uses Postgres",
+    forbiddenBehavior: "uses MySQL or SQLite without reason",
+    scorer: { kind: "frameworkDetected", framework: "postgres" },
+    poison: [],
+    notes: "'survive a restart' = persistence; indirect phrasing.",
+  },
+  {
+    id: "implicit-ts-helper",
+    category: "implicit",
+    split: "heldout",
+    title: "Prefer TypeScript → implicit helper",
+    setupPreference: [{ text: "TypeScript is my default language.", origin: "user", scope: "global" }],
+    repoLanguage: "typescript",
+    interference: "medium",
+    probe: "Throw together a utility that counts log lines by severity.",
+    appliesHere: true,
+    expectedBehavior: "creates a .ts file",
+    forbiddenBehavior: "creates a .js file",
+    scorer: { kind: "all", scorers: [{ kind: "fileExtension", anyOf: ["ts"] }, { kind: "fileExtensionNotAnyOf", noneOf: ["js"] }] },
+    poison: [],
+    notes: "'throw together a utility' triggers script action.",
+  },
+];

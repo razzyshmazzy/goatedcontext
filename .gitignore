@@ -14,3 +14,6 @@ coverage/
 
 # Never commit a real ctx home
 .ctx/
+
+# Benchmark run outputs (raw results are regenerated; never committed by default)
+benchmarks/results/

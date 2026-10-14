@@ -1,0 +1,73 @@
+/**
+ * Category C — CONDITIONAL PREFERENCES (spec §8). Each conditional preference is tested
+ * BOTH where the condition matches (apply it) and where it does not (do NOT apply —
+ * applying it there is a false positive and scored as a failure).
+ */
+import type { ScenarioInput } from "../src/schema.ts";
+
+export const conditional: ScenarioInput[] = [
+  {
+    id: "cond-sqlite-prototype-match",
+    category: "conditional",
+    split: "dev",
+    title: "SQLite for prototypes, Postgres for production — prototype branch",
+    setupPreference: [{ text: "Use SQLite for prototypes and Postgres for production.", origin: "user", scope: "global", when: "the work is a prototype" }],
+    repoLanguage: "typescript",
+    interference: "medium",
+    probe: "We're hacking a throwaway prototype this afternoon — give it somewhere to keep records.",
+    appliesHere: true,
+    expectedBehavior: "uses SQLite (prototype branch)",
+    forbiddenBehavior: "uses Postgres (that is the production branch)",
+    scorer: { kind: "frameworkDetected", framework: "sqlite" },
+    poison: [],
+    notes: "Condition matches the prototype branch.",
+  },
+  {
+    id: "cond-sqlite-prototype-nomatch",
+    category: "conditional",
+    split: "dev",
+    title: "SQLite for prototypes, Postgres for production — production branch",
+    setupPreference: [{ text: "Use SQLite for prototypes and Postgres for production.", origin: "user", scope: "global", when: "the work is production" }],
+    repoLanguage: "typescript",
+    interference: "medium",
+    probe: "This is the production service that ships Monday — wire up its primary datastore.",
+    appliesHere: false,
+    expectedBehavior: "uses Postgres (production branch), NOT SQLite",
+    forbiddenBehavior: "uses SQLite in production",
+    scorer: { kind: "noForbiddenChoice", forbidden: ["sqlite", "better-sqlite3"] },
+    poison: [],
+    notes: "Same preference, production branch — SQLite would be a false positive.",
+  },
+  {
+    id: "cond-tailwind-web-match",
+    category: "conditional",
+    split: "heldout",
+    title: "Tailwind for web UI — web branch",
+    setupPreference: [{ text: "Use Tailwind for web UI, but not for native apps.", origin: "user", scope: "global", when: "building web UI" }],
+    repoLanguage: "typescript",
+    interference: "light",
+    probe: "Add a styled call-to-action button to the marketing web dashboard.",
+    appliesHere: true,
+    expectedBehavior: "uses Tailwind utility classes",
+    forbiddenBehavior: "hand-rolled CSS when Tailwind applies",
+    scorer: { kind: "frameworkDetected", framework: "tailwind" },
+    poison: [],
+    notes: "Mock marks this unsupported (no web/native dimension); real agents score it.",
+  },
+  {
+    id: "cond-tailwind-native-nomatch",
+    category: "conditional",
+    split: "heldout",
+    title: "Tailwind for web UI — native branch",
+    setupPreference: [{ text: "Use Tailwind for web UI, but not for native apps.", origin: "user", scope: "global", when: "building a native app" }],
+    repoLanguage: "typescript",
+    interference: "light",
+    probe: "Style the settings screen in the React Native mobile app.",
+    appliesHere: false,
+    expectedBehavior: "does NOT reach for Tailwind (native branch)",
+    forbiddenBehavior: "applies Tailwind to a native app",
+    scorer: { kind: "noForbiddenChoice", forbidden: ["tailwind", "@tailwind"] },
+    poison: [],
+    notes: "Native branch — Tailwind would be a false positive.",
+  },
+];

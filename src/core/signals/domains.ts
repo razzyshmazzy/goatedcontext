@@ -94,6 +94,91 @@ export const DOMAIN_TRIGGERS: Record<string, string[]> = {
   ],
 };
 
+/**
+ * DEPENDENCY-ACQUISITION intent (F3). Terse coding requests — "add uuid", "pull in
+ * dayjs", "install the redis client" — are *exactly* when a stored package-manager
+ * preference ("use pnpm") is relevant, yet they name no package manager and the
+ * preference classifier infers at most `dependency-policy`, never `package-manager`.
+ * So the pref gets no domain match and falls below the relevance threshold (the F3
+ * delivery miss observed on the v1.1 benchmark).
+ *
+ * This recognizes the ACTION of bringing an external dependency into the project —
+ * never specific package names (a package-name list is unmaintainable and spec §52
+ * forbids scenario-specific vocabulary). It is deliberately CONSERVATIVE so ordinary
+ * feature work ("add a button", "add caching", "add validation for the form") and the
+ * innocent phrasal uses ("pull in the latest changes") do NOT fire. Pure/deterministic.
+ */
+const ACQUIRE_VERBS = new Set([
+  "add", "adds", "adding", "install", "installs", "installing", "vendor", "vendoring",
+]);
+const ACQUIRE_PHRASALS = ["pull in", "bring in", "depend on", "pulling in", "bringing in"];
+/** Determiners marking the object as an in-place feature, not a bare package name. */
+const OBJECT_DETERMINERS = new Set([
+  "a", "an", "the", "some", "this", "that", "these", "those", "our", "your", "their",
+  "its", "each", "every", "another", "no", "more", "all",
+]);
+/** Common objects of "pull in"/"bring in" that are NOT packages (VCS / people / generic). */
+const NON_PACKAGE_OBJECTS = new Set([
+  "change", "latest", "update", "code", "team", "everyone", "help", "main", "master",
+  "branch", "commit", "pr", "feedback", "data", "everything", "file", "work",
+]);
+/** Dependency nouns that, with an acquisition verb, make install intent explicit. */
+const DEP_NOUN_STEMS = new Set(["dependenc", "package", "librar", "lib", "plugin", "sdk"]);
+
+/** First non-determiner word of a token list (the likely head/object). */
+function firstObjectWord(words: string[]): string | undefined {
+  for (const w of words) if (!OBJECT_DETERMINERS.has(w)) return w;
+  return undefined;
+}
+
+/** True when a single word is itself a recognized decision-domain keyword. */
+function isDomainWord(word: string): boolean {
+  return inferDomains(word).size > 0;
+}
+
+/** Whether a task expresses dependency-acquisition intent (see block comment above). */
+export function dependencyAcquisitionIntent(text: string): boolean {
+  const phrase = phraseForm(text); // " add uuid to generate ids "
+  const words = phrase.trim().split(" ").filter(Boolean);
+  if (words.length === 0) return false;
+
+  // (1) Phrasal acquisition verb ("pull in dayjs") — unless its object is a well-known
+  // non-package (VCS/people/generic), the exact place these phrasals innocently appear.
+  for (const pv of ACQUIRE_PHRASALS) {
+    const at = phrase.indexOf(` ${pv} `);
+    if (at === -1) continue;
+    const rest = phrase.slice(at + pv.length + 1).trim().split(" ").filter(Boolean);
+    const obj = firstObjectWord(rest);
+    if (obj && !NON_PACKAGE_OBJECTS.has(stem(obj))) return true;
+  }
+
+  // (2) Explicit install vocabulary: the verb "install", or an acquisition verb together
+  // with a dependency noun ("add a <library/package/dependency>").
+  const tokens = new Set(contentTokens(text));
+  if (tokens.has(stem("install"))) return true;
+  if (words.some((w) => ACQUIRE_VERBS.has(w)) && [...tokens].some((t) => DEP_NOUN_STEMS.has(t))) {
+    return true;
+  }
+
+  // (3) Terse "add <bare-name> …": a single-verb acquisition whose immediate object is a
+  // bare token (no determiner) that is NOT itself a known decision-domain word (so
+  // "add caching / coverage / a button" route to their own domains), followed by a
+  // purpose/benefit clause or the end of the request. A following "to/for/as the …"
+  // (determiner) is a destination/feature spec, not acquisition, so it does not fire.
+  for (let i = 0; i < words.length; i++) {
+    if (!ACQUIRE_VERBS.has(words[i]!)) continue;
+    const obj = words[i + 1];
+    if (!obj || obj.length < 2 || OBJECT_DETERMINERS.has(obj) || isDomainWord(obj)) continue;
+    const w2 = words[i + 2];
+    if (w2 === undefined) return true; // "Add nanoid." — bare object at end
+    if (w2 === "so") return true; // "Add pino so we get structured logs."
+    if ((w2 === "to" || w2 === "for" || w2 === "as") && words[i + 3] && !OBJECT_DETERMINERS.has(words[i + 3]!)) {
+      return true; // "to generate ids" / "for colored output" — purpose/benefit, not "to the X"
+    }
+  }
+  return false;
+}
+
 /** Canonicalize any raw/normalized domain token to its shared canonical form. */
 export function canonicalDomain(raw: string): string {
   const n = normalizeDomain(raw);
@@ -195,6 +280,10 @@ export function collectDomainsFromText(text: string): Set<string> {
       }
     }
   }
+  // Dependency-acquisition tasks ("add uuid", "pull in dayjs") implicate the
+  // package-manager decision even when they name no package manager (F3). Additive and
+  // deterministic — see `dependencyAcquisitionIntent`.
+  if (dependencyAcquisitionIntent(text)) out.add("package-manager");
   return out;
 }
 

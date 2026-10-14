@@ -8,6 +8,8 @@ import {
   DOMAIN_ALIASES,
   canonicalDomain,
   classifyDomain,
+  collectDomainsFromText,
+  dependencyAcquisitionIntent,
   isCanonicalDomain,
 } from "../src/core/signals/domains.ts";
 import { KNOWN_DOMAINS } from "../src/core/preferences/analysis.ts";
@@ -99,6 +101,41 @@ test("C: a custom domain is retrievable when a task explicitly matches it", () =
     expect(patterns.some((p) => p.choices.some((c) => c.label.toLowerCase().includes("glslang")))).toBe(true);
   } finally {
     t.cleanup();
+  }
+});
+
+// ---- F3: dependency-acquisition intent → package-manager --------------------
+
+test("dependencyAcquisitionIntent: fires on bringing an external dependency in", () => {
+  for (const task of [
+    "Add uuid to generate ids.", // terse bare object + purpose infinitive
+    "Add nanoid.", // bare object at end of request
+    "Pull in dayjs so we can format timestamps.", // phrasal verb
+    "Bring in ramda for the helpers.", // phrasal + benefit clause
+    "Depend on commander for the CLI.", // phrasal
+    "Install the redis client.", // explicit install verb
+    "Add the zod library.", // acquisition verb + dependency noun
+    "Add a dependency for parsing CSV.", // explicit dependency noun
+  ]) {
+    expect(dependencyAcquisitionIntent(task)).toBe(true);
+    expect(collectDomainsFromText(task).has("package-manager")).toBe(true);
+  }
+});
+
+test("dependencyAcquisitionIntent: does NOT fire on ordinary feature work", () => {
+  for (const task of [
+    "Add a button to the settings page.", // determiner object
+    "Add an endpoint that returns the current user.",
+    "Add a retry around the fetch call.",
+    "Add logging to the request handler.", // "to the X" = destination, not purpose
+    "Add caching to speed up the dashboard.", // object is itself a domain word (infra)
+    "Add validation for the signup form.", // "for the X" = feature spec, not benefit
+    "Pull in the latest changes from main.", // phrasal, but VCS object (not a package)
+    "Rename the greeting constant to salutation.",
+    "Explain how TCP slow start works.",
+  ]) {
+    expect(dependencyAcquisitionIntent(task)).toBe(false);
+    expect(collectDomainsFromText(task).has("package-manager")).toBe(false);
   }
 });
 
