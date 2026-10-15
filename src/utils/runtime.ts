@@ -61,6 +61,12 @@ function execExtensions(): string[] {
   return raw.split(";").map((e) => e.trim()).filter(Boolean);
 }
 
+/** True when `name` already ends with one of the executable extensions in `exts`. */
+function hasExecExtension(name: string, exts: string[]): boolean {
+  const lower = name.toLowerCase();
+  return exts.some((e) => e && lower.endsWith(e.toLowerCase()));
+}
+
 /**
  * Cross-platform `which`: resolve an executable to a concrete path using PATH,
  * honoring PATHEXT on Windows. Returns null if not found. A Node/Bun-agnostic
@@ -77,16 +83,28 @@ export function whichSync(cmd: string, pathEnv: string | undefined = process.env
     return null;
   }
 
+  // A bare command name that ALREADY carries a known executable extension
+  // (e.g. "ctx.cmd" on Windows) must match that exact file — the PATHEXT loop below
+  // would only ever append a SECOND extension ("ctx.cmd.CMD") and miss it.
+  const carriesExt = hasExecExtension(cmd, exts);
+
   for (const dir of (pathEnv ?? "").split(delimiter).filter(Boolean)) {
     const base = join(dir, cmd);
-    // Probe the bare name first so a command that ALREADY carries its extension
-    // (e.g. "ctx.cmd" on Windows) resolves — PATHEXT never includes "", so the
-    // ext loop alone would only ever try "ctx.cmd.CMD" and miss the real file.
-    if (isFile(base)) return base;
+    if (carriesExt && isFile(base)) return base;
+    // Prefer a PATHEXT form BEFORE the bare name. This is load-bearing on Windows:
+    // npm/yarn/pnpm ship an EXTENSIONLESS POSIX shell script ("npm") right next to
+    // their ".cmd" launcher. Node's spawn cannot execute that script without a shell,
+    // so resolving the bare "npm" made every `npm` child fail with ENOENT (reported to
+    // the user as "npm global install failed: unknown error"). Probing PATHEXT first
+    // resolves "npm" → "npm.cmd", which spawnPortable then runs through a shell.
+    // On POSIX, exts is [""] so this matches the bare name exactly as before.
     for (const ext of exts) {
       const candidate = base + ext;
       if (isFile(candidate)) return candidate;
     }
+    // Last resort: a bare, extensionless executable with no PATHEXT match. Rare on
+    // Windows; on POSIX the "" extension above already covered the bare name.
+    if (!carriesExt && isFile(base)) return base;
   }
   return null;
 }
@@ -165,7 +183,7 @@ function spawnPortable(
   args: string[],
   opts: ChildOptions,
   stdio: "inherit" | "pipe",
-): { status: number | null; stdout: string; stderr: string; error?: Error } {
+): { status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string; error?: Error; resolved: string } {
   const resolved = whichSync(cmd, opts.env?.PATH ?? process.env.PATH) ?? cmd;
   const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved);
 
@@ -179,7 +197,7 @@ function spawnPortable(
       windowsHide: true,
       encoding: stdio === "pipe" ? "utf8" : undefined,
     });
-    return { status: res.status, stdout: (res.stdout as string) ?? "", stderr: (res.stderr as string) ?? "", error: res.error };
+    return { status: res.status, signal: res.signal, stdout: (res.stdout as string) ?? "", stderr: (res.stderr as string) ?? "", error: res.error, resolved };
   }
 
   const res = spawnSync(resolved, args, {
@@ -189,7 +207,7 @@ function spawnPortable(
     windowsHide: true,
     encoding: stdio === "pipe" ? "utf8" : undefined,
   });
-  return { status: res.status, stdout: (res.stdout as string) ?? "", stderr: (res.stderr as string) ?? "", error: res.error };
+  return { status: res.status, signal: res.signal, stdout: (res.stdout as string) ?? "", stderr: (res.stderr as string) ?? "", error: res.error, resolved };
 }
 
 /**
@@ -285,12 +303,49 @@ export function runChildInherit(cmd: string, args: string[], opts: ChildOptions 
   });
 }
 
+export interface CaptureResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+  /** The signal that killed the child, if any. */
+  signal: NodeJS.Signals | null;
+  /** A spawn-level failure (command not found, not executable, …) — NOT a nonzero exit. */
+  error?: Error;
+  /** The concrete executable path spawnPortable resolved `cmd` to (or `cmd` if unresolved). */
+  resolved: string;
+}
+
 /** Run a command and capture its output (used by `ctx setup` for npm queries). */
-export function captureChild(
-  cmd: string,
-  args: string[],
-  opts: ChildOptions = {},
-): { code: number; stdout: string; stderr: string } {
+export function captureChild(cmd: string, args: string[], opts: ChildOptions = {}): CaptureResult {
   const res = spawnPortable(cmd, args, opts, "pipe");
-  return { code: res.status ?? (res.error ? 1 : 0), stdout: res.stdout, stderr: res.stderr };
+  return {
+    code: res.status ?? (res.error ? 1 : 0),
+    stdout: res.stdout,
+    stderr: res.stderr,
+    signal: res.signal,
+    error: res.error,
+    resolved: res.resolved,
+  };
+}
+
+/**
+ * Turn a FAILED {@link captureChild} result into an actionable, multi-line diagnostic:
+ * the invoked command, the resolved executable, exit code, signal, any spawn-level
+ * error, and the captured stderr/stdout tail. This exists so a child failure can NEVER
+ * collapse to an opaque "unknown error" (the old behavior when a spawn ENOENT left both
+ * streams empty) — every failure must expose its actual reason.
+ */
+export function describeChildFailure(invocation: string, res: CaptureResult): string {
+  const parts: string[] = [`command: ${invocation}`];
+  if (res.resolved && res.resolved !== invocation) parts.push(`executable: ${res.resolved}`);
+  parts.push(`exit code: ${res.code}`);
+  if (res.signal) parts.push(`signal: ${res.signal}`);
+  if (res.error) {
+    const code = (res.error as NodeJS.ErrnoException).code;
+    parts.push(`spawn error: ${[code, res.error.message].filter(Boolean).join(" ")}`.trim());
+  }
+  const out = (res.stderr.trim() || res.stdout.trim()).slice(0, 2000);
+  if (out) parts.push(`output:\n${out}`);
+  else if (!res.error) parts.push("(no output captured)");
+  return parts.join("\n");
 }

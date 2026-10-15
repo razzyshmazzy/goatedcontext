@@ -19,7 +19,7 @@ import type { Condition } from "../preferences/conditions.ts";
 import { buildRuntimeContext, type RuntimeContext } from "./runtime-context.ts";
 import { evaluateCondition } from "./evaluate.ts";
 import type { SignalService } from "../signals/service.ts";
-import { taskSignalDomains, collectDomainsFromText, canonicalDomain } from "../signals/domains.ts";
+import { taskSignalDomains, collectDomainsFromText, canonicalDomain, isNamingIntent } from "../signals/domains.ts";
 import {
   selectRelevantSignalEvidence,
   DEFAULT_SIGNAL_EVIDENCE_BUDGET,
@@ -537,6 +537,10 @@ export class RetrievalEngine {
     // not cover ("initialize this project", "set up dependencies", aliased domain spellings)
     // failed to match a legitimately-relevant preference. Purely additive — see domainMatch.
     const taskCanonicalDomains = collectDomainsFromText(task);
+    // Naming/identity intent is matched by INTENT, not shared words, because "Call me
+    // Greg" and "what do you call me?" overlap almost no vocabulary (see isNamingIntent).
+    // Computed once for the task; each candidate's rule is checked below. Additive only.
+    const taskNaming = isNamingIntent(task);
     const idf = this.buildIdf(candidates);
 
     const denom =
@@ -556,9 +560,12 @@ export class RetrievalEngine {
       // Match on the raw classifier domain (unchanged) OR the canonical task-domain set
       // (new). The canonical path only ADDS matches (it never removes a raw match), so this
       // strictly increases recall for intent-worded tasks and cannot drop an existing match.
+      // A third, equally-additive path bridges naming/identity by intent: a naming query
+      // matches a naming rule even with no stored domain and no shared vocabulary.
       const domainMatch =
-        pref.domain != null &&
-        (taskDomains.has(pref.domain) || taskCanonicalDomains.has(canonicalDomain(pref.domain)));
+        (pref.domain != null &&
+          (taskDomains.has(pref.domain) || taskCanonicalDomains.has(canonicalDomain(pref.domain)))) ||
+        (taskNaming && isNamingIntent(pref.rule));
       const categoryMatch =
         taskTerms.has(stem(pref.category)) || taskDomains.has(pref.category);
 

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { whichSync } from "../src/utils/runtime.ts";
+import { whichSync, captureChild, describeChildFailure } from "../src/utils/runtime.ts";
 
 // Regression: whichSync must resolve a command that ALREADY carries its extension
 // (e.g. the Windows "ctx.cmd" launcher). PATHEXT never contains "", so the ext-only
@@ -51,4 +51,43 @@ test("returns null when the command is absent", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// Regression (the `ctx setup` "npm global install failed: unknown error" bug): npm, yarn
+// and pnpm ship an EXTENSIONLESS POSIX shell script (e.g. "npm") right next to their
+// Windows ".cmd" launcher. whichSync used to probe the bare name first and return that
+// script; Node's spawn cannot execute it without a shell, so every `npm` child failed
+// with ENOENT. A bare command name must resolve the PATHEXT (.cmd) form, NOT the sibling
+// extensionless script. On POSIX (exts = [""]) the extensionless file is the right answer.
+test("bare command prefers its PATHEXT (.cmd) form over a sibling extensionless script", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ctx-which-"));
+  try {
+    // Both files present, exactly like a real Windows Node install's `npm` + `npm.cmd`.
+    const bare = join(dir, "npmlike");
+    writeFileSync(bare, "#!/bin/sh\nexit 0\n");
+    if (!isWin) chmodSync(bare, 0o755);
+    writeFileSync(join(dir, "npmlike.cmd"), "@echo off\r\n");
+    const resolved = whichSync("npmlike", dir);
+    if (isWin) {
+      eq(resolved, join(dir, "npmlike.cmd")); // the spawnable launcher, never the script
+    } else {
+      eq(resolved, bare); // POSIX: the extensionless script IS the executable
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A failed child must expose its ACTUAL reason — never collapse to "unknown error".
+// This is the second half of the setup bug: captureChild dropped the spawn error, so a
+// spawn ENOENT left both streams empty and surfaced as "unknown error".
+test("captureChild + describeChildFailure surface a real reason for a missing command", () => {
+  const res = captureChild("ctx-definitely-missing-binary-xyz", ["--version"]);
+  expect(res.code).not.toBe(0);
+  // The spawn failed at the OS level: a spawn error is present and no exit signal.
+  expect(res.error).toBeDefined();
+  const detail = describeChildFailure("ctx-definitely-missing-binary-xyz --version", res);
+  expect(detail.toLowerCase()).not.toContain("unknown error");
+  expect(detail).toContain("spawn error:");
+  expect(detail).toContain("ctx-definitely-missing-binary-xyz");
 });

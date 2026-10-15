@@ -149,12 +149,19 @@ Persistent developer preferences are retrieved for you automatically.
 - That automatic push can miss context for terse or oblique tasks. So before a
   choice that could reasonably depend on how this developer or repository usually
   works — a dependency, test framework, data store, language/runtime, formatter,
-  convention, or architecture decision — and when that context was not already
+  convention, architecture decision, how the user wants to be addressed, or a
+  decision the project already settled — and when that context was not already
   injected this turn, retrieve it yourself: run
-  \`ctx get --cwd "$PWD" --task "<concise task>"\` (read-only, safe anytime). Do not
+  \`ctx get --cwd "$PWD" --task "<concise task>"\` (read-only, safe anytime). Pass a
+  semantic query naming the underlying decision, not a bare keyword echo (e.g.
+  "preferred name / how to address the user", not "what do you call me"). Do not
   query for requests that clearly do not depend on developer/project context
   (general factual questions, explaining a concept or error), and do not re-fetch
   context you were already given. The \`context\` skill has the full boundary.
+- When the user explicitly tells you to check ("ctx it", "check ctx", "check
+  memory", "look that up in ctx"), retrieve before answering — the command is not
+  the query; build the query from their immediately preceding unresolved request,
+  then answer it. The \`context\` skill has the full boundary.
 - Save developer context the user authors, without being asked. ${SAVE_POLICY_CORE}
   Write ONLY through the ctx AGENT surface with \`--origin user\` — it is the
   provenance-safe path and the ONLY one ctx's installed permissions auto-approve;

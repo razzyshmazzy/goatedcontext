@@ -29,6 +29,7 @@ import {
   type DeterministicResult,
   type PilotTrial,
 } from "./score.ts";
+import { setupCorpusSandbox, runCorpus, summarize as summarizeCorpus, CORPUS } from "./retrieval-corpus.ts";
 
 const HARD_CAP = 10; // spec §14: MAXIMUM 10 real model calls.
 
@@ -80,6 +81,39 @@ function cmdDeterministic() {
     const s = summarizeDeterministic(results);
     const ok = s.relevantRetrieved.num === s.relevantRetrieved.den && s.irrelevantClean.num === s.irrelevantClean.den;
     log(`\n${ok ? "DETERMINISTIC PASS" : "DETERMINISTIC INCOMPLETE (see MISS/LEAK above)"}`);
+    process.exitCode = ok ? 0 : 1;
+  } finally {
+    sb.cleanup();
+  }
+}
+
+/** Deterministic retrieval corpus (spec §14): engine recall/precision across classes. */
+function cmdCorpus() {
+  const sb = setupCorpusSandbox();
+  try {
+    const results = runCorpus(sb);
+    const s = summarizeCorpus(results);
+    const pct = (f: { num: number; den: number }) =>
+      f.den === 0 ? `${f.num}/${f.den} (n/a)` : `${f.num}/${f.den} (${Math.round((f.num / f.den) * 100)}%)`;
+    log("\n== Deterministic retrieval corpus (no model) ==\n");
+    log("RELEVANT — [P]=raw-probe hit, [Q]=expanded-query hit:");
+    for (const r of results.filter((x) => x.relevant)) {
+      log(`  [${r.probeHit ? "P" : "-"}${r.queryHit ? "Q" : "-"}]  ${r.id.padEnd(20)} ${r.klass}`);
+    }
+    log("\nNEGATIVE — expect NOTHING (any surface is a leak):");
+    for (const r of results.filter((x) => !x.relevant)) {
+      log(`  ${r.probeHit || r.queryHit ? "✗ LEAK" : "✓"}  ${r.id.padEnd(20)} ${r.klass}`);
+    }
+    log("\nSummary (recall measured raw-probe vs expanded-query; §9 query-construction value):");
+    log(`  cases                : ${CORPUS.length} (${s.relevant} relevant, ${s.negative} negative)`);
+    log(`  probe recall         : ${pct(s.probeRecall)}   (raw terse prompt)`);
+    log(`  query recall         : ${pct(s.queryRecall)}   (expanded semantic query)`);
+    log(`  probe precision      : ${pct(s.probePrecision)}   (negatives clean)`);
+    log(`  query precision      : ${pct(s.queryPrecision)}   (negatives clean)`);
+    log("  per-class query recall:");
+    for (const [k, v] of Object.entries(s.byClass)) log(`     ${k.padEnd(18)} ${pct(v)}`);
+    const ok = s.queryPrecision.num === s.queryPrecision.den && s.queryRecall.num / s.queryRecall.den >= 0.9;
+    log(`\n${ok ? "CORPUS PASS" : "CORPUS BELOW TARGET"}`);
     process.exitCode = ok ? 0 : 1;
   } finally {
     sb.cleanup();
@@ -215,6 +249,9 @@ switch (cmd) {
   case "deterministic":
     cmdDeterministic();
     break;
+  case "corpus":
+    cmdCorpus();
+    break;
   case "parse-check":
     cmdParseCheck();
     break;
@@ -226,6 +263,6 @@ switch (cmd) {
     for (const s of ALL_SCENARIOS) log(`  ${s.relevant ? "R" : "N"}  ${s.id.padEnd(26)} ${JSON.stringify(s.probe)}`);
     break;
   default:
-    log("usage: cli.ts <deterministic|parse-check|pilot|scenarios> [flags]");
+    log("usage: cli.ts <deterministic|corpus|parse-check|pilot|scenarios> [flags]");
     process.exitCode = 1;
 }

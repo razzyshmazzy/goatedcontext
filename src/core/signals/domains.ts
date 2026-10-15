@@ -179,6 +179,39 @@ export function dependencyAcquisitionIntent(text: string): boolean {
   return false;
 }
 
+/**
+ * NAMING / IDENTITY intent (retrieval pass). How the user wants to be addressed —
+ * "Call me Greg", "Address the user as Dr. Chen", "I go by Sam" — is durable developer
+ * context, but it stores with no domain (category "general") and shares almost no
+ * vocabulary with how a user ASKS for it ("what do you call me?", "my preferred name").
+ * So a naming query lexically overlaps nothing and falls below the relevance threshold —
+ * the demonstrated naming recall gap.
+ *
+ * This recognizes the naming/identity INTENT on BOTH sides (the task AND a candidate
+ * rule) so retrieval can bridge them by intent rather than shared words — the same
+ * symmetric trick `dependencyAcquisitionIntent` uses, and exactly the "lightweight
+ * intent category" the retrieval spec calls for. It is NOT a new memory type, schema,
+ * or domain in the canonical/signal vocabulary — purely a read-time matcher. Kept
+ * deliberately CONSERVATIVE (specific multi-word phrases, never a bare "name"/"call")
+ * so ordinary work ("rename this file", "name the function", "add a call button") does
+ * NOT fire. Pure and deterministic.
+ */
+const NAMING_PHRASES = [
+  "call me", "call you", "call the user", "what do you call", "what to call",
+  "what should i call", "what should we call", "what you call",
+  "address me", "address you", "address the user", "how to address",
+  "how should i address", "how do you address", "how should you address", "addressed as",
+  "refer to me", "refer to you", "refer to the user", "referred to as",
+  "how should i refer", "how do i refer",
+  "my name", "your name", "preferred name", "display name", "go by", "goes by",
+];
+
+/** Whether a piece of text expresses naming/identity intent (see block comment above). */
+export function isNamingIntent(text: string): boolean {
+  const phrase = phraseForm(text);
+  return NAMING_PHRASES.some((p) => phrase.includes(` ${p} `));
+}
+
 /** Canonicalize any raw/normalized domain token to its shared canonical form. */
 export function canonicalDomain(raw: string): string {
   const n = normalizeDomain(raw);

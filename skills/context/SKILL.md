@@ -47,12 +47,19 @@ Retrieve when the task is something like:
 - adding a formatter, linter, or build step
 - writing code meant to match this repo's conventions (another endpoint, a new module)
 - an architecture choice (caching, queueing, service boundaries)
+- how the user wants to be addressed, named, or referred to
+- a decision this project already settled (how auth works, how errors are represented, an API shape)
+- a known exception or a correction the developer has made before
 
 Do NOT retrieve for:
 - general factual or conceptual questions ("explain TCP slow start", "what does HTTP 404 mean")
 - explaining an error message, a concept, or existing code
 - summarizing or reformatting text you were given
 - a pure one-off edit that involves no technology or convention choice
+
+Form a good query. Form a semantic query, not a keyword echo of the prompt. Name the underlying decision and its object, and that it concerns this developer's or repository's convention. Lead with the intent category when one fits — dependency, testing, database, architecture, tooling, formatting/style, language/runtime, deployment, security, naming/identity, or a repo convention. For example: "add uuid" → "dependency / package choice for adding uuid in this repo"; "add tests" → "testing framework and conventions for this repository"; "what do you call me?" → "the user's preferred name / how they want to be addressed". Keep it to one concise phrase; ctx augments it with the repository, active files, and language on its own.
+
+Explicit commands. When the user issues an explicit retrieval command — for example "ctx it", "check ctx", "check goatedcontext", "look in ctx", "look that up in ctx", or "check memory" — treat it as a direct instruction to retrieve BEFORE answering, even if you would not have retrieved on your own. The command is NOT the query: do not search for the words "ctx it". Build the query from the user's immediately preceding unresolved request — the last real question or task — then answer THAT request using what you retrieve. For example, after "What do you call me?" the follow-up "ctx it" means retrieve the user's preferred name / how they want to be addressed, then answer with it. Carry forward only that one immediately-relevant request, never replay the whole conversation.
 
 Avoid redundant lookups: if the relevant context was already injected this turn (a `<ctx-developer-context>` block), use it — do not re-fetch the same thing. And do not query on every turn; use judgment about whether memory could matter.
 

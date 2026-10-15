@@ -9,6 +9,8 @@ import { makeTestContext } from "./helpers.ts";
 import {
   PULL_POLICY_CORE,
   PULL_POLICY_VERSION,
+  PULL_POLICY_EXPLICIT_COMMAND,
+  PULL_POLICY_QUERY_GUIDANCE,
   renderPullGuidance,
   GET_CONTEXT_TOOL_DESCRIPTION,
   MCP_SERVER_INSTRUCTIONS,
@@ -22,7 +24,7 @@ const contextSkill = CLAUDE_SKILLS.find((s) => s.dir === "context")!.content;
 
 describe("pull policy — standing instruction", () => {
   test("has a stable version marker", () => {
-    expect(PULL_POLICY_VERSION).toBe("1");
+    expect(PULL_POLICY_VERSION).toBe("2");
   });
 
   test("core concept teaches the latent decision point AND both boundaries", () => {
@@ -49,6 +51,37 @@ describe("pull policy — standing instruction", () => {
     expect(g).toContain("do not re-fetch the same thing");
     // read-only framing (spec §7)
     expect(g.toLowerCase()).toContain("read-only");
+    // explicit-command semantics + query construction are embedded (spec §7, §9, §10)
+    expect(g).toContain(PULL_POLICY_EXPLICIT_COMMAND);
+    expect(g).toContain(PULL_POLICY_QUERY_GUIDANCE);
+  });
+
+  test("explicit-command policy carries the command, previous-turn inheritance, and 'not the query' rule", () => {
+    const e = PULL_POLICY_EXPLICIT_COMMAND.toLowerCase();
+    // recognizes the explicit commands (spec §7)
+    expect(e).toContain("ctx it");
+    expect(e).toContain("check ctx");
+    // the command must NOT be searched literally (spec §7, §12)
+    expect(e).toContain("the command is not the query");
+    expect(e).toContain('do not search for the words "ctx it"');
+    // previous-turn inheritance, scoped to the one immediately-relevant request (spec §10)
+    expect(e).toContain("immediately preceding unresolved request");
+    expect(e).toContain("never replay the whole conversation");
+    // the worked naming example (spec §12 — generic, not special-casing a literal name)
+    expect(e).toContain("what do you call me");
+  });
+
+  test("query-construction policy teaches semantic expansion with intent categories, not a fixed list", () => {
+    const q = PULL_POLICY_QUERY_GUIDANCE.toLowerCase();
+    expect(q).toContain("semantic query");
+    expect(q).toContain("not a keyword echo");
+    // names intent categories as hints (spec §9, §11)
+    for (const cls of ["dependency", "testing", "database", "architecture", "naming"]) {
+      expect(q).toContain(cls);
+    }
+    // worked expansions, incl. the naming case
+    expect(q).toContain("add uuid");
+    expect(q).toContain("preferred name");
   });
 
   test("Claude global CLAUDE.md block teaches proactive pull with the CLI action", () => {
@@ -59,6 +92,12 @@ describe("pull policy — standing instruction", () => {
     expect(CTX_INSTRUCTION_BLOCK).toContain("could reasonably depend on");
     expect(CTX_INSTRUCTION_BLOCK).toContain("injected this turn");
     expect(CTX_INSTRUCTION_BLOCK).toContain("clearly do not depend on developer/project context");
+    // explicit command + semantic-query + naming coverage (spec §7, §9, §12)
+    expect(CTX_INSTRUCTION_BLOCK).toContain("ctx it");
+    expect(CTX_INSTRUCTION_BLOCK).toContain("the command is not");
+    expect(CTX_INSTRUCTION_BLOCK.toLowerCase()).toContain("preceding unresolved request");
+    expect(CTX_INSTRUCTION_BLOCK.toLowerCase()).toContain("not a bare keyword echo");
+    expect(CTX_INSTRUCTION_BLOCK.toLowerCase()).toContain("addressed");
     // the old undercall wording is gone
     expect(CTX_INSTRUCTION_BLOCK).not.toContain("normally do NOT need to call");
   });
@@ -101,6 +140,9 @@ describe("pull policy — MCP get_context description", () => {
     expect(MCP_SERVER_INSTRUCTIONS.toLowerCase()).toContain("could reasonably depend on");
     expect(MCP_SERVER_INSTRUCTIONS.toLowerCase()).toContain("already provided this turn");
     expect(MCP_SERVER_INSTRUCTIONS).toContain("origin=user");
+    // explicit command + semantic query (spec §7, §9)
+    expect(MCP_SERVER_INSTRUCTIONS).toContain("ctx it");
+    expect(MCP_SERVER_INSTRUCTIONS.toLowerCase()).toContain("not a bare keyword echo");
   });
 });
 

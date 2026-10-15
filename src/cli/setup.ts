@@ -9,6 +9,7 @@ import { agentStatuses } from "../core/agents/registry.ts";
 import type { AgentId } from "../core/agents/capabilities.ts";
 import {
   captureChild,
+  describeChildFailure,
   persistentPath,
   resolvesIntoEphemeralCache,
   whichSync,
@@ -173,11 +174,12 @@ function productionInstallSpec(version: string): string {
 
 function installGlobalNpm(spec: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
   // `npm install -g goatedcontext@<version>` (or, in tests, an absolute .tgz path).
-  // Both produce a real, self-contained global package. Surface npm's own stderr on
-  // failure rather than swallowing it, so a broken install stays actionable.
+  // Both produce a real, self-contained global package. On failure, surface the FULL
+  // diagnostic (executable, exit code, signal, spawn error, npm stderr) rather than
+  // swallowing it — a broken install must never collapse to an opaque "unknown error".
   const res = captureChild("npm", ["install", "-g", spec], { env });
-  const detail = (res.stderr.trim() || res.stdout.trim()).slice(0, 2000);
-  return { ok: res.code === 0, detail };
+  if (res.code === 0 && !res.error) return { ok: true, detail: "" };
+  return { ok: false, detail: describeChildFailure(`npm install -g ${spec}`, res) };
 }
 
 /**
@@ -284,7 +286,7 @@ export function runSetup(opts: SetupOptions): SetupResult {
     if (!res.ok) {
       installFailed = true;
       globalInstall = "failed";
-      warnings.push(`npm global install failed:\n${res.detail || "unknown error"}`);
+      warnings.push(`npm global install failed:\n${res.detail}`);
     } else {
       globalInstall = "repaired";
     }
@@ -295,7 +297,7 @@ export function runSetup(opts: SetupOptions): SetupResult {
     if (!res.ok) {
       installFailed = true;
       globalInstall = "failed";
-      warnings.push(`npm global install failed:\n${res.detail || "unknown error"}`);
+      warnings.push(`npm global install failed:\n${res.detail}`);
     } else {
       globalInstall = previousVersion ? "upgraded" : "installed";
     }
