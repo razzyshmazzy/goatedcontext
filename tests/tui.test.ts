@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import stringWidth from "string-width";
 import { makeTestContext } from "./helpers.ts";
 import { shouldLaunchTui } from "../src/tui/launch.ts";
 import { decodeKey, keyToAction } from "../src/tui/input.ts";
@@ -12,6 +13,7 @@ import {
   isEffect,
   reduce,
   selectedRow,
+  setStatus,
   visibleRows,
   type AppState,
 } from "../src/tui/state.ts";
@@ -23,10 +25,12 @@ import {
 } from "../src/tui/data.ts";
 import { renderLines } from "../src/tui/renderer.ts";
 import { runTui } from "../src/tui/app.ts";
+import { detectDepth, makeTheme } from "../src/tui/theme.ts";
 import type { CtxContext } from "../src/core/context.ts";
 
 const ROOT = join(import.meta.dir, "..");
 const SIZE = { cols: 100, rows: 30 };
+const PLAIN = makeTheme(0);
 
 /** Deterministic view-model: bogus agent homes + empty PATH → every agent "not installed". */
 function buildVM(ctx: CtxContext, dir: string) {
@@ -40,7 +44,7 @@ function buildVM(ctx: CtxContext, dir: string) {
 }
 
 function stateWith(ctx: CtxContext, dir: string): AppState {
-  return initState(buildVM(ctx, dir), { size: SIZE, colors: false });
+  return initState(buildVM(ctx, dir), { size: SIZE, theme: PLAIN });
 }
 
 function remember(ctx: CtxContext, rule: string, status: "approved" | "locked" = "approved") {
@@ -293,7 +297,7 @@ test("Vector Memory renders an honest, not-enabled placeholder", () => {
     expect(vector.enabled).toBe(false);
     expect(vector.rows.length).toBe(0);
 
-    let s = initState(vm, { size: SIZE, colors: false });
+    let s = initState(vm, { size: SIZE, theme: PLAIN });
     // Navigate to the Vector Memory section (4th nav entry).
     s = reduce(s, { type: "navMove", delta: 3 });
     expect(activeSection(s)?.key).toBe("vector");
@@ -385,7 +389,7 @@ test("quitting restores the terminal (raw mode off, alternate screen left)", asy
   const { ctx, dir, cleanup } = makeTestContext();
   const fake = fakeTerminal();
   try {
-    const run = runTui(process.env, { ctx, io: fake.io as never, cwd: dir, colors: false });
+    const run = runTui(process.env, { ctx, io: fake.io as never, cwd: dir, theme: PLAIN });
     expect(fake.raw()).toBe(true); // raw mode engaged at startup
     fake.key("q");
     await run;
@@ -404,11 +408,109 @@ test("an exception during render still restores the terminal", async () => {
   // ENTER write = call 1, initial render = call 2; fail on the next render.
   const fake = fakeTerminal({ throwOnWriteCall: 3 });
   try {
-    const run = runTui(process.env, { ctx, io: fake.io as never, cwd: dir, colors: false });
+    const run = runTui(process.env, { ctx, io: fake.io as never, cwd: dir, theme: PLAIN });
     expect(fake.raw()).toBe(true);
     fake.key("j"); // triggers a re-render that throws
     await run;
     expect(fake.raw()).toBe(false); // terminal restored despite the exception
+  } finally {
+    cleanup();
+  }
+});
+
+// ---- theme / color system (spec §6) -----------------------------------------
+
+test("theme degrades: no-color is plain, truecolor emits 24-bit SGR", () => {
+  expect(PLAIN.wrap("x", { fg: "accent", bold: true })).toBe("x");
+  const tc = makeTheme(3).wrap("x", { fg: "accent" });
+  expect(tc).toContain("38;2;"); // truecolor foreground
+  expect(tc.startsWith("\x1b[")).toBe(true);
+  const x256 = makeTheme(2).wrap("x", { bg: "accent" });
+  expect(x256).toContain("48;5;"); // 256-color background
+});
+
+test("detectDepth: non-TTY and NO_COLOR disable color; COLORTERM enables truecolor", () => {
+  expect(detectDepth({} as NodeJS.ProcessEnv, false)).toBe(0);
+  expect(detectDepth({ NO_COLOR: "1" } as NodeJS.ProcessEnv, true)).toBe(0);
+  expect(detectDepth({ COLORTERM: "truecolor" } as NodeJS.ProcessEnv, true)).toBe(3);
+  expect(detectDepth({ WT_SESSION: "abc" } as NodeJS.ProcessEnv, true)).toBe(3);
+});
+
+// ---- rendering: width correctness + responsive layout -----------------------
+
+const ANSI = /\x1b\[[0-9;]*m/g;
+
+test("every rendered row is exactly the terminal width, even with color", () => {
+  const { ctx, dir, cleanup } = makeTestContext();
+  try {
+    remember(ctx, "use bun");
+    remember(ctx, "prefer postgres");
+    const colored = initState(buildVM(ctx, dir), { size: { cols: 100, rows: 30 }, theme: makeTheme(3) });
+    for (const line of renderLines(colored)) {
+      expect(stringWidth(line.replace(ANSI, ""))).toBe(100);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("layout is responsive: wide shows 3 panels, narrow collapses to a tab strip", () => {
+  const { ctx, dir, cleanup } = makeTestContext();
+  try {
+    remember(ctx, "use bun");
+    const vm = buildVM(ctx, dir);
+
+    const wide = renderLines(initState(vm, { size: { cols: 120, rows: 30 }, theme: PLAIN }));
+    // Three titled panels appear on the body rows.
+    const bodyWide = wide.join("\n");
+    expect(bodyWide).toContain("╭─ Memory");
+    expect(bodyWide).toContain("╭─ Preferences");
+    expect(bodyWide).toContain("╭─ Preference ");
+
+    const narrow = renderLines(initState(vm, { size: { cols: 70, rows: 24 }, theme: PLAIN }));
+    const bodyNarrow = narrow.join("\n");
+    expect(bodyNarrow).not.toContain("╭─ Memory"); // sidebar collapsed
+    // The tab strip lists every section label on one row.
+    expect(narrow.some((l) => l.includes("Preferences") && l.includes("Signals") && l.includes("Agents"))).toBe(true);
+
+    const tiny = renderLines(initState(vm, { size: { cols: 40, rows: 10 }, theme: PLAIN }));
+    expect(tiny.join("\n")).toContain("Terminal too small");
+  } finally {
+    cleanup();
+  }
+});
+
+test("empty state renders intentional copy with an action hint", () => {
+  const { ctx, dir, cleanup } = makeTestContext();
+  try {
+    const screen = renderLines(stateWith(ctx, dir)).join("\n");
+    expect(screen).toContain("No preferences yet");
+    expect(screen).toContain("press `a` to add one");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a success status renders a check glyph in the footer", () => {
+  const { ctx, dir, cleanup } = makeTestContext();
+  try {
+    const s = setStatus(stateWith(ctx, dir), { text: "Added preference.", kind: "info" });
+    const screen = renderLines(s).join("\n");
+    expect(screen).toContain("✓ Added preference.");
+  } finally {
+    cleanup();
+  }
+});
+
+test("add form: field navigation and scope toggle are pure reducers", () => {
+  const { ctx, dir, cleanup } = makeTestContext();
+  try {
+    let s = reduce(stateWith(ctx, dir), { type: "openAdd" });
+    expect(s.modal).toEqual({ type: "add", rule: "", scope: "global", field: 0 });
+    for (const ch of "use tabs") s = reduce(s, { type: "modalInput", ch });
+    s = reduce(s, { type: "modalMove", delta: 1 }); // to scope field
+    s = reduce(s, { type: "modalToggleScope" });
+    expect(s.modal).toMatchObject({ type: "add", rule: "use tabs", scope: "repo", field: 1 });
   } finally {
     cleanup();
   }

@@ -21,8 +21,11 @@ test("package.json declares no native SQLite dependency", () => {
   expect(pkg.trustedDependencies).toBeUndefined();
 });
 
-test("runtime dependencies are only the two intentional ones", () => {
-  expect(Object.keys(pkg.dependencies ?? {}).sort()).toEqual(["commander", "zod"]);
+test("runtime dependencies are only the intentional ones", () => {
+  // `commander` (CLI) + `zod` (validation) are the core two; `string-width` is a tiny,
+  // pure-ESM, zero-native dependency used by the interactive TUI for correct Unicode
+  // column math. All three inline into the single-file Node bundle (no WASM/native).
+  expect(Object.keys(pkg.dependencies ?? {}).sort()).toEqual(["commander", "string-width", "zod"]);
 });
 
 test("engines.node baseline is the node:sqlite LTS baseline (>=22.13)", () => {

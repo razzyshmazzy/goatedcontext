@@ -1,103 +1,191 @@
 /**
- * Low-level layout + styling primitives. A `StyledLine` is a plain string already
- * truncated/padded to a known VISIBLE width, plus a single whole-line style. Styling a
- * whole line (never a substring) means we never have to reason about ANSI escape widths
- * when stitching columns — the plain text alignment is exact, and color is applied last.
- * When color is disabled (non-TTY, NO_COLOR) the ANSI is simply omitted.
+ * Layout primitives. A `Line` is an ordered list of styled `Span`s; the renderer turns
+ * it into an exact, width-correct terminal string. Width is measured with `string-width`
+ * so wide/CJK/emoji glyphs in user content never knock the columns out of alignment.
+ *
+ * Higher-level helpers here draw the modern chrome: titled rounded `panel`s whose border
+ * turns accent when focused (spec §4 patterns), and space-between `bar`s for the header
+ * and footer (hints left, context right).
  */
+import stringWidth from "string-width";
+import type { Role, Style, Theme } from "./theme.ts";
 
-export interface Style {
-  invert?: boolean;
-  dim?: boolean;
-  bold?: boolean;
-  /** SGR foreground code (e.g. 36 = cyan). Omitted = default terminal color. */
-  fg?: number;
-}
+export type { Role, Style, Theme } from "./theme.ts";
 
-export interface StyledLine {
+export const RESET_ALL = "\x1b[0m";
+
+export interface Span {
   text: string;
-  style: Style;
+  style?: Style;
 }
 
-export const RESET = "\x1b[0m";
+export type Line = Span[];
 
-// Layout band sizes (rows). The body is everything between the header/rule and footer.
-export const HEADER_LINES = 2;
-export const RULE_LINES = 1;
-export const FOOTER_LINES = 2;
-
-export const MIN_COLS = 70;
-export const MIN_ROWS = 20;
-
-export function bodyHeight(rows: number): number {
-  return Math.max(1, rows - HEADER_LINES - RULE_LINES - FOOTER_LINES);
+/** A content line for a panel, optionally with a full-row background (selection bar). */
+export interface PanelLine {
+  spans: Span[];
+  bg?: Role;
 }
 
-/**
- * How many 2-line list items fit the pane. Shared by the renderer AND the state
- * windowing math so the selected row can never scroll off-screen. The pane spends one
- * line on the section title and one on spacing/the scroll hint, leaving the rest for
- * items.
- */
-export function listCapacity(size: { cols: number; rows: number }): number {
-  const area = Math.max(2, bodyHeight(size.rows) - 2);
-  return Math.max(1, Math.floor(area / 2));
-}
+// Rounded box-drawing set (spec §3 modern aesthetic); all glyphs are width-1.
+export const BOX = {
+  tl: "╭",
+  tr: "╮",
+  bl: "╰",
+  br: "╯",
+  h: "─",
+  v: "│",
+} as const;
 
-/** Visible width of a string (code points; the glyphs we use are all width-1). */
+export const MIN_COLS = 56;
+export const MIN_ROWS = 16;
+/** Below this width the detail collapses and the sidebar becomes a tab strip. */
+export const NARROW_COLS = 84;
+
 export function width(text: string): number {
-  return Array.from(text).length;
+  return stringWidth(text);
 }
 
-/** Truncate to `w` visible columns, adding an ellipsis when it had to cut. */
+/** Truncate to `w` visible columns, width-aware, adding an ellipsis when it had to cut. */
 export function truncate(text: string, w: number): string {
   if (w <= 0) return "";
-  const chars = Array.from(text);
-  if (chars.length <= w) return text;
+  if (width(text) <= w) return text;
   if (w === 1) return "…";
-  return chars.slice(0, w - 1).join("") + "…";
+  let out = "";
+  let used = 0;
+  for (const ch of text) {
+    const cw = width(ch);
+    if (used + cw > w - 1) break;
+    out += ch;
+    used += cw;
+  }
+  return out + "…";
 }
 
-/** Truncate then right-pad with spaces to exactly `w` visible columns. */
 export function pad(text: string, w: number): string {
   const t = truncate(text, w);
   const gap = w - width(t);
   return gap > 0 ? t + " ".repeat(gap) : t;
 }
 
-export function sl(text: string, w: number, style: Style = {}): StyledLine {
-  return { text: pad(text, w), style };
+export function span(text: string, style?: Style): Span {
+  return style ? { text, style } : { text };
 }
 
-/** A line with `left` text and `right` text pinned to the right edge (1-col margin). */
-export function twoCol(left: string, right: string, w: number): string {
-  if (w <= 0) return "";
-  const space = Math.max(0, w - width(right) - 1);
-  return pad(left, space) + right + " ";
-}
-
-export function blank(w: number): StyledLine {
-  return { text: " ".repeat(Math.max(0, w)), style: {} };
-}
-
-/** Pad/truncate an array of lines to exactly `height` entries of `w` columns. */
-export function fit(lines: StyledLine[], w: number, height: number): StyledLine[] {
-  const out: StyledLine[] = [];
-  for (let i = 0; i < height; i++) {
-    const line = lines[i];
-    out.push(line ? { text: pad(line.text, w), style: line.style } : blank(w));
+/** Render a line of spans to exactly `w` columns; `bg` fills the whole row (selection). */
+export function renderLine(spans: Line, w: number, theme: Theme, bg?: Role): string {
+  let used = 0;
+  const parts: string[] = [];
+  for (const s of spans) {
+    if (used >= w) break;
+    let t = s.text;
+    let tw = width(t);
+    if (used + tw > w) {
+      t = truncate(t, w - used);
+      tw = width(t);
+    }
+    if (t.length === 0) continue;
+    const style: Style = bg ? { ...s.style, bg: s.style?.bg ?? bg } : { ...s.style };
+    parts.push(theme.wrap(t, style));
+    used += tw;
   }
-  return out;
+  if (used < w) {
+    const padText = " ".repeat(w - used);
+    parts.push(bg ? theme.wrap(padText, { bg }) : padText);
+  }
+  return parts.join("");
 }
 
-/** Render one styled line to a terminal string (or plain text when colors are off). */
-export function toAnsi(line: StyledLine, colors: boolean): string {
-  if (!colors) return line.text;
-  const codes: number[] = [];
-  if (line.style.bold) codes.push(1);
-  if (line.style.dim) codes.push(2);
-  if (line.style.invert) codes.push(7);
-  if (line.style.fg != null) codes.push(line.style.fg);
-  if (codes.length === 0) return line.text;
-  return `\x1b[${codes.join(";")}m${line.text}${RESET}`;
+/** A full-width bar with `left` spans pinned left and `right` spans pinned right. */
+export function bar(left: Line, right: Line, w: number, theme: Theme): string {
+  const leftW = left.reduce((n, s) => n + width(s.text), 0);
+  const rightW = right.reduce((n, s) => n + width(s.text), 0);
+  if (leftW + rightW + 1 > w) {
+    // Not enough room for both: keep the left side, truncate it to fit.
+    return renderLine(left, w, theme);
+  }
+  const gap = span(" ".repeat(w - leftW - rightW));
+  return renderLine([...left, gap, ...right], w, theme);
+}
+
+export interface PanelOptions {
+  width: number;
+  height: number;
+  title: string;
+  /** Optional count shown dim after the title, e.g. "Preferences 14". */
+  count?: number | string;
+  /** Optional right-aligned info in the top border (e.g. a filter hint). */
+  rightInfo?: string;
+  focused: boolean;
+  /** Tints the border amber to signal an active filter (spec §13 search mode). */
+  searching?: boolean;
+  /** Border/title role when focused (default "accent"; modals pass "danger" etc). */
+  accent?: Role;
+  content: PanelLine[];
+  theme: Theme;
+}
+
+/**
+ * Draw a titled, rounded panel. The border is accent when focused, amber while
+ * filtering, and dim otherwise — the single clearest "which pane is live" cue
+ * (spec §4). Content lines are rendered to the inner width; a row's `bg` paints a
+ * full-width selection bar.
+ */
+export function panel(opts: PanelOptions): string[] {
+  const { width: w, height, theme, focused, searching } = opts;
+  const accentRole: Role = opts.accent ?? "accent";
+  const innerW = Math.max(0, w - 2);
+  const borderStyle: Style = searching
+    ? { fg: "warning" }
+    : focused
+      ? { fg: accentRole }
+      : { dim: true };
+  const titleStyle: Style = focused ? { fg: accentRole, bold: true } : { bold: true };
+
+  // Top border: ╭─ Title (n) ─────── rightInfo ─╮
+  const titlePlain = ` ${opts.title} `;
+  const countPlain = opts.count != null ? `${opts.count} ` : "";
+  const rightPlain = opts.rightInfo ? `${opts.rightInfo} ` : "";
+  const fixed = 1 /*tl*/ + 1 /*h*/ + width(titlePlain) + width(countPlain) + width(rightPlain) + 1 /*tr*/;
+  const fillW = Math.max(0, innerW + 2 - fixed - (rightPlain ? 1 : 0));
+  const topSpans: Line = [
+    span(BOX.tl + BOX.h, borderStyle),
+    span(titlePlain, titleStyle),
+  ];
+  if (countPlain) topSpans.push(span(countPlain, { dim: true }));
+  topSpans.push(span(BOX.h.repeat(fillW), borderStyle));
+  if (rightPlain) topSpans.push(span(rightPlain, searching ? { fg: "warning" } : { dim: true }), span(BOX.h, borderStyle));
+  topSpans.push(span(BOX.tr, borderStyle));
+
+  const lines: string[] = [renderLine(topSpans, w, theme)];
+
+  const bodyRows = Math.max(0, height - 2);
+  for (let i = 0; i < bodyRows; i++) {
+    const row = opts.content[i];
+    const v = theme.wrap(BOX.v, borderStyle);
+    if (!row) {
+      lines.push(v + " ".repeat(innerW) + v);
+      continue;
+    }
+    const inner = renderLine(row.spans, innerW, theme, row.bg);
+    lines.push(v + inner + v);
+  }
+  lines.push(renderLine([span(BOX.bl + BOX.h.repeat(Math.max(0, innerW)) + BOX.br, borderStyle)], w, theme));
+  return lines;
+}
+
+// Layout maths. The body sits between a 1-line header and a 2-line footer (a key-hint
+// bar + a status line); each panel spends 2 rows on its top/bottom borders and 1 inner
+// row on top padding.
+export function bodyHeight(rows: number): number {
+  return Math.max(3, rows - 3);
+}
+
+export function contentInnerHeight(rows: number): number {
+  return Math.max(1, bodyHeight(rows) - 2 - 1);
+}
+
+/** How many 2-line list items fit the content panel (shared with state windowing). */
+export function listCapacity(size: { cols: number; rows: number }): number {
+  return Math.max(1, Math.floor(contentInnerHeight(size.rows) / 2));
 }

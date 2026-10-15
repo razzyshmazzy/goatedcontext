@@ -1,33 +1,78 @@
 /**
- * The two-line footer: a context-sensitive key-hint line and a transient status line.
- * Hints change with the active mode so the controls are always discoverable without a
- * manual (spec §4 footer help / §8 input model).
+ * The footer: a context-aware key-hint bar (hints left, context right — UX #11) over a
+ * transient status line. Shortcut glyphs render in the accent color and labels dim, so
+ * the keys pop without shouting (UX #12). Hints change with the active mode so the
+ * controls are always discoverable (spec §14) without a manual.
  */
 import type { AppState } from "../state.ts";
-import { type StyledLine, sl } from "../layout.ts";
+import { activeNav, activeSection } from "../state.ts";
+import { type Line, type Span, span } from "../layout.ts";
 
-function hints(state: AppState): string {
+type Hint = [key: string, label: string];
+
+function hints(state: AppState): Hint[] {
   if (state.modal) {
     switch (state.modal.type) {
       case "help":
-        return "esc close";
+        return [["esc", "close"]];
       case "add":
-        return "type rule   tab field   left/right scope   enter save   esc cancel";
+        return [["tab", "field"], ["↵", "save"], ["esc", "cancel"]];
       case "actions":
-        return "up/down choose   enter apply   esc cancel";
+        return [["↑↓", "choose"], ["↵", "apply"], ["esc", "cancel"]];
       case "confirm":
-        return "y yes   n no";
+        return [["y", "yes"], ["n", "no"]];
     }
   }
-  if (state.search != null) return "type to filter   enter inspect   esc clear";
-  return "up/down move   enter inspect   a add   e edit   d forget   / search   tab switch   ? help   q quit";
+  if (state.search != null) return [["type", "filter"], ["↵", "open"], ["esc", "clear"]];
+  const nav = activeNav(state);
+  if (nav?.kind === "agent") return [["↑↓", "move"], ["tab", "panel"], ["?", "help"], ["q", "quit"]];
+  return [
+    ["↑↓", "move"],
+    ["↵", "inspect"],
+    ["a", "add"],
+    ["e", "edit"],
+    ["d", "forget"],
+    ["/", "search"],
+    ["tab", "panel"],
+    ["?", "help"],
+    ["q", "quit"],
+  ];
 }
 
-export function renderFooter(state: AppState, w: number): StyledLine[] {
-  const keys = sl(" " + hints(state), w, { dim: true });
-  const status = state.status;
-  const statusLine = status
-    ? sl(" " + status.text, w, status.kind === "error" ? { fg: 31, bold: true } : { fg: 36 })
-    : sl("", w, {});
-  return [keys, statusLine];
+export function footerHints(state: AppState): { left: Line; right: Line } {
+  const left: Span[] = [];
+  for (const [key, label] of hints(state)) {
+    left.push(span(" " + key + " ", { fg: "accent" }));
+    left.push(span(label + "  ", { dim: true }));
+  }
+
+  const section = activeSection(state);
+  const nav = activeNav(state);
+  let mode: string;
+  let count: string;
+  if (nav?.kind === "agent") {
+    mode = "agents";
+    count = `${state.vm.agents.length} integrations`;
+  } else if (section) {
+    mode = section.label.toLowerCase();
+    count = section.enabled ? `${section.rows.length} items` : "reserved";
+  } else {
+    mode = "";
+    count = "";
+  }
+
+  const right: Span[] = [
+    span(mode, { fg: "accent" }),
+    span("  ·  ", { dim: true }),
+    span(count + " ", { dim: true }),
+  ];
+  return { left, right };
+}
+
+export function statusLine(state: AppState): Line {
+  if (!state.status) return [span("")];
+  const s = state.status;
+  const glyph = s.kind === "error" ? "✗ " : "✓ ";
+  const style = s.kind === "error" ? { fg: "danger" as const, bold: true } : { fg: "success" as const };
+  return [span(" " + glyph + s.text, style)];
 }

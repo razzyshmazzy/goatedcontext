@@ -1,104 +1,140 @@
 /**
- * Full-screen modal overlays: Add preference, Actions (safe lifecycle transitions),
- * Forget confirmation, and Help. Rendering a modal as its own clean screen (rather than
- * compositing over the dashboard) keeps the draw logic simple and flicker-free. Each
- * returns a full `rows`-high frame so the renderer can emit it directly.
+ * Modal overlays composited over a DIMMED copy of the dashboard (UX #21): Add, Actions
+ * (safe lifecycle transitions), a risk-scaled Forget confirmation, and a context-aware
+ * Help sheet. The confirm dialog is tinted danger, names the destructive action, warns
+ * it cannot be undone, and defaults to the safe choice (spec §16 / UX #15-16).
  */
 import type { AppState, Modal } from "../state.ts";
-import { type Style, type StyledLine, blank, sl, truncate } from "../layout.ts";
+import { type PanelLine, type Role, panel, span, width } from "../layout.ts";
 
-const ACCENT = 36;
-
-interface Inner {
-  text: string;
-  style?: Style;
-}
-
-function box(cols: number, rows: number, title: string, inner: Inner[]): StyledLine[] {
-  const boxW = Math.min(cols - 4, 66);
-  const innerW = boxW - 4;
-  const top = "┌" + "─".repeat(boxW - 2) + "┐";
-  const bottom = "└" + "─".repeat(boxW - 2) + "┘";
-  const border = (content: string): string => "│ " + content.padEnd(innerW).slice(0, innerW) + " │";
-
-  const boxLines: StyledLine[] = [];
-  const left = Math.max(0, Math.floor((cols - boxW) / 2));
-  const indent = " ".repeat(left);
-  const push = (s: string, style: Style = {}) => boxLines.push(sl(indent + s, cols, style));
-
-  push(top, { fg: ACCENT });
-  push(border(truncate(title, innerW)), { bold: true, fg: ACCENT });
-  push(border(""));
-  for (const line of inner) push(border(truncate(line.text, innerW)), line.style ?? {});
-  push(border(""));
-  push(bottom, { fg: ACCENT });
-
-  // Center vertically.
-  const frame: StyledLine[] = [];
-  const top0 = Math.max(0, Math.floor((rows - boxLines.length) / 2));
-  for (let i = 0; i < top0; i++) frame.push(blank(cols));
-  for (const l of boxLines) frame.push(l);
-  while (frame.length < rows) frame.push(blank(cols));
-  return frame.slice(0, rows);
-}
-
-function innerFor(modal: Modal): { title: string; inner: Inner[] } {
+function content(modal: Modal): { title: string; accent: Role; lines: PanelLine[] } {
   switch (modal.type) {
     case "help":
-      return {
-        title: "Keyboard",
-        inner: [
-          { text: "up/down, j/k   move selection" },
-          { text: "tab            switch sidebar / list" },
-          { text: "enter          inspect selected item" },
-          { text: "left / h       back" },
-          { text: "a              add a preference" },
-          { text: "e              edit (approve / reject / lock)" },
-          { text: "d              forget a preference" },
-          { text: "/              search the list" },
-          { text: "g / G          top / bottom" },
-          { text: "r              refresh" },
-          { text: "q              quit" },
-        ],
-      };
+      return { title: "Keyboard", accent: "accent", lines: helpLines() };
     case "confirm":
-      return {
-        title: "Confirm",
-        inner: [
-          ...modal.prompt.split("\n").map((t) => ({ text: t })),
-          { text: "" },
-          { text: "[y] yes    [n] no", style: { bold: true } },
-        ],
-      };
+      return { title: "Forget preference", accent: "danger", lines: confirmLines(modal) };
     case "actions":
-      return {
-        title: "Actions",
-        inner: modal.items.map((it, i) => ({
-          text: `${i === modal.index ? ">" : " "} ${it.label}`,
-          style: i === modal.index ? ({ invert: true } as Style) : {},
-        })),
-      };
-    case "add": {
-      const scope =
-        modal.scope === "global" ? "[ global ]  repo   " : " global   [ repo ]  ";
-      return {
-        title: "Add preference",
-        inner: [
-          { text: `${modal.field === 0 ? ">" : " "} Rule:  ${modal.rule}${modal.field === 0 ? "_" : ""}`,
-            style: modal.field === 0 ? ({ fg: ACCENT } as Style) : {} },
-          { text: "" },
-          { text: `${modal.field === 1 ? ">" : " "} Scope: ${scope}`,
-            style: modal.field === 1 ? ({ fg: ACCENT } as Style) : {} },
-          { text: "" },
-          { text: "Added as an approved preference (origin: you).", style: { dim: true } },
-        ],
-      };
-    }
+      return { title: "Actions", accent: "accent", lines: actionLines(modal) };
+    case "add":
+      return { title: "Add preference", accent: "accent", lines: addLines(modal) };
   }
 }
 
-export function renderModal(state: AppState): StyledLine[] {
-  const modal = state.modal!;
-  const { title, inner } = innerFor(modal);
-  return box(state.size.cols, state.size.rows, title, inner);
+function key(k: string, label: string): PanelLine {
+  return { spans: [span("  " + k.padEnd(8), { fg: "accent" }), span(label, { dim: true })] };
+}
+
+function helpLines(): PanelLine[] {
+  return [
+    { spans: [span("")] },
+    key("↑↓ j k", "move selection"),
+    key("tab", "switch sidebar / list"),
+    key("enter", "inspect selected item"),
+    key("a", "add a preference"),
+    key("e", "edit (approve / reject / lock)"),
+    key("d", "forget a preference"),
+    key("/", "search the list"),
+    key("g G", "jump to top / bottom"),
+    key("r", "refresh"),
+    key("?", "this help"),
+    key("q", "quit"),
+    { spans: [span("")] },
+  ];
+}
+
+function confirmLines(modal: Extract<Modal, { type: "confirm" }>): PanelLine[] {
+  const parts = modal.prompt.split("\n");
+  const subject = parts[1] ?? "";
+  return [
+    { spans: [span("")] },
+    { spans: [span("  Forget this preference? This cannot be undone.", { bold: true })] },
+    { spans: [span("")] },
+    { spans: [span("  “" + subject + "”", { fg: "warning" })] },
+    { spans: [span("")] },
+    {
+      spans: [
+        span("  y ", { fg: "danger", bold: true }),
+        span("forget      ", { dim: true }),
+        span("n ", { bold: true }),
+        span("keep", { dim: true }),
+      ],
+    },
+    { spans: [span("")] },
+  ];
+}
+
+function actionLines(modal: Extract<Modal, { type: "actions" }>): PanelLine[] {
+  const lines: PanelLine[] = [{ spans: [span("")] }];
+  modal.items.forEach((it, i) => {
+    const selected = i === modal.index;
+    const role: Role = it.transition === "reject" ? "danger" : "accent";
+    lines.push({
+      spans: [
+        span(selected ? "  › " : "    ", selected ? { fg: "onAccent" } : {}),
+        span(it.label, selected ? { fg: "onAccent", bold: true } : { fg: role }),
+      ],
+      bg: selected ? "accent" : undefined,
+    });
+  });
+  lines.push({ spans: [span("")] });
+  return lines;
+}
+
+function addLines(modal: Extract<Modal, { type: "add" }>): PanelLine[] {
+  const ruleFocused = modal.field === 0;
+  const scopeFocused = modal.field === 1;
+  const cursor = ruleFocused ? "▏" : "";
+  const scope = (name: "global" | "repo") => {
+    const on = modal.scope === name;
+    return span(on ? ` ${name} ` : ` ${name} `, on ? { fg: "onAccent", bold: true, bg: "accent" } : { dim: true });
+  };
+  return [
+    { spans: [span("")] },
+    { spans: [span(ruleFocused ? "  › " : "    ", { fg: "accent" }), span("Rule", { dim: true })] },
+    { spans: [span("    "), span(modal.rule + cursor, ruleFocused ? {} : { dim: true })] },
+    { spans: [span("")] },
+    {
+      spans: [
+        span(scopeFocused ? "  › " : "    ", { fg: "accent" }),
+        span("Scope   ", { dim: true }),
+        scope("global"),
+        span(" "),
+        scope("repo"),
+      ],
+    },
+    { spans: [span("")] },
+    { spans: [span("  Saved as an approved preference, origin: you.", { dim: true })] },
+    { spans: [span("")] },
+  ];
+}
+
+/** Composite the active modal, centered, over the (already dim) base frame lines. */
+export function overlayModal(base: string[], state: AppState): string[] {
+  const { cols, rows } = state.size;
+  const { title, accent, lines } = content(state.modal!);
+
+  const maxLineW = lines.reduce((m, l) => Math.max(m, l.spans.reduce((n, s) => n + width(s.text), 0)), 0);
+  const boxW = Math.min(cols - 4, Math.max(width(title) + 8, maxLineW + 4, 44));
+  const boxH = Math.min(rows - 2, lines.length + 2);
+  const left = Math.max(0, Math.floor((cols - boxW) / 2));
+  const top = Math.max(0, Math.floor((rows - boxH) / 2));
+
+  const boxLines = panel({
+    width: boxW,
+    height: boxH,
+    title,
+    accent,
+    focused: true,
+    content: lines,
+    theme: state.theme,
+  });
+
+  const out = base.slice();
+  const leftPad = " ".repeat(left);
+  const rightPad = " ".repeat(Math.max(0, cols - left - boxW));
+  for (let j = 0; j < boxLines.length; j++) {
+    const r = top + j;
+    if (r >= 0 && r < out.length) out[r] = leftPad + boxLines[j] + rightPad;
+  }
+  return out;
 }

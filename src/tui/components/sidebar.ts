@@ -1,58 +1,69 @@
 /**
- * The left navigation column: a "Memory" group (the four sections with counts) and an
- * "Agents" group (detected integrations with a status glyph). The selected nav row is
- * highlighted; when focus is on the list the sidebar selection is shown bold rather than
- * inverted, so it's always clear which pane owns the cursor.
+ * The navigation column, rendered as two stacked panels — "Memory" (the four sections
+ * with counts) and "Agents" (detected integrations with a status glyph). The selected
+ * row shows a full-width accent bar when the sidebar is focused, and a dimmer accent
+ * marker when it isn't, so the user never loses their place but always knows which pane
+ * is live (spec §16 / UX pattern #7). A leading "›" marks selection even with color off.
  */
 import type { AppState, NavItem } from "../state.ts";
 import { sectionByKey } from "../state.ts";
-import { type Style, type StyledLine, blank, sl, truncate, twoCol } from "../layout.ts";
+import { type PanelLine, type Role, type Span, span, truncate, width } from "../layout.ts";
 
-const ACCENT = 36; // cyan
+function row(
+  label: string,
+  right: string,
+  rightRole: Role | "dim",
+  innerW: number,
+  selected: boolean,
+  sidebarFocused: boolean,
+): PanelLine {
+  const marker = selected ? "› " : "  ";
+  const barOn = selected && sidebarFocused;
+  const labelStyle = selected
+    ? { bold: true as const, fg: (barOn ? "onAccent" : "accent") as Role }
+    : {};
+  const rightStyle = barOn
+    ? { fg: "onAccent" as Role }
+    : rightRole === "dim"
+      ? { dim: true as const }
+      : { fg: rightRole };
 
-function sectionLabel(state: AppState, key: string): { label: string; count: string } {
-  const section = sectionByKey(state, key as never);
-  if (!section) return { label: key, count: "" };
-  const count = section.enabled ? String(section.rows.length) : "—";
-  return { label: section.label, count };
+  const labelText = truncate(marker + label, Math.max(0, innerW - width(right) - 1));
+  const gap = Math.max(0, innerW - width(labelText) - width(right));
+  const spans: Span[] = [
+    span(" " + labelText, labelStyle),
+    span(" ".repeat(gap)),
+    span(right + " ", rightStyle),
+  ];
+  return { spans, bg: barOn ? "accent" : undefined };
 }
 
-function selectionStyle(selected: boolean, focusHere: boolean): Style {
-  if (!selected) return {};
-  if (focusHere) return { invert: true };
-  return { bold: true, fg: ACCENT };
-}
-
-export function renderSidebar(state: AppState, w: number, height: number): StyledLine[] {
-  const focusSidebar = state.focus === "sidebar" && !state.detailOpen && state.search == null;
-  const lines: StyledLine[] = [];
-
-  lines.push(sl(" Memory", w, { dim: true }));
+export function memoryRows(state: AppState, innerW: number): PanelLine[] {
+  const focused = state.focus === "sidebar";
+  const out: PanelLine[] = [];
   state.nav.forEach((item: NavItem, idx) => {
     if (item.kind !== "section") return;
-    const selected = idx === state.navIndex;
-    const { label, count } = sectionLabel(state, item.key);
-    const marker = selected ? ">" : " ";
-    const text = twoCol(` ${marker} ${label}`, count, w);
-    lines.push({ text, style: selectionStyle(selected, focusSidebar) });
+    const section = sectionByKey(state, item.key);
+    if (!section) return;
+    const count = section.enabled ? String(section.rows.length) : "—";
+    out.push(row(section.label, count, "dim", innerW, idx === state.navIndex, focused));
   });
+  return out;
+}
 
-  lines.push(blank(w));
-  lines.push(sl(" " + "─".repeat(Math.max(0, w - 2)), w, { dim: true }));
-  lines.push(sl(" Agents", w, { dim: true }));
-
+export function agentRows(state: AppState, innerW: number): PanelLine[] {
+  const focused = state.focus === "sidebar";
+  const out: PanelLine[] = [];
   state.nav.forEach((item: NavItem, idx) => {
     if (item.kind !== "agent") return;
     const agent = state.vm.agents.find((a) => a.id === item.id);
     if (!agent) return;
-    const selected = idx === state.navIndex;
-    const marker = selected ? ">" : " ";
-    const label = truncate(agent.label, Math.max(0, w - 6));
-    const text = twoCol(` ${marker} ${label}`, agent.mark, w);
-    lines.push({ text, style: selectionStyle(selected, focusSidebar) });
+    const role: Role | "dim" = agent.healthy
+      ? "success"
+      : agent.installed
+        ? "warning"
+        : "dim";
+    out.push(row(agent.label, agent.mark, role, innerW, idx === state.navIndex, focused));
   });
-
-  // Pad to the full column height.
-  while (lines.length < height) lines.push(blank(w));
-  return lines.slice(0, height);
+  return out;
 }

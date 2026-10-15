@@ -29,6 +29,7 @@ import {
 import { decodeKey, keyToAction } from "./input.ts";
 import { renderFrame } from "./renderer.ts";
 import { createTerminal, type TermIO, type Terminal } from "./terminal.ts";
+import { type Theme, detectDepth, makeTheme } from "./theme.ts";
 
 export interface RunTuiOptions {
   /** Inject terminal streams (tests); defaults to process.stdin/stdout. */
@@ -37,15 +38,14 @@ export interface RunTuiOptions {
   cwd?: string;
   /** Inject an already-open context (tests); when given, it is NOT closed on exit. */
   ctx?: CtxContext;
-  /** Force colors on/off; defaults to a TTY + NO_COLOR check. */
-  colors?: boolean;
+  /** Override the theme (tests default to no-color); otherwise detected from the env. */
+  theme?: Theme;
 }
 
-function computeColors(env: NodeJS.ProcessEnv, injected: boolean, opts: RunTuiOptions): boolean {
-  if (opts.colors != null) return opts.colors;
-  if (injected) return false;
-  const stdout = process.stdout;
-  return Boolean(stdout.isTTY) && !env.NO_COLOR && env.TERM !== "dumb";
+function computeTheme(env: NodeJS.ProcessEnv, injected: boolean, opts: RunTuiOptions): Theme {
+  if (opts.theme) return opts.theme;
+  if (injected) return makeTheme(0);
+  return makeTheme(detectDepth(env, Boolean(process.stdout.isTTY)));
 }
 
 const PAST: Record<string, string> = { approve: "approved", reject: "rejected", lock: "locked" };
@@ -76,7 +76,7 @@ export async function runTui(env: NodeJS.ProcessEnv, opts: RunTuiOptions = {}): 
     stdin: process.stdin as unknown as TermIO["stdin"],
     stdout: process.stdout as unknown as TermIO["stdout"],
   };
-  const colors = computeColors(env, Boolean(opts.io), opts);
+  const theme = computeTheme(env, Boolean(opts.io), opts);
 
   let terminal: Terminal;
   try {
@@ -88,7 +88,7 @@ export async function runTui(env: NodeJS.ProcessEnv, opts: RunTuiOptions = {}): 
     return;
   }
 
-  let state: AppState = initState(buildViewModel(ctx, buildOpts), { size: terminal.size(), colors });
+  let state: AppState = initState(buildViewModel(ctx, buildOpts), { size: terminal.size(), theme });
 
   let settled = false;
   let resolveRun: () => void = () => {};

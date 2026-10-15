@@ -7,6 +7,7 @@
 import type { ListRow, PreferenceVM, SectionKey, ViewModel } from "./types.ts";
 import type { Transition } from "./data.ts";
 import { listCapacity } from "./layout.ts";
+import type { Theme } from "./theme.ts";
 
 export type Focus = "sidebar" | "list";
 
@@ -43,7 +44,7 @@ export interface AppState {
   modal: Modal | null;
   status: StatusMsg | null;
   size: { cols: number; rows: number };
-  colors: boolean;
+  theme: Theme;
   quit: boolean;
 }
 
@@ -157,7 +158,7 @@ export function buildNav(vm: ViewModel): NavItem[] {
 
 export interface InitOptions {
   size: { cols: number; rows: number };
-  colors: boolean;
+  theme: Theme;
 }
 
 export function initState(vm: ViewModel, opts: InitOptions): AppState {
@@ -173,7 +174,7 @@ export function initState(vm: ViewModel, opts: InitOptions): AppState {
     modal: null,
     status: null,
     size: opts.size,
-    colors: opts.colors,
+    theme: opts.theme,
     quit: false,
   };
 }
