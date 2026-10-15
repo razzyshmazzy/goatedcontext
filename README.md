@@ -82,6 +82,22 @@ ctx why <id>       # why a preference exists
 ctx forget <id>    # remove one
 ```
 
+### Browse it interactively
+
+Run `ctx` with no arguments in a terminal to open the interactive memory browser — a
+compact, keyboard-driven terminal UI for your preferences, signals, proposals and agent
+integrations:
+
+```bash
+ctx
+```
+
+Arrow keys or `j`/`k` move, `tab` switches panes, `enter` inspects, `a` adds a
+preference, `e` approves/rejects/locks, `d` forgets (with confirmation), `/` searches,
+`?` shows help, `q` quits. In a pipe, script, CI, or any non-interactive shell `ctx`
+keeps its existing behavior and prints help — it never emits terminal control codes
+there.
+
 ## How it works
 
 There are two separate paths, read and write, kept apart on purpose.

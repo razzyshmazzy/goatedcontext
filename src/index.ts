@@ -27,4 +27,22 @@ function splitArgv(argv: string[]): { main: string[]; passthrough: string[] | nu
 
 const { main, passthrough } = splitArgv(process.argv.slice(2));
 
-await runCli(main, { passthrough });
+// Bare `ctx` in an interactive terminal opens the TUI (spec §2). Every other case —
+// any subcommand/flag, a `--`/`--exec` passthrough, a non-TTY (pipe/script/CI/MCP), or
+// CTX_NO_TUI — falls through to the CLI, so redirected output never sees a TUI escape.
+// The TUI module is imported LAZILY so normal CLI invocations never load it.
+const { shouldLaunchTui } = await import("./tui/launch.ts");
+if (
+  shouldLaunchTui({
+    args: main,
+    hasPassthrough: passthrough !== null,
+    stdinTTY: Boolean(process.stdin.isTTY),
+    stdoutTTY: Boolean(process.stdout.isTTY),
+    env: process.env,
+  })
+) {
+  const { runTui } = await import("./tui/app.ts");
+  await runTui(process.env);
+} else {
+  await runCli(main, { passthrough });
+}
