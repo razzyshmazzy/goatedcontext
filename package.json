@@ -63,6 +63,9 @@
     "bench:save:pilot": "bun run benchmarks/autonomous-save/cli.ts pilot",
     "bench:save:check": "bun test ./benchmarks/autonomous-save/tests/score.test.ts",
     "bench:save:typecheck": "tsc --noEmit -p benchmarks/autonomous-save/tsconfig.json",
+    "bench:overseer": "bun run benchmarks/overseer/cli.ts",
+    "bench:overseer:check": "bun test ./benchmarks/overseer/tests/score.test.ts",
+    "bench:overseer:typecheck": "tsc --noEmit -p benchmarks/overseer/tsconfig.json",
     "typecheck": "tsc --noEmit",
     "prepack": "bun run build",
     "prepublishOnly": "bun run typecheck && bun run build && bun test"

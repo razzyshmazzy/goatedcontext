@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
@@ -50,6 +50,10 @@ import {
 import { detectRepoIdentity } from "../core/repos/repo.ts";
 import { createGitProbe } from "../utils/git.ts";
 import type { EnvScope, RiskLevel } from "../core/environments/service.ts";
+import { resolvePaths } from "../storage/paths.ts";
+import { claudeEventToAgentEvent, type ClaudeHookPayload } from "../adapters/claude/overseer-hook.ts";
+import { defaultSpecsPath, loadSpecs, runEvent } from "../core/overseer/runtime.ts";
+import type { OverseerConfig } from "../core/overseer/overseer.ts";
 
 /** Args after a `--`/`--exec` separator, captured by the entry point for `env run`. */
 export interface CliDeps {
@@ -1165,6 +1169,81 @@ export function buildProgram(deps: CliDeps): Command {
       }
     });
 
+  // ---- event (internal: overseer event-driven activation, prototype) ------
+  // The V1 overseer path (§4): a PreToolUse/PostToolUse-style hook pipes a Claude
+  // hook payload on stdin; we normalize it to a host-independent AgentEvent, replay
+  // the bounded session window through the deterministic overseer, and emit any
+  // newly-activated context to stdout wrapped in <ctx-overseer-context>. This is a
+  // SEPARATE pipeline from prompt-time retrieval (`hook`) and never touches the
+  // preference DB — it reads only the sidecar activation specs + per-session state.
+  // Fail-open: any error → no output, exit 0.
+  program
+    .command("event")
+    .description("Internal: overseer event-activation hook (prototype). Reads a host hook payload on stdin.")
+    .argument("[host]", "Event host adapter (claude)", "claude")
+    .option("--debug", "Write diagnostics to <ctx home>/overseer/event.log")
+    .option("--state-metrics", "Append a one-line JSON latency/candidate record to stderr")
+    .action(async (host, opts) => {
+      const env = deps.env ?? process.env;
+      const debug = opts.debug || env.CTX_OVERSEER_DEBUG;
+      try {
+        if (host !== "claude") return; // only Claude is wired this pass
+        const raw = await readStdin();
+        if (!raw.trim()) return;
+        const payload = JSON.parse(raw) as ClaudeHookPayload;
+        // seq is managed inside runEvent via per-session state; pass a placeholder.
+        const event = claudeEventToAgentEvent(payload, 0);
+        if (!event) return;
+        const home = resolvePaths(env).home;
+        const specs = loadSpecs(defaultSpecsPath(home, env));
+        if (specs.length === 0) {
+          if (debug) overseerDebug(home, `[event] no specs at ${defaultSpecsPath(home, env)}`);
+          return;
+        }
+        let currentRepo: string | null = event.repo ?? null;
+        if (!currentRepo && event.cwd) {
+          try {
+            currentRepo = detectRepoIdentity(event.cwd)?.identity ?? null;
+          } catch {
+            /* best-effort */
+          }
+        }
+        // Optional decay/workflow toggles via env (defaults: stateless activation).
+        const config: Partial<OverseerConfig> = {
+          useWorkflowState: env.CTX_OVERSEER_WORKFLOW === "1",
+          useDecay: env.CTX_OVERSEER_DECAY === "1",
+        };
+        const result = runEvent(home, event, { specs, config, currentRepo });
+        if (result.block) process.stdout.write(result.block + "\n");
+        if (opts.stateMetrics) {
+          process.stderr.write(
+            JSON.stringify({
+              seq: result.observation?.seq,
+              phase: event.phase,
+              candidates: result.observation?.candidateCount ?? 0,
+              deliveries: result.deliveries.length,
+              latencyMs: Number((result.observation?.elapsedMs ?? 0).toFixed(3)),
+            }) + "\n",
+          );
+        }
+        if (debug) {
+          overseerDebug(
+            home,
+            `[event] phase=${event.phase} cand=${result.observation?.candidateCount ?? 0} deliver=${result.deliveries.length} ms=${(result.observation?.elapsedMs ?? 0).toFixed(2)}`,
+          );
+        }
+      } catch (err) {
+        if (debug) {
+          try {
+            overseerDebug(resolvePaths(deps.env ?? process.env).home, `error: ${(err as Error).message}`);
+          } catch {
+            /* ignore */
+          }
+        }
+        // swallow — fail open
+      }
+    });
+
   // ---- mcp (universal MCP transport over stdio) ---------------------------
   // Serves the small MCP tool surface (get_context + memory writes) backed by the SAME
   // core services as the CLI. The SDK is imported LAZILY so normal `ctx` invocations
@@ -2175,6 +2254,16 @@ function hookDebug(deps: CliDeps, msg: string): void {
   try {
     const home = (deps.env ?? process.env).CTX_HOME ?? "";
     appendFileSync((home ? home + "/" : "") + "hook.log", `${new Date().toISOString()} ${msg}\n`);
+  } catch {
+    /* diagnostics are best-effort */
+  }
+}
+
+/** Best-effort overseer diagnostics to <CTX_HOME>/overseer/event.log (only when --debug). */
+function overseerDebug(home: string, msg: string): void {
+  try {
+    mkdirSync(join(home, "overseer"), { recursive: true });
+    appendFileSync(join(home, "overseer", "event.log"), `${new Date().toISOString()} ${msg}\n`);
   } catch {
     /* diagnostics are best-effort */
   }
