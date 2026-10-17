@@ -19,7 +19,13 @@ import type { Condition } from "../preferences/conditions.ts";
 import { buildRuntimeContext, type RuntimeContext } from "./runtime-context.ts";
 import { evaluateCondition } from "./evaluate.ts";
 import type { SignalService } from "../signals/service.ts";
-import { taskSignalDomains, collectDomainsFromText, canonicalDomain, isNamingIntent } from "../signals/domains.ts";
+import {
+  taskSignalDomains,
+  collectDomainsFromText,
+  canonicalDomain,
+  isNamingIntent,
+  isExplanatoryIntent,
+} from "../signals/domains.ts";
 import {
   selectRelevantSignalEvidence,
   DEFAULT_SIGNAL_EVIDENCE_BUDGET,
@@ -389,6 +395,11 @@ export class RetrievalEngine {
           (a, b) =>
             b.relevance - a.relevance ||
             precedenceRank(a.pref) - precedenceRank(b.pref) ||
+            // Deterministic tie-break by rule TEXT before the id: ids are random ULIDs, so
+            // breaking equal-relevance ties on id alone makes top-1 ordering vary run to
+            // run. Rule text is stable content, so ranking is reproducible regardless of
+            // which random id a seed happened to get.
+            a.pref.rule.localeCompare(b.pref.rule) ||
             a.pref.id.localeCompare(b.pref.id),
         );
       const keptRelevant = effectiveRelevant.slice(0, limit);
@@ -541,6 +552,13 @@ export class RetrievalEngine {
     // Greg" and "what do you call me?" overlap almost no vocabulary (see isNamingIntent).
     // Computed once for the task; each candidate's rule is checked below. Additive only.
     const taskNaming = isNamingIntent(task);
+    // EXPLANATORY/CONCEPTUAL queries ("what is a queue?", "explain Redis eviction") must
+    // strongly resist preference injection: a stored decision lexically overlaps the topic
+    // being asked ABOUT, but the user wants general knowledge, not their convention (spec
+    // §4, §7). Naming queries are never treated as explanatory (they bridge by intent).
+    // When explanatory, task-relevance credit (domain/category/overlap) is withheld so the
+    // candidate falls below threshold on standing weight alone — it never promotes a pref.
+    const taskExplanatory = !taskNaming && isExplanatoryIntent(task);
     const idf = this.buildIdf(candidates);
 
     const denom =
@@ -557,22 +575,34 @@ export class RetrievalEngine {
       for (const t of taskTerms) if (prefTerms.has(t)) shared += idf.get(t) ?? DEFAULT_IDF;
       const overlap = shared / denom;
 
-      // Match on the raw classifier domain (unchanged) OR the canonical task-domain set
-      // (new). The canonical path only ADDS matches (it never removes a raw match), so this
-      // strictly increases recall for intent-worded tasks and cannot drop an existing match.
-      // A third, equally-additive path bridges naming/identity by intent: a naming query
-      // matches a naming rule even with no stored domain and no shared vocabulary.
+      // Domain match, from most to least specific:
+      //  (1) the rule's STORED primary domain (raw or canonical) intersects the task's;
+      //  (2) the rule's FULL inferred domain footprint intersects the task's — the stored
+      //      domain is a single lossy label (a rule touching two areas, e.g. "Deploy
+      //      services to Fly.io", stores only the tiebreak winner), so matching on the
+      //      rule's whole inferred set recovers the case where the query names the OTHER
+      //      area it legitimately belongs to (spec §5/§6 — use the rule's own text);
+      //  (3) naming/identity bridged by intent (no shared vocabulary needed).
+      // Every path is ADDITIVE — it can only add a match, never drop one.
+      const ruleDomains = inferDomains(pref.rule);
       const domainMatch =
         (pref.domain != null &&
           (taskDomains.has(pref.domain) || taskCanonicalDomains.has(canonicalDomain(pref.domain)))) ||
+        [...ruleDomains].some((d) => taskDomains.has(d) || taskCanonicalDomains.has(canonicalDomain(d))) ||
         (taskNaming && isNamingIntent(pref.rule));
       const categoryMatch =
         taskTerms.has(stem(pref.category)) || taskDomains.has(pref.category);
 
       let score = 0;
-      if (domainMatch) score += W_DOMAIN;
-      if (categoryMatch) score += W_CATEGORY;
-      score += W_OVERLAP * overlap;
+      // Withhold ALL task-relevance credit for a purely explanatory query, so an entity
+      // overlap can never inject a preference the user did not ask for (spec §7). `always`
+      // and matched `conditional` rules bypass this scorer entirely, so standing universal
+      // rules are unaffected — only task-scored `relevant` prefs are suppressed.
+      if (!taskExplanatory) {
+        if (domainMatch) score += W_DOMAIN;
+        if (categoryMatch) score += W_CATEGORY;
+        score += W_OVERLAP * overlap;
+      }
       score += baseWeight(pref);
 
       score = clamp01(score);

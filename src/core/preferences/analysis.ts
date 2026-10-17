@@ -13,6 +13,17 @@
 
 export type Polarity = "positive" | "negative" | "neutral";
 
+/**
+ * Derivational suffixes that turn a verb/root into a noun form, in longest-first
+ * order. Stripping these lets morphological variants collapse to one stem so that a
+ * query's noun phrasing matches a rule's verb phrasing and vice versa — the dominant
+ * lexical-recall miss (e.g. "deployment" ↛ "deploy", "persistence" ↛ "persist",
+ * "configuration" ↛ "configure"). Each strip is GUARDED (see `stem`) so it never
+ * produces a tiny, ambiguous root like "st" from "station". Declared here (before the
+ * domain index that calls `stem` at module load) to avoid a temporal-dead-zone error.
+ */
+const DERIVATIONAL_SUFFIXES = [/ement$/, /ment$/, /ation$/, /ition$/, /ence$/, /ance$/];
+
 /** Structural / low-signal words removed from all token sets. */
 const STOPWORDS = new Set([
   "the", "a", "an", "and", "or", "but", "to", "of", "in", "on", "for", "with",
@@ -124,6 +135,23 @@ export const DOMAINS: Record<string, DomainDef> = {
     keywords: [
       "docker", "kubernetes", "redis", "cache", "caching", "queue", "kafka",
       "terraform", "deploy", "infrastructure", "distributed", "memcached",
+      // background-work vocabulary: lets a proper-noun-only memory ("Use BullMQ for
+      // background jobs") classify into this domain so an oblique "add a job queue"
+      // query retrieves it WITHOUT the query having to name the product (spec §8).
+      "job", "jobs", "worker", "workers",
+    ],
+  },
+  // Authentication / access control. The classifier previously had NO auth domain, so
+  // "Keep auth server-side" stored with no domain and never matched "add authentication"
+  // (auth is a clipping of authentication — morphology can't bridge it). Non-exclusive:
+  // a project can hold several compatible auth rules (e.g. sessions + RBAC).
+  security: {
+    exclusive: false,
+    keywords: [
+      "auth", "authentication", "authenticate", "authorization", "authorize",
+      "login", "logout", "signin", "signup", "oauth", "jwt", "session", "sessions",
+      "credential", "credentials", "password", "rbac", "permission", "permissions",
+      "sso", "mfa",
     ],
   },
   // The natural language Claude should respond in — a single-choice decision, so
@@ -169,12 +197,33 @@ function buildDomainIndex(): Record<string, DomainIndexEntry> {
   return idx;
 }
 
-/** Very light stemmer: collapse common plural/verb suffixes deterministically. */
+/**
+ * Light, deterministic stemmer: collapse common inflectional AND a few derivational
+ * suffixes so morphological variants of the same concept share a stem. Deliberately
+ * conservative — short tokens (≤3 chars, e.g. "io", "db", "ci") are left intact, and
+ * a derivational strip is applied only when it leaves a root of ≥4 chars, so technical
+ * identifiers and proper nouns are never mangled into an ambiguous fragment. The same
+ * function is applied to BOTH the stored rule and the query, so any over-collapse is
+ * symmetric (it affects matching consistency, never one side only).
+ */
 export function stem(token: string): string {
-  return token
-    .replace(/(ies)$/, "y")
-    .replace(/(ing|ed|es|s)$/, "")
-    .replace(/y$/, "");
+  let t = token;
+  if (t.length <= 3) return t;
+  t = t.replace(/ies$/, "y");
+  for (const re of DERIVATIONAL_SUFFIXES) {
+    if (re.test(t)) {
+      const stripped = t.replace(re, "");
+      if (stripped.length >= 4) {
+        t = stripped;
+        break; // at most one derivational strip
+      }
+    }
+  }
+  t = t.replace(/(ing|ed|es|s)$/, "");
+  t = t.replace(/e$/, "");
+  t = t.replace(/y$/, "");
+  t = t.replace(/([a-z])\1$/, "$1"); // collapse a trailing doubled consonant: "logg" → "log"
+  return t;
 }
 
 /**

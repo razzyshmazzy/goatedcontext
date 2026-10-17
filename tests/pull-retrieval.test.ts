@@ -24,7 +24,7 @@ const contextSkill = CLAUDE_SKILLS.find((s) => s.dir === "context")!.content;
 
 describe("pull policy — standing instruction", () => {
   test("has a stable version marker", () => {
-    expect(PULL_POLICY_VERSION).toBe("2");
+    expect(PULL_POLICY_VERSION).toBe("3");
   });
 
   test("core concept teaches the latent decision point AND both boundaries", () => {
@@ -36,6 +36,17 @@ describe("pull policy — standing instruction", () => {
     expect(c).toContain("retrieve it when it was not already provided");
     // do-not-overcall boundary
     expect(c).toContain("do not retrieve for requests that clearly do not depend");
+  });
+
+  test("core concept teaches the oblique/outcome-phrased call-recognition principle", () => {
+    const c = PULL_POLICY_CORE.toLowerCase();
+    // an outcome-phrased request can hide a decision axis…
+    expect(c).toContain("oblique");
+    expect(c).toContain("outcome");
+    expect(c).toContain("decision axis it implies");
+    // …and the guard against over-calling on mere vagueness (spec §2, §3)
+    expect(c).toContain("not whether");
+    expect(c).toContain("vague");
   });
 
   test("rendered guidance carries the action, both example sets, and the dedup clause", () => {

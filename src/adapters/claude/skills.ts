@@ -152,7 +152,13 @@ Persistent developer preferences are retrieved for you automatically.
   convention, architecture decision, how the user wants to be addressed, or a
   decision the project already settled — and when that context was not already
   injected this turn, retrieve it yourself: run
-  \`ctx get --cwd "$PWD" --task "<concise task>"\` (read-only, safe anytime). Pass a
+  \`ctx get --cwd "$PWD" --task "<concise task>"\` (read-only, safe anytime). This
+  includes oblique, outcome-phrased requests ("give this a safety net", "make it
+  production-ready", "add persistence", "clean this up"): they often still hide such a
+  choice, so translate the goal into the decision axis it implies (testing, database,
+  deployment, architecture, …) and check that. The test is whether the right
+  implementation could depend on an existing user/project decision, not whether the
+  task is vague. Pass a
   semantic query naming the underlying decision, not a bare keyword echo (e.g.
   "preferred name / how to address the user", not "what do you call me"). Do not
   query for requests that clearly do not depend on developer/project context

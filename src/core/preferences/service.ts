@@ -176,8 +176,16 @@ export interface TransitionOptions {
   force?: boolean;
 }
 
-/** Subject-similarity threshold above which same-polarity proposals merge. */
-const MERGE_SUBJECT_THRESHOLD = 0.6;
+/**
+ * Subject-similarity threshold above which same-polarity proposals merge. Recalibrated
+ * 0.6 → 0.55 alongside the retrieval-engine stemmer upgrade: the improved stemmer now
+ * unifies morphological variants (e.g. "service" / "services" → one token), which removes
+ * the redundant near-duplicate tokens the old inconsistent stemmer left behind and so
+ * systematically lowers the Jaccard of genuine paraphrases by a few points. 0.55 keeps
+ * those paraphrases merging while staying well clear of the contradiction/no-merge cases
+ * (opposite polarity is handled separately and never merges regardless of score).
+ */
+const MERGE_SUBJECT_THRESHOLD = 0.55;
 const PROPOSE_START_CONFIDENCE = 0.5;
 const PROPOSE_CONFIDENCE_STEP = 0.1;
 const PROPOSE_CONFIDENCE_CAP = 0.95;

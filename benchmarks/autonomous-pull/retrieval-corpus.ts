@@ -42,6 +42,9 @@ export interface CorpusCase {
   seed?: CorpusSeed;
   /** Lowercase substrings; a retrieval "hit" = a returned rule contains any of them. */
   expect?: string[];
+  /** Documented engine recall ceiling (the oblique query can't contain the proper-noun
+   *  answer): excluded from the recall PASS bar but still shown. See OC-job-queue. */
+  knownEngineMiss?: boolean;
 }
 
 /** One seed per distinct decision, so seeds never conflict inside the shared store. */
@@ -181,6 +184,113 @@ export const CORPUS: CorpusCase[] = [
   { id: "N-typo", klass: "negative", relevant: false, probe: "Fix the typo in this comment.", query: "Fix the typo in this comment." },
 ];
 
+/**
+ * FOCUSED oblique-call corpus (spec §6). It isolates the ONE question the policy change
+ * targets: on an OBLIQUE, outcome-phrased request ("give this a safety net", "ship this"),
+ * does the implied decision axis map to a stored preference the engine can return — and do
+ * conceptual look-alikes stay clean? ~half should-call (an outcome that hides a real
+ * decision + its seed + the expanded query good construction yields), ~half should-NOT-call
+ * (general/conceptual questions, deliberately topically adjacent to a seed to stress
+ * precision — "what is a queue?" next to a job-queue seed, "Redis eviction" next to a Redis
+ * cache seed). Run in its OWN sandbox so these seeds never perturb the main CORPUS metrics.
+ *
+ * Deterministically this measures retrieval-success-after-good-query and precision; the
+ * model's actual call/no-call decision (the recall this pass improves) is a LIVE property,
+ * measured by the pilot's no_call taxonomy — the deterministic pass only proves that a
+ * correctly-formed oblique query lands, and that adjacent concepts do not leak.
+ */
+export const OBLIQUE_CALL: CorpusCase[] = [
+  // ---- SHOULD CALL: an outcome that hides a decision, paired with a stored decision ----
+  {
+    id: "OC-safety-net", klass: "oblique", relevant: true,
+    probe: "Give this parser a safety net.",
+    query: "testing framework and test conventions for this repository",
+    seed: { rule: "Use Vitest for unit tests.", scope: "global" }, expect: ["vitest"],
+  },
+  {
+    id: "OC-persistence", klass: "oblique", relevant: true,
+    probe: "Add persistence.",
+    query: "database / persistence preference for this project",
+    seed: { rule: "Use PostgreSQL for relational persistence.", scope: "global" }, expect: ["postgres", "postgresql"],
+  },
+  {
+    id: "OC-database-layer", klass: "oblique", relevant: true,
+    probe: "Add a database layer.",
+    query: "database / persistence layer choice for this project",
+    // shares the PostgreSQL decision (deduped) — a second oblique surface for the same axis
+    expect: ["postgres", "postgresql"],
+  },
+  {
+    id: "OC-caching", klass: "oblique", relevant: true,
+    probe: "Set up caching.",
+    query: "caching layer / architecture choice for this project",
+    seed: { rule: "Use Redis for caching.", scope: "global" }, expect: ["redis"],
+  },
+  {
+    id: "OC-job-queue", klass: "oblique", relevant: true,
+    probe: "Add a job queue.",
+    query: "background job queue / task-queue library choice for this project",
+    seed: { rule: "Use BullMQ for background job queues.", scope: "global" }, expect: ["bullmq"],
+    // Previously a documented engine ceiling (the query cannot name the proper noun
+    // "BullMQ"). RESOLVED by the retrieval-engine pass: "job"/"jobs" now classify into the
+    // infrastructure domain, so the oblique query matches by domain without naming the
+    // product. Kept here as a regression guard that the ceiling stays closed.
+  },
+  {
+    id: "OC-add-auth", klass: "oblique", relevant: true,
+    probe: "Add auth.",
+    query: "authentication / access-tokens approach for this project",
+    seed: { rule: "Auth uses JWT access tokens with refresh-token rotation.", scope: "repo" }, expect: ["jwt", "token"],
+  },
+  {
+    id: "OC-add-logging", klass: "oblique", relevant: true,
+    probe: "Add logging.",
+    query: "logging library / structured-logging convention for this project",
+    seed: { rule: "Use pino for structured JSON logging.", scope: "global" }, expect: ["pino"],
+  },
+  {
+    id: "OC-production-ready", klass: "oblique", relevant: true,
+    probe: "Make this production ready.",
+    query: "deployment / release convention — how we deploy to production",
+    seed: { rule: "Deploy services to Fly.io with health checks and graceful shutdown.", scope: "global" },
+    expect: ["fly.io", "fly"],
+  },
+  {
+    id: "OC-ship", klass: "oblique", relevant: true,
+    probe: "Ship this.",
+    query: "how we deploy and release to production",
+    // shares the Fly.io deployment decision (deduped)
+    expect: ["fly.io", "fly"],
+  },
+  {
+    id: "OC-clean-up", klass: "oblique", relevant: true,
+    probe: "Clean this up.",
+    query: "refactor / architecture & style conventions for this project",
+    seed: { rule: "Follow hexagonal architecture: keep domain logic free of I/O and frameworks.", scope: "repo" },
+    expect: ["hexagonal"],
+  },
+  {
+    id: "OC-wire-up", klass: "oblique", relevant: true,
+    probe: "Wire this into the app.",
+    query: "module integration / dependency-injection wiring convention for this project",
+    seed: { rule: "Features are wired through the DI container in src/container.ts.", scope: "repo" },
+    expect: ["di container", "container"],
+  },
+
+  // ---- SHOULD NOT CALL: conceptual/factual questions, several adjacent to a seed above ----
+  { id: "NC-redis-evict", klass: "negative", relevant: false, probe: "Explain how Redis eviction works.", query: "Explain how Redis eviction works." },
+  { id: "NC-what-queue", klass: "negative", relevant: false, probe: "What is a queue?", query: "What is a queue?" },
+  { id: "NC-regex-mean", klass: "negative", relevant: false, probe: "What does this regex mean?", query: "What does this regex mean?" },
+  { id: "NC-promise-pending", klass: "negative", relevant: false, probe: "Why is this promise pending?", query: "Why is this promise pending?" },
+  { id: "NC-oauth", klass: "negative", relevant: false, probe: "What is OAuth?", query: "What is OAuth?" },
+  { id: "NC-eventual", klass: "negative", relevant: false, probe: "Explain eventual consistency.", query: "Explain eventual consistency." },
+  { id: "NC-json-parse", klass: "negative", relevant: false, probe: "What does JSON.parse do?", query: "What does JSON.parse do?" },
+  { id: "NC-btree", klass: "negative", relevant: false, probe: "What is a B-tree?", query: "What is a B-tree?" },
+  { id: "NC-tls", klass: "negative", relevant: false, probe: "How does TLS work?", query: "How does TLS work?" },
+  { id: "NC-memoization", klass: "negative", relevant: false, probe: "What is memoization?", query: "What is memoization?" },
+  { id: "NC-what-logging", klass: "negative", relevant: false, probe: "What is structured logging?", query: "What is structured logging?" },
+];
+
 /** Every distinct seed in the corpus, deduped by rule text (so no decision is double-seeded). */
 export function corpusSeeds(cases: CorpusCase[] = CORPUS): CorpusSeed[] {
   const byRule = new Map<string, CorpusSeed>();
@@ -189,14 +299,14 @@ export function corpusSeeds(cases: CorpusCase[] = CORPUS): CorpusSeed[] {
 }
 
 /** Create an isolated CTX_HOME + git repo and seed every corpus preference once. */
-export function setupCorpusSandbox(): Sandbox {
+export function setupCorpusSandbox(cases: CorpusCase[] = CORPUS): Sandbox {
   const ctxHome = mkdtempSync(join(tmpdir(), "ctxcorpus-home-"));
   const repo = mkdtempSync(join(tmpdir(), "ctxcorpus-repo-"));
   const git = (a: string[]) => spawnSync("git", a, { cwd: repo, stdio: "ignore" });
   git(["init", "-q"]);
   git(["remote", "add", "origin", "https://github.com/acme/retrieval-corpus.git"]);
   runCtx(["init"], ctxHome, repo);
-  for (const seed of corpusSeeds()) {
+  for (const seed of corpusSeeds(cases)) {
     const r = runCtx(
       ["agent", "remember", seed.rule, "--origin", "user", "--scope", seed.scope, "--agent-id", "ctxcorpus"],
       ctxHome,
@@ -229,6 +339,8 @@ export interface CaseResult {
   queryHit: boolean;
   probeRuleCount: number;
   queryRuleCount: number;
+  /** Carried from the case: a documented engine recall ceiling, excluded from the bar. */
+  knownEngineMiss: boolean;
 }
 
 export function runCorpus(sb: Sandbox, cases: CorpusCase[] = CORPUS): CaseResult[] {
@@ -241,6 +353,7 @@ export function runCorpus(sb: Sandbox, cases: CorpusCase[] = CORPUS): CaseResult
       queryHit: hit(queryRules, c.expect),
       probeRuleCount: probeRules.length,
       queryRuleCount: queryRules.length,
+      knownEngineMiss: c.knownEngineMiss === true,
     };
   });
 }

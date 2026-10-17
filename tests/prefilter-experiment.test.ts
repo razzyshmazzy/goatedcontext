@@ -43,13 +43,16 @@ test("a DOMAIN-only relevance match is returned by the engine but DROPPED by a t
   }
 });
 
-test("prefilter safety is phrasing-dependent, not semantic (stemmer 'table' vs 'tables' mismatch)", () => {
+test("prefilter safety is phrasing-dependent, not semantic (domain-only matches)", () => {
   const t = makeTestContext();
   try {
-    // Documents a second false-negative source: the light stemmer maps 'tables'→'tabl'
-    // but 'table'→'table', so a direct lexical match can still miss.
+    // The retrieval-engine stemmer upgrade now unifies singular/plural & derived forms,
+    // so the old 'tables'/'table' mismatch is GONE — a direct lexical match no longer
+    // misses on that axis. The prefilter-safety point stands regardless: the test above
+    // shows a legitimate match with ZERO shared subject tokens (domain-only, W_DOMAIN),
+    // which a lexical prefilter would still wrongly drop.
     const { subjectTokens: subj } = require("../src/core/preferences/analysis.ts");
-    expect(subj("tables").join(",")).not.toBe(subj("table").join(",")); // stems differ
+    expect(subj("tables").join(",")).toBe(subj("table").join(",")); // stems now unify
   } finally {
     t.cleanup();
   }

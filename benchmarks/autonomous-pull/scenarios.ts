@@ -154,6 +154,120 @@ export const IRRELEVANT: Scenario[] = [
   { id: "N-tcp-vs-udp", klass: "general-knowledge", relevant: false, probe: "What's the difference between TCP and UDP?" },
 ];
 
+/**
+ * OBLIQUE call-recognition pilot set (spec §8). These are OUTCOME-phrased prompts whose
+ * stored decision is never named in the words — the exact failure mode this pass targets.
+ * Four should-call (each seeded with a decision that materially changes the implementation)
+ * and two should-NOT-call conceptual questions. Six total = the hard-capped live budget.
+ */
+export const PILOT_OBLIQUE_RELEVANT: Scenario[] = [
+  {
+    id: "PO-safety-net",
+    klass: "testing",
+    relevant: true,
+    probe: "Give this parser a safety net.",
+    seed: { rule: "Use Vitest for unit tests.", scope: "global", applicability: "relevant" },
+    expectRuleIncludes: ["vitest"],
+  },
+  {
+    id: "PO-persistence",
+    klass: "database",
+    relevant: true,
+    probe: "Add persistence.",
+    seed: { rule: "Use PostgreSQL for relational persistence.", scope: "global", applicability: "relevant" },
+    expectRuleIncludes: ["postgres", "postgresql"],
+  },
+  {
+    id: "PO-production-ready",
+    klass: "architecture",
+    relevant: true,
+    probe: "Make this production ready.",
+    seed: {
+      rule: "Deploy services to Fly.io with health checks and graceful shutdown.",
+      scope: "global",
+      applicability: "relevant",
+    },
+    expectRuleIncludes: ["fly.io", "fly"],
+  },
+  {
+    id: "PO-clean-up",
+    klass: "architecture",
+    relevant: true,
+    probe: "Clean this up.",
+    seed: {
+      rule: "Follow hexagonal architecture: keep domain logic free of I/O and frameworks.",
+      scope: "repo",
+      applicability: "relevant",
+    },
+    expectRuleIncludes: ["hexagonal"],
+  },
+];
+
+export const PILOT_OBLIQUE_NEG: Scenario[] = [
+  {
+    id: "PO-neg-eviction",
+    klass: "general-knowledge",
+    relevant: false,
+    probe: "Explain how Redis cache eviction works.",
+  },
+  {
+    id: "PO-neg-oauth",
+    klass: "general-knowledge",
+    relevant: false,
+    probe: "What is OAuth and how does the authorization-code flow work?",
+  },
+];
+
+export const PILOT_OBLIQUE: Scenario[] = [...PILOT_OBLIQUE_RELEVANT, ...PILOT_OBLIQUE_NEG];
+
+/**
+ * RETRIEVAL-ENGINE live validation set (engine pass, spec §12). Four cases that stress
+ * the engine improvements END-TO-END through a real model: morphology + proper-noun +
+ * domain recall on three should-call tasks (each previously an engine miss or ceiling),
+ * and one explanatory negative that must NOT call under the standing pull policy. The
+ * negative carries a seed too, so the store holds a topically-adjacent Redis preference
+ * the engine's intent gate would refuse even if the model asked.
+ */
+export const PILOT_ENGINE: Scenario[] = [
+  {
+    id: "E-production-ready",
+    klass: "architecture",
+    relevant: true,
+    probe: "Make this production ready.",
+    seed: {
+      rule: "Deploy services to Fly.io with health checks and graceful shutdown.",
+      scope: "global",
+      applicability: "relevant",
+    },
+    expectRuleIncludes: ["fly.io", "fly"],
+  },
+  {
+    id: "E-job-queue",
+    klass: "architecture",
+    relevant: true,
+    probe: "Add a job queue.",
+    seed: { rule: "Use BullMQ for background jobs.", scope: "global", applicability: "relevant" },
+    expectRuleIncludes: ["bullmq"],
+  },
+  {
+    id: "E-persistence",
+    klass: "database",
+    relevant: true,
+    probe: "Add production persistence.",
+    seed: { rule: "Prefer Postgres in production.", scope: "global", applicability: "relevant" },
+    expectRuleIncludes: ["postgres"],
+  },
+  {
+    id: "E-neg-redis-eviction",
+    klass: "general-knowledge",
+    relevant: false,
+    probe: "Explain how Redis eviction works.",
+    // seeded so the store holds an adjacent decision; the pull policy should keep the
+    // model from calling at all, and the engine's intent gate is the backstop.
+    seed: { rule: "Prefer Redis for caching.", scope: "global", applicability: "relevant" },
+  },
+];
+
 export const ALL_SCENARIOS: Scenario[] = [...RELEVANT, ...IRRELEVANT];
 
 /** Every distinct seed to install once into the isolated store before any trial. */

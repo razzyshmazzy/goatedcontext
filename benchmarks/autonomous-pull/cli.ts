@@ -14,7 +14,15 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { RELEVANT, IRRELEVANT, ALL_SCENARIOS } from "./scenarios.ts";
+import {
+  RELEVANT,
+  IRRELEVANT,
+  ALL_SCENARIOS,
+  PILOT_OBLIQUE,
+  PILOT_OBLIQUE_RELEVANT,
+  PILOT_OBLIQUE_NEG,
+  PILOT_ENGINE,
+} from "./scenarios.ts";
 import {
   setupSandbox,
   deterministicPass,
@@ -29,7 +37,14 @@ import {
   type DeterministicResult,
   type PilotTrial,
 } from "./score.ts";
-import { setupCorpusSandbox, runCorpus, summarize as summarizeCorpus, CORPUS } from "./retrieval-corpus.ts";
+import {
+  setupCorpusSandbox,
+  runCorpus,
+  summarize as summarizeCorpus,
+  CORPUS,
+  OBLIQUE_CALL,
+} from "./retrieval-corpus.ts";
+import { setupSemanticSandbox, runSemantic, summarizeSemantic } from "./semantic-corpus.ts";
 
 const HARD_CAP = 10; // spec §14: MAXIMUM 10 real model calls.
 
@@ -120,6 +135,99 @@ function cmdCorpus() {
   }
 }
 
+/**
+ * Focused OBLIQUE-CALL corpus (spec §6): does an oblique request's implied decision axis
+ * map to a stored preference (should-call retrieval success), and do conceptual look-alikes
+ * stay clean (should-not-call precision)? Isolated sandbox so it never perturbs CORPUS.
+ */
+function cmdOblique() {
+  const sb = setupCorpusSandbox(OBLIQUE_CALL);
+  try {
+    const results = runCorpus(sb, OBLIQUE_CALL);
+    const s = summarizeCorpus(results);
+    const pct = (f: { num: number; den: number }) =>
+      f.den === 0 ? `${f.num}/${f.den} (n/a)` : `${f.num}/${f.den} (${Math.round((f.num / f.den) * 100)}%)`;
+    log("\n== Oblique-call corpus (no model) ==\n");
+    log("SHOULD CALL — [P]=raw-probe hit, [Q]=expanded-query hit  (* = documented engine ceiling):");
+    for (const r of results.filter((x) => x.relevant)) {
+      const star = r.knownEngineMiss ? " *" : "";
+      log(`  [${r.probeHit ? "P" : "-"}${r.queryHit ? "Q" : "-"}]  ${r.id.padEnd(20)} ${r.klass}${star}`);
+    }
+    log("\nSHOULD NOT CALL — expect NOTHING if queried (leak = engine surfaces an adjacent concept):");
+    for (const r of results.filter((x) => !x.relevant)) {
+      log(`  ${r.probeHit || r.queryHit ? "✗ LEAK" : "✓"}  ${r.id.padEnd(20)} ${r.klass}`);
+    }
+    log("\nSummary (recall = correctly-formed oblique query lands; precision = look-alikes clean):");
+    const rel = results.filter((x) => x.relevant);
+    const ceilings = rel.filter((x) => x.knownEngineMiss);
+    const scored = rel.filter((x) => !x.knownEngineMiss);
+    const barRecall = { num: scored.filter((x) => x.queryHit).length, den: scored.length };
+    const leaks = results.filter((x) => !x.relevant && (x.probeHit || x.queryHit));
+    log(`  cases                 : ${OBLIQUE_CALL.length} (${s.relevant} should-call, ${s.negative} should-not-call)`);
+    log(`  should-call recall [P]: ${pct(s.probeRecall)}   (raw oblique prompt, no query construction)`);
+    log(`  should-call recall [Q]: ${pct(s.queryRecall)}   (expanded semantic query, ALL cases)`);
+    log(`  recall [Q] ex-ceiling : ${pct(barRecall)}   (excludes ${ceilings.length} documented engine ceiling(s): ${ceilings.map((c) => c.id).join(", ") || "none"})`);
+    log(`  query-construction gain: +${s.queryRecall.num - s.probeRecall.num} cases (probe to query)`);
+    log(`  should-not precision[Q]: ${pct(s.queryPrecision)}`);
+    if (leaks.length) {
+      log(`\n  ENGINE PRECISION NOTE: ${leaks.length} conceptual look-alike(s) surface a seed if queried verbatim:`);
+      for (const l of leaks) log(`    - ${l.id} (adjacent to a seeded decision); defended by the no-call policy, not the engine.`);
+    }
+    // PASS when the layers THIS pass owns hit target: oblique query recall (excluding
+    // documented engine ceilings) >= 90%. Engine precision/recall ceilings are reported, not gated.
+    const ok = barRecall.den > 0 && barRecall.num / barRecall.den >= 0.9;
+    log(`\n${ok ? "OBLIQUE CORPUS PASS (policy+query layer)" : "OBLIQUE CORPUS BELOW TARGET"}`);
+    process.exitCode = ok ? 0 : 1;
+  } finally {
+    sb.cleanup();
+  }
+}
+
+/**
+ * Focused retrieval-ENGINE corpus (spec §9–§11): semantic-equivalence / morphology /
+ * proper-noun recall vs adjacent-topic & unrelated precision, in ONE multi-seed store.
+ * Reports every §10 metric separately — no single aggregate hiding a tradeoff.
+ */
+function cmdSemantic() {
+  const sb = setupSemanticSandbox();
+  try {
+    const results = runSemantic(sb);
+    const s = summarizeSemantic(results);
+    const pct = (f: { num: number; den: number }) =>
+      f.den === 0 ? `${f.num}/${f.den} (n/a)` : `${f.num}/${f.den} (${Math.round((f.num / f.den) * 100)}%)`;
+    log("\n== Retrieval-engine corpus (no model) ==\n");
+    log("POSITIVES — [R]=recalled, [1]=ranked #1, n=returned count:");
+    for (const r of results.filter((x) => x.recalled !== null)) {
+      log(`  [${r.recalled ? "R" : "-"}${r.top1 ? "1" : "-"}] n=${r.returnedCount}  ${r.id.padEnd(16)} ${r.klass}`);
+    }
+    log("\nNEGATIVES — leak = a stored preference wrongly surfaced:");
+    for (const r of results.filter((x) => x.leaked !== null)) {
+      log(`  ${r.leaked ? "✗ LEAK" : "✓"}  n=${r.returnedCount}  ${r.id.padEnd(16)} ${r.klass}`);
+    }
+    log("\n== Metrics (each reported separately; spec §10) ==");
+    log(`  morphology recall      : ${pct(s.morphologyRecall)}`);
+    log(`  semantic-equiv recall  : ${pct(s.semanticRecall)}`);
+    log(`  proper-noun recall     : ${pct(s.properNounRecall)}`);
+    log(`  adjacent-topic precision: ${pct(s.adjacentPrecision)}`);
+    log(`  unrelated precision    : ${pct(s.unrelatedPrecision)}`);
+    log(`  top-1 accuracy         : ${pct(s.top1)}`);
+    log(`  avg candidate count    : ${s.avgCandidates.toFixed(2)}`);
+    log(`  false-positive rate    : ${pct(s.falsePositiveRate)}`);
+    const posRecall =
+      s.morphologyRecall.num + s.semanticRecall.num + s.properNounRecall.num;
+    const posDen = s.morphologyRecall.den + s.semanticRecall.den + s.properNounRecall.den;
+    const negNum = s.adjacentPrecision.num + s.unrelatedPrecision.num;
+    const negDen = s.adjacentPrecision.den + s.unrelatedPrecision.den;
+    log(`\n  overall positive recall: ${pct({ num: posRecall, den: posDen })}`);
+    log(`  overall negative prec. : ${pct({ num: negNum, den: negDen })}`);
+    const ok = posRecall / posDen >= 0.95 && negNum / negDen >= 0.95;
+    log(`\n${ok ? "ENGINE CORPUS PASS (≥95/≥95)" : "ENGINE CORPUS BELOW 95/95 TARGET"}`);
+    process.exitCode = ok ? 0 : 1;
+  } finally {
+    sb.cleanup();
+  }
+}
+
 /** Show that tool-call capture works WITHOUT a model: parse a synthetic transcript. */
 function cmdParseCheck() {
   const fixture = [
@@ -148,10 +256,26 @@ function cmdParseCheck() {
 }
 
 async function cmdPilot(flags: Record<string, string | boolean>) {
-  const relN = flags.relevant != null ? Number(flags.relevant) : 3;
-  const irrN = flags.irrelevant != null ? Number(flags.irrelevant) : 3;
+  // --oblique: outcome-phrased call-recognition set (spec §8). --engine: retrieval-engine
+  // validation set (spec §12, this pass). Otherwise the v1.1 set.
+  const oblique = flags.oblique === true;
+  const engine = flags.engine === true;
+  const relPool = engine
+    ? PILOT_ENGINE.filter((s) => s.relevant)
+    : oblique
+      ? PILOT_OBLIQUE_RELEVANT
+      : RELEVANT;
+  const irrPool = engine
+    ? PILOT_ENGINE.filter((s) => !s.relevant)
+    : oblique
+      ? PILOT_OBLIQUE_NEG
+      : IRRELEVANT;
+  const presetAll = oblique || engine;
+  const relN = flags.relevant != null ? Number(flags.relevant) : presetAll ? relPool.length : 3;
+  const irrN = flags.irrelevant != null ? Number(flags.irrelevant) : presetAll ? irrPool.length : 3;
   const max = flags.max != null ? Number(flags.max) : HARD_CAP;
-  const scenarios = [...RELEVANT.slice(0, relN), ...IRRELEVANT.slice(0, irrN)];
+  const scenarios = [...relPool.slice(0, relN), ...irrPool.slice(0, irrN)];
+  const seedScenarios = engine ? PILOT_ENGINE : oblique ? PILOT_OBLIQUE : RELEVANT;
   const planned = scenarios.length; // one trial each
   const model = process.env.CTXBENCH_MODEL ?? null;
   const enabled = process.env.CTXBENCH_ENABLE_CLAUDE === "1";
@@ -187,7 +311,7 @@ async function cmdPilot(flags: Record<string, string | boolean>) {
     join(process.cwd(), "benchmarks", "results", "autonomous-pull-transcripts");
   mkdirSync(transcriptDir, { recursive: true });
 
-  const sb: Sandbox = setupSandbox();
+  const sb: Sandbox = setupSandbox(seedScenarios);
   let trials: PilotTrial[] = [];
   try {
     // Deterministic truth for each scenario's canonical probe (splits bad_query vs miss).
@@ -252,6 +376,12 @@ switch (cmd) {
   case "corpus":
     cmdCorpus();
     break;
+  case "oblique":
+    cmdOblique();
+    break;
+  case "semantic":
+    cmdSemantic();
+    break;
   case "parse-check":
     cmdParseCheck();
     break;
@@ -263,6 +393,6 @@ switch (cmd) {
     for (const s of ALL_SCENARIOS) log(`  ${s.relevant ? "R" : "N"}  ${s.id.padEnd(26)} ${JSON.stringify(s.probe)}`);
     break;
   default:
-    log("usage: cli.ts <deterministic|corpus|parse-check|pilot|scenarios> [flags]");
+    log("usage: cli.ts <deterministic|corpus|oblique|semantic|parse-check|pilot|scenarios> [flags]");
     process.exitCode = 1;
 }

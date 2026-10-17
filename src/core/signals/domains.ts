@@ -212,6 +212,56 @@ export function isNamingIntent(text: string): boolean {
   return NAMING_PHRASES.some((p) => phrase.includes(` ${p} `));
 }
 
+/**
+ * EXPLANATORY / CONCEPTUAL intent (retrieval-engine pass). Distinguishes a query asking
+ * ABOUT a topic in general ("what is a queue?", "explain how Redis eviction works",
+ * "what is Fly.io?") from one asking WHICH technology we use or HOW to implement
+ * something here ("what database do we use?", "add a job queue", "set up caching").
+ *
+ * Why it matters: a stored decision ("Prefer Redis for caching", "Use BullMQ for jobs")
+ * lexically overlaps a conceptual question about the same entity, so the retrieval engine
+ * would surface the preference as if the user were asking for it — the adjacent-concept
+ * false positive (spec §4, §7, §E). The call policy usually prevents the agent from even
+ * asking, but the engine itself should resist injecting a preference into a purely
+ * educational query.
+ *
+ * Detection is deliberately CONSERVATIVE and symmetric with the other intent matchers:
+ * an explanatory LEAD ("what is", "how does", "explain", "why is", "difference between")
+ * fires ONLY when the text carries no ownership/decision signal (first/second person,
+ * "use/prefer/decide/convention", "here/this repo", an implementation verb). That
+ * ownership guard is what keeps decision-seeking questions ("what caching do WE USE?")
+ * and implementation requests ("ADD a job queue") OUT of the explanatory class. Pure and
+ * deterministic; never a phrase blacklist of topics.
+ */
+const EXPLANATORY_LEADS = [
+  "what is", "what are", "what was", "what were", "whats", "what s",
+  "what does", "what do", "how does", "how do", "how is", "how are",
+  "explain", "describe", "define", "definition of", "overview of", "tell me about",
+  "why does", "why is", "why are", "why do", "difference between", "what happens when",
+];
+/**
+ * Ownership / decision markers. Their PRESENCE flips a query out of the explanatory
+ * class — it is about THIS developer/repo's choice, not a concept. Matched on the padded
+ * phrase (so stopword pronouns like "we"/"our"/"you", which `contentTokens` would drop,
+ * are still seen).
+ */
+const OWNERSHIP_DECISION_MARKERS = [
+  "we", "our", "ours", "us", "i", "my", "me", "mine", "you", "your", "yours",
+  "here", "this repo", "this project", "this codebase", "in this", "do we", "should i",
+  "use", "using", "used", "prefer", "preferred", "decide", "decided", "decision",
+  "convention", "standard", "set up", "setup", "configure", "choose", "chosen", "pick",
+  "add", "install", "wire", "ship", "implement",
+];
+
+/** Whether a query is a general/explanatory question with no project-decision intent. */
+export function isExplanatoryIntent(text: string): boolean {
+  const phrase = phraseForm(text);
+  const hasLead = EXPLANATORY_LEADS.some((p) => phrase.includes(` ${p} `));
+  if (!hasLead) return false;
+  const hasOwnership = OWNERSHIP_DECISION_MARKERS.some((w) => phrase.includes(` ${w} `));
+  return !hasOwnership;
+}
+
 /** Canonicalize any raw/normalized domain token to its shared canonical form. */
 export function canonicalDomain(raw: string): string {
   const n = normalizeDomain(raw);
@@ -247,6 +297,7 @@ export const CANONICAL_DOMAINS: ReadonlySet<string> = new Set<string>([
   "error-handling",
   "formatting",
   "infrastructure",
+  "security",
   "response-language",
 ]);
 

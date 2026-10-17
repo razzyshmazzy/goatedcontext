@@ -20,7 +20,7 @@
  */
 
 /** Bump when the policy text below changes in a way installers must re-sync. */
-export const PULL_POLICY_VERSION = "2";
+export const PULL_POLICY_VERSION = "3";
 
 /**
  * The core concept (~60 tokens), command- and agent-neutral. Teaches the latent
@@ -34,8 +34,14 @@ export const PULL_POLICY_CORE =
   "prior technical choices, and known exceptions — is available through ctx, and " +
   "relevant context is often injected for you automatically. Before a choice that " +
   "could reasonably depend on how this developer or repository usually works, make " +
-  "sure you have that context: retrieve it when it was not already provided. Do not " +
-  "retrieve for requests that clearly do not depend on developer/project context.";
+  "sure you have that context: retrieve it when it was not already provided. Oblique " +
+  "requests count: a task phrased as an outcome rather than a named decision often " +
+  "still hides such a choice — translate the goal into the decision axis it implies " +
+  "(testing, dependencies, persistence, architecture, style, runtime, deployment, " +
+  "security, naming, or tooling) and check that too. The test is whether the right " +
+  "implementation could depend on an existing user or project decision, not whether " +
+  "the task is vague. Do not retrieve for requests that clearly do not depend on " +
+  "developer/project context.";
 
 /**
  * A few COMPACT boundary examples. Kept deliberately diverse (not a closed list) so
@@ -53,6 +59,7 @@ export const PULL_POLICY_EXAMPLES_RETRIEVE = [
   "how the user wants to be addressed, named, or referred to",
   "a decision this project already settled (how auth works, how errors are represented, an API shape)",
   "a known exception or a correction the developer has made before",
+  "an outcome-phrased request that implies an unstated choice (\"give this a safety net\" → tests, \"make it production-ready\" → deployment/runtime, \"add persistence\" → database)",
 ];
 
 /**
@@ -93,10 +100,16 @@ export const PULL_POLICY_QUERY_GUIDANCE =
   "decision and its object, and that it concerns this developer's or repository's " +
   "convention. Lead with the intent category when one fits — dependency, testing, " +
   "database, architecture, tooling, formatting/style, language/runtime, deployment, " +
-  "security, naming/identity, or a repo convention. For example: \"add uuid\" → " +
-  "\"dependency / package choice for adding uuid in this repo\"; \"add tests\" → " +
-  "\"testing framework and conventions for this repository\"; \"what do you call me?\" → " +
-  "\"the user's preferred name / how they want to be addressed\". Keep it to one concise " +
+  "security, naming/identity, or a repo convention. For an oblique, outcome-phrased " +
+  "task, name the decision it implies rather than its surface words: \"give this a " +
+  "safety net\" → \"testing framework and conventions for this repository\"; \"ship " +
+  "this\" → \"deployment / release convention for this repository\". For example: " +
+  "\"add uuid\" → \"dependency / package choice for adding uuid in this repo\"; " +
+  "\"add tests\" → \"testing framework and conventions for this repository\"; " +
+  "\"what do you call me?\" → \"the user's preferred name / how they want to be " +
+  "addressed\". Prefer concrete, content-bearing terms — the action, the artifact, and " +
+  "plausible concrete options — over abstract nouns alone (\"how we deploy to " +
+  "production\", not just \"production readiness\"). Keep it to one concise " +
   "phrase; ctx augments it with the repository, active files, and language on its own.";
 
 export const PULL_POLICY_EXAMPLES_SKIP = [
@@ -152,7 +165,9 @@ export const GET_CONTEXT_TOOL_DESCRIPTION =
   "established preferences, conventions, prior technical choices, how the user wants to " +
   "be addressed, and contextual exceptions. Call this before a choice that could " +
   "reasonably depend on how this developer or repository usually works (dependencies, " +
-  "testing, persistence, language/runtime, tooling, architecture, naming), when that " +
+  "testing, persistence, language/runtime, tooling, architecture, naming) — including " +
+  "when the request is phrased as an outcome (\"give this a safety net\", \"make it " +
+  "production-ready\", \"ship this\") that hides such a choice — when that " +
   "context was not already provided this turn — and always when the user explicitly " +
   "asks you to (\"ctx it\", \"check ctx\", \"check memory\"), building the query from " +
   "their immediately preceding request, not the command words. Do not call it for " +
@@ -172,7 +187,9 @@ export const MCP_SERVER_INSTRUCTIONS =
   "Call get_context before a choice that could reasonably depend on the developer's " +
   "established preferences, this repository's conventions, prior technical choices, " +
   "how the user wants to be addressed, or known exceptions — unless that context was " +
-  "already provided this turn — and whenever the user explicitly asks you to check " +
+  "already provided this turn. Oblique, outcome-phrased requests count: translate " +
+  "them into the decision they imply (testing, persistence, deployment, and so on) " +
+  "and check that too. Call it whenever the user explicitly asks you to check " +
   "(\"ctx it\", \"check ctx\", \"check memory\"), querying for their immediately " +
   "preceding request rather than the command words. Pass a concise semantic query " +
   "naming the underlying decision, not a bare keyword echo. Skip it for clearly " +

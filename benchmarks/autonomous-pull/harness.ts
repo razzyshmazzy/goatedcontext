@@ -56,8 +56,8 @@ export function runCtx(args: string[], ctxHome: string, cwd: string, stdin?: str
   return { code: res.status ?? 1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
-/** Create an isolated CTX_HOME + git repo and seed every RELEVANT preference once. */
-export function setupSandbox(): Sandbox {
+/** Create an isolated CTX_HOME + git repo and seed every relevant preference once. */
+export function setupSandbox(seedScenarios: Scenario[] = RELEVANT): Sandbox {
   const ctxHome = mkdtempSync(join(tmpdir(), "ctxpull-home-"));
   const repo = mkdtempSync(join(tmpdir(), "ctxpull-repo-"));
   const git = (a: string[]) => spawnSync("git", a, { cwd: repo, stdio: "ignore" });
@@ -65,7 +65,7 @@ export function setupSandbox(): Sandbox {
   git(["remote", "add", "origin", "https://github.com/acme/pull-bench.git"]);
   runCtx(["init"], ctxHome, repo);
 
-  for (const { seed } of seedsFor(RELEVANT)) {
+  for (const { seed } of seedsFor(seedScenarios)) {
     const args = ["agent", "remember", seed.rule, "--origin", "user", "--scope", seed.scope, "--agent-id", "ctxpull"];
     if (seed.applicability === "always") args.push("--always");
     const r = runCtx(args, ctxHome, repo);
